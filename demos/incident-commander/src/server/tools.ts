@@ -137,11 +137,11 @@ function factoryTools(host: ToolHost): Tool<unknown>[] {
       parameters: {
         type: "object",
         properties: {
-          summary: { type: "string", description: "One line: what's broken, for example: Checkout crashes on expired coupon codes." },
+          summary: { type: "string", description: "One line: what's broken, for example: Uploads over 10 MB time out." },
           rootCause: { type: "string", description: "The root cause: one or two sentences." },
-          failingPath: { type: "string", description: "The failing code path, with file:line, for example: POST /checkout → priceCart (src/cart.js:21) → applyDiscount (src/discounts.js:14)." },
+          failingPath: { type: "string", description: "The failing code path, with file:line, for example: POST /uploads → saveUpload (src/uploads.js:42) → writeChunk (src/storage.js:17)." },
           expected: { type: "string", description: "What the code should do instead." },
-          files: listOf("The service files the fix likely touches, relative to the service's folder, for example src/discounts.js."),
+          files: listOf("The service files the fix likely touches, relative to the service's folder, for example src/storage.js."),
         },
         required: ["summary", "rootCause", "failingPath", "expected", "files"],
       },
@@ -190,7 +190,7 @@ export function incidentTools(host: ToolHost, options: { readonly factory?: bool
         type: "object",
         properties: {
           summary: { type: "string", description: "One line: what the fix changes." },
-          files: listOf("The changed and added files, relative to the service's folder, for example src/discounts.js."),
+          files: listOf("The changed and added files, relative to the service's folder, for example src/storage.js and test/storage.test.js."),
           tests: { type: "string", description: "The test result in your sandbox, for example: 10 passed, 0 failed." },
         },
         required: ["summary", "files"],

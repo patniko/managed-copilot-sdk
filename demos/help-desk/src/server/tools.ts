@@ -23,23 +23,23 @@ export const TOOLS: readonly ToolInfo[] = [
 
 const orderId = z.string().min(1).max(40).describe("The order number, for example CO-48213");
 const OrderInput = z.object({ orderId });
-const RefundInput = z.object({
+export const RefundInput = z.object({
   orderId,
   amount: z.number().positive().optional().describe("Dollars to refund, for a partial refund. Omit it to refund everything not refunded yet."),
   reason: z.string().max(300).describe("Why, in a few words"),
 });
 const CancelInput = z.object({ orderId, reason: z.string().max(300).describe("Why, in a few words") });
-const BugInput = z.object({
+export const BugInput = z.object({
   area: z.enum(BUG_AREAS).describe("What it's about: promo-codes (a code at checkout), cart (items, quantities, or totals in the cart), order-status (the status the My orders page shows), or other"),
   title: z.string().trim().min(3).max(120).describe("One line: what's wrong on the website"),
   whatHappened: z.string().trim().min(3).max(800).describe("What they did on the website and what they saw, with the details they gave: codes, quantities, labels"),
   expected: z.string().trim().min(3).max(400).describe("What the website should have done"),
   orderId: orderId.optional().describe("The order it affected, if any, for example CO-48213"),
 });
-const ResolveInput = z.object({ summary: z.string().max(300).describe("One line: what was done for the customer") });
+export const ResolveInput = z.object({ summary: z.string().max(300).describe("One line: what was done for the customer") });
 
 /** Runs `run` with the arguments `schema` accepts, or tells the agent what was wrong with them. */
-function withInput<T>(schema: z.ZodType<T>, args: unknown, run: (input: T) => ToolResult): ToolResult {
+export function withInput<T>(schema: z.ZodType<T>, args: unknown, run: (input: T) => ToolResult): ToolResult {
   const parsed = schema.safeParse(args ?? {});
   if (!parsed.success) return { ok: false, error: `Invalid arguments: ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "input"} ${issue.message}`).join("; ")}` };
   return run(parsed.data);
@@ -99,12 +99,17 @@ export function checkRequest(shop: Shop, customerId: string, tool: string, args:
 
 const WEEKDAY = new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: "UTC" });
 
+/** This month's promotion codes and their terms, as the agents are told them. */
+export function promotionList(): string {
+  return Object.entries(PROMOTIONS)
+    .map(([code, promotion]) => `${code} (${promotion.terms})`)
+    .join(", ");
+}
+
 /** Added to the platform's instructions for every customer's session. */
 export function systemMessage(customer: CustomerSeed, shop: Shop): string {
   const first = customer.name.split(" ")[0] ?? customer.name;
-  const promotions = Object.entries(PROMOTIONS)
-    .map(([code, promotion]) => `${code} (${promotion.terms})`)
-    .join(", ");
+  const promotions = promotionList();
   return [
     `You are the support assistant of Contoso Outdoors, an online outdoor gear store. You're chatting with ${first}, a signed-in customer, in the store's support widget. Today is ${WEEKDAY.format(shop.startedAt)}, ${shop.date(0)}.`,
     "- Your tools only read and change this customer's own account. Use them instead of guessing; never make up orders, dates, amounts, or tracking details.",

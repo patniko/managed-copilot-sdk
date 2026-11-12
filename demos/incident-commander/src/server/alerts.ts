@@ -12,6 +12,8 @@ export interface IncomingAlert {
 const MAX_ALERTS = 20;
 const MAX_TEXT = 2_000;
 const MAX_LABELS = 40;
+/** How the generic shape says an alert stopped firing. */
+const RESOLVED = /^(resolved|ok|recovered|closed)$/i;
 
 type Json = Record<string, unknown>;
 
@@ -124,7 +126,7 @@ function fromGeneric(item: Json, now: Date): IncomingAlert {
   const summary = text(item.summary) ?? text(item.message) ?? text(item.description) ?? name;
   const description = text(item.description);
   const service = serviceOf(labels, text(item.service, 100));
-  const resolved = /^(resolved|ok|recovered|closed)$/i.test(text(item.status, 20) ?? "");
+  const resolved = RESOLVED.test(text(item.status, 20) ?? "");
   return {
     status: resolved ? "resolved" : "firing",
     alert: {
@@ -153,7 +155,10 @@ export function parseAlertPayload(body: unknown, now = new Date()): IncomingAler
     const grafana = body.orgId !== undefined || items.some((item) => item.dashboardURL !== undefined || item.panelURL !== undefined);
     return items.map((item) => (isObject(item.labels) || isObject(item.annotations) ? fromAlertmanager(item, body, grafana ? "grafana" : "alertmanager", now) : fromGeneric(item, now)));
   }
-  if (text(body.title) ?? text(body.name) ?? text(body.alert) ?? text(body.summary)) return [fromGeneric(body, now)];
+  const named = text(body.title) ?? text(body.name) ?? text(body.alert) ?? text(body.summary);
+  // A resolved notification needs no title: its ID names the alert it resolves.
+  const resolvesById = RESOLVED.test(text(body.status, 20) ?? "") && (text(body.id, 100) ?? text(body.fingerprint, 100) ?? text(body.key, 100)) !== undefined;
+  if (named || resolvesById) return [fromGeneric(body, now)];
   throw new AppError("invalid_request", "That isn't an alert: send an Alertmanager or Grafana notification, or { title, service, severity, summary }.");
 }
 

@@ -189,22 +189,60 @@ export function testConfig(overrides: Partial<HelpDeskConfig> = {}): HelpDeskCon
     countersIntervalMs: 60_000,
     storefrontDir: STOREFRONT_DIR,
     factoryPollMs: 60_000,
+    playerIdleMs: 30 * 60_000,
     ...overrides,
   };
 }
 
 /**
  * A customer tells their agent about a problem with the store's website, and the agent reports it: the session's own
- * `report_bug` tool runs, and the runtime's events for the call follow.
+ * `report_bug` tool runs, and the runtime's events for the call follow. Without `words`, only the report (a player's
+ * first message already said it).
  */
-export async function reportBug(session: FakeSession, words: string, args: Record<string, unknown>): Promise<unknown> {
+export async function reportBug(session: FakeSession, words: string | undefined, args: Record<string, unknown>): Promise<unknown> {
   const toolCallId = `bug-${++sequence}`;
-  session.emit(event("user.message", { content: words }));
+  if (words !== undefined) session.emit(event("user.message", { content: words }));
   session.emit(event("tool.execution_start", { toolCallId, toolName: "report_bug", arguments: args }));
   const result = await session.call("report_bug", args, toolCallId);
   session.emit(event("tool.execution_complete", { toolCallId, success: true, result: { content: JSON.stringify(result) } }));
   return result;
 }
+
+/**
+ * What Downhill's server sends when Mona opens support under a rejected code: the launch offer's code, rejected, after
+ * she bought Neon Mona anyway at full price.
+ */
+export const MONA = {
+  product: "downhill",
+  player: { name: "Mona", rider: "mona" },
+  checkout: {
+    code: "trail15",
+    error: "Invalid code.",
+    offer: "Launch week: 15% off everything with code trail15",
+    items: [{ sku: "mona-neon", name: "Neon Mona", priceCents: 499 }],
+    subtotalCents: 499,
+    order: { id: "DH-1042", totalCents: 499, paidAt: "2026-11-12T17:30:00.000Z" },
+  },
+  gameVersion: "1.0.0",
+  userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+  at: "2026-11-12T17:30:00.000Z",
+} as const;
+
+/** Mona's request with changes: `checkout: undefined` leaves it out (she hasn't tried a checkout), as do other keys. */
+export function monaWith(changes: { readonly checkout?: Record<string, unknown> | undefined; readonly [key: string]: unknown }): Record<string, unknown> {
+  const { checkout, ...rest } = changes;
+  const { checkout: _mona, ...base } = MONA;
+  return { ...base, ...rest, ...("checkout" in changes && checkout === undefined ? {} : { checkout: { ...MONA.checkout, ...checkout } }) };
+}
+
+/** What Mona's agent reports with `report_bug`. */
+export const MONA_REPORT = {
+  area: "promo-codes",
+  title: "Launch code trail15 rejected in the Downhill Shop",
+  whatHappened: "The shop's launch banner applied trail15 and checkout said 'Invalid code.', so she paid $4.99 for Neon Mona.",
+  expected: "trail15 takes 15% off, as the banner says.",
+  orderId: "DH-1042",
+} as const;
 
 /** A Software Factory that keeps its work orders in memory and records what it was sent. */
 export class FakeFactory implements FactoryClient {

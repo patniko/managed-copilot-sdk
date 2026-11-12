@@ -61,6 +61,9 @@ describe("alerts", () => {
     expect(first?.alert).toMatchObject({ source: "generic", name: "Payments latency", summary: "p99 is 2.4 s", service: "payments-api", severity: "SEV3", startsAt: NOW.toISOString() });
     expect(first?.alert.fingerprint).toBe(second?.alert.fingerprint);
     expect(parseAlertPayload({ ...body, status: "resolved", id: "pay-1" }, NOW)[0]).toMatchObject({ status: "resolved", alert: { fingerprint: "pay-1" } });
+    // A resolved notification may name its alert by ID alone; a firing one needs a title.
+    expect(parseAlertPayload({ id: "pay-1", status: "resolved" }, NOW)[0]).toMatchObject({ status: "resolved", alert: { fingerprint: "pay-1", resolvedAt: NOW.toISOString() } });
+    expect(() => parseAlertPayload({ id: "pay-1" }, NOW)).toThrow(/isn't an alert/);
   });
 
   it("refuses what isn't an alert", () => {

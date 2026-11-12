@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { STATUS_LABEL, workOrderLabel } from "../../shared/factory.js";
-import type { AnalysisSummary, AnalysisView, AttachResponse, DatasetSummary, EnvironmentView, FactoryStatus, PlatformStatus, SendToFactoryRequest, ServerEvent } from "../../shared/types.js";
+import type { AnalysisSummary, AnalysisView, AttachResponse, DatasetSummary, EnvironmentView, FactoryStatus, PlatformStatus, RemoteSampleSummary, SendToFactoryRequest, ServerEvent } from "../../shared/types.js";
 import { api, errorMessage } from "./api.js";
 import { analysisHref, homeHref, navigate, parseHash } from "./router.js";
 import { toast } from "./toast.js";
@@ -23,6 +23,8 @@ export interface StoreState {
   readonly platform?: PlatformStatus;
   readonly environments: readonly EnvironmentView[];
   readonly datasets: readonly DatasetSummary[];
+  /** Samples fetched fresh from other apps when picked (Downhill's shop sales), listed first. */
+  readonly remoteSamples: readonly RemoteSampleSummary[];
   /** Most recently updated first. */
   readonly analyses: readonly AnalysisSummary[];
   readonly views: Readonly<Record<string, AnalysisView>>;
@@ -39,6 +41,7 @@ const initialState: StoreState = {
   connection: "connecting",
   environments: [],
   datasets: [],
+  remoteSamples: [],
   analyses: [],
   views: {},
   viewErrors: {},
@@ -99,6 +102,7 @@ async function loadState(): Promise<void> {
       platform: loaded.platform,
       environments: loaded.environments,
       datasets: loaded.datasets,
+      remoteSamples: loaded.remoteSamples ?? [],
       analyses: loaded.analyses,
       attachCommand: loaded.attachCommand,
       canLaunchTerminal: loaded.canLaunchTerminal,

@@ -1,9 +1,10 @@
-import { CheckCircleFillIcon, FileDiffIcon, InfoIcon, RocketIcon, ShieldIcon, WorkflowIcon, XCircleFillIcon } from "@primer/octicons-react";
+import { CheckCircleFillIcon, FileDiffIcon, InfoIcon, RocketIcon, ServerIcon, ShieldIcon, WorkflowIcon, XCircleFillIcon } from "@primer/octicons-react";
 import { useState } from "react";
 import type { ApprovalView, FileChange, IncidentView } from "../../shared/types.js";
 import { api, errorMessage } from "../lib/api.js";
-import { between, clock, cx, duration, workOrderLabel } from "../lib/format.js";
+import { between, clock, cx, duration, nextVersion, workOrderLabel } from "../lib/format.js";
 import { useNow } from "../lib/hooks.js";
+import { useStore } from "../lib/store.js";
 import { Spinner, Tooltip } from "./ui.js";
 
 function FileDiff({ file }: { readonly file: FileChange }) {
@@ -44,9 +45,32 @@ function FileDiff({ file }: { readonly file: FileChange }) {
   );
 }
 
+/** Where an approved fix goes: the demo service's simulated production, or your deploy pipeline (as the next version). */
+function Destination({ incident }: { readonly incident: IncidentView }) {
+  const next = nextVersion(incident.serviceVersion);
+  const release = (
+    <span className="font-mono">
+      {incident.service}
+      {next ? ` v${next}` : ""}
+    </span>
+  );
+  return incident.demo ? (
+    <span className="inline-flex items-center gap-1.5">
+      <ServerIcon size={16} />
+      Releases {release} to the demo's simulated production
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1.5">
+      <RocketIcon size={16} />
+      Goes to your deploy pipeline as {release}
+    </span>
+  );
+}
+
 /** What waits for a person: deploy the verified fix, or decline it with a reason. */
 function Waiting({ incident, approval }: { readonly incident: IncidentView; readonly approval: ApprovalView }) {
   const now = useNow();
+  const pipeline = useStore((state) => state.integrations?.deployConfigured);
   const [busy, setBusy] = useState<"approve" | "decline">();
   const [declining, setDeclining] = useState(false);
   const [reason, setReason] = useState("");
@@ -73,6 +97,7 @@ function Waiting({ incident, approval }: { readonly incident: IncidentView; read
       <div className="flex flex-col gap-3 p-4">
         <p className="text-base">{approval.summary}</p>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-fg-muted">
+          <Destination incident={incident} />
           {approval.tests ? (
             <span className="inline-flex items-center gap-1.5">
               <CheckCircleFillIcon size={16} className="text-fg-success" />
@@ -98,6 +123,9 @@ function Waiting({ incident, approval }: { readonly incident: IncidentView; read
           ) : null}
         </div>
         {approval.problem ? <div className="flash flash-warn flash-sm">{approval.problem}</div> : null}
+        {!incident.demo && pipeline === false ? (
+          <div className="flash flash-warn flash-sm">No deploy pipeline is configured, so this deploy can't go out. Set INCIDENT_DEPLOY_URL to send approved fixes to yours.</div>
+        ) : null}
         {approval.files.length ? (
           <details>
             <summary className="text-sm font-semibold text-fg-accent">Review the change</summary>

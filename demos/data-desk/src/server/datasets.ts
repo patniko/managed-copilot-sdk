@@ -1,12 +1,14 @@
-// The datasets an analysis can start from: the bundled samples, and CSV files people upload (kept in the data
-// directory). Memory stays bounded however many files people upload: only the newest uploads are kept (older ones are
-// dropped, files included), and only their summaries stay in memory; a few at a time are kept parsed.
+// The datasets an analysis can start from: the bundled samples, CSV files people upload (kept in the data directory),
+// and copies of remote samples, fetched fresh each time one is picked and kept the way uploads are. Memory stays
+// bounded however many files people upload: only the newest uploads are kept (older ones are dropped, files included),
+// and only their summaries stay in memory; a few at a time are kept parsed.
 import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ColumnInfo, DatasetSummary, SuggestedPrompt } from "../shared/types.js";
+import type { ColumnInfo, DatasetSummary, RemoteSampleSummary, SuggestedPrompt } from "../shared/types.js";
 import { DeskError, errorText } from "./errors.js";
 import { log } from "./log.js";
+import { fetchSample, readSample, type RemoteSample } from "./remote.js";
 import { Table, TableError } from "./table.js";
 
 export interface Sample {
@@ -66,6 +68,8 @@ export const SAMPLES: readonly Sample[] = [
 
 export interface Dataset {
   readonly summary: DatasetSummary;
+  /** What the columns mean, for the agent: a remote sample's notes. */
+  readonly notes?: string;
   /** The parsed file; an upload that isn't in memory is read again. Throws once the dataset is no longer available. */
   table(): Table;
   /** The file as it was uploaded, copied into the sandbox when the session moves. */
@@ -82,15 +86,46 @@ export interface UploadLimits {
   readonly maxParsedBytes: number;
 }
 
+export interface DatasetsOptions extends Partial<UploadLimits> {
+  /** Samples other apps serve (`remoteSamples(config)`): each pick fetches a fresh copy. */
+  readonly remote?: readonly RemoteSample[];
+  /** How long fetching a remote sample may take. Default 10 seconds. */
+  readonly fetchTimeoutMs?: number;
+  /** Replaces the global `fetch` for remote samples (tests). */
+  readonly fetch?: typeof fetch;
+}
+
+/** A remote sample's copy: what the sample says about itself. */
+interface RemoteCopy {
+  /** The remote sample's ID. */
+  readonly sample: string;
+  readonly description: string;
+  readonly prompts: readonly SuggestedPrompt[];
+  readonly notes?: string;
+}
+
 interface UploadMeta {
   readonly name: string;
   readonly fileName: string;
   readonly uploadedAt: string;
+  /** Set for a remote sample's copy, which isn't listed: picking the sample fetches a new one. */
+  readonly remote?: RemoteCopy;
+}
+
+function isRemoteCopy(value: unknown): value is RemoteCopy {
+  const copy = value as Partial<RemoteCopy> | null;
+  return (
+    typeof copy?.sample === "string" &&
+    typeof copy.description === "string" &&
+    (copy.notes === undefined || typeof copy.notes === "string") &&
+    Array.isArray(copy.prompts) &&
+    copy.prompts.every((prompt: Partial<SuggestedPrompt> | null) => typeof prompt?.text === "string" && (prompt.needs === "tools" || prompt.needs === "code"))
+  );
 }
 
 function isUploadMeta(value: unknown): value is UploadMeta {
   const meta = value as Partial<UploadMeta> | null;
-  return typeof meta?.name === "string" && typeof meta.fileName === "string" && typeof meta.uploadedAt === "string";
+  return typeof meta?.name === "string" && typeof meta.fileName === "string" && typeof meta.uploadedAt === "string" && (meta.remote === undefined || isRemoteCopy(meta.remote));
 }
 
 /** Data Desk's files in the uploads folder: each upload's CSV file and details, and what an interrupted write left. */
@@ -165,6 +200,15 @@ function summarize(id: string, name: string, fileName: string, table: Table, byt
   };
 }
 
+/** An upload's summary; a remote sample's copy has the sample's description and prompts. */
+function summarizeUpload(id: string, meta: UploadMeta, table: Table, bytes: number): DatasetSummary {
+  const remote = meta.remote ? { description: meta.remote.description, prompts: meta.remote.prompts } : {};
+  return summarize(id, meta.name, meta.fileName, table, bytes, { sample: false, ...remote });
+}
+
+/** "2026-11-18 18:42 UTC". */
+const utcMinute = (date: Date): string => `${date.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+
 interface Entry {
   readonly dataset: Dataset;
   readonly path: string;
@@ -181,19 +225,26 @@ export class Datasets {
   readonly #uploadsDir: string;
   readonly #maxBytes: number;
   readonly #limits: UploadLimits;
+  readonly #remote: readonly RemoteSample[];
+  readonly #fetchTimeoutMs: number | undefined;
+  readonly #fetch: typeof fetch | undefined;
   readonly #entries = new Map<string, Entry>();
-  /** Uploads, newest first. */
+  /** Uploads and remote samples' copies, newest first. */
   #uploads: string[] = [];
   /** Parsed uploads, least recently used first. */
   readonly #parsed = new Map<string, { readonly table: Table; readonly size: number }>();
 
-  constructor(samplesDir: string, dataDir: string, maxBytes: number, limits: Partial<UploadLimits> = {}) {
+  constructor(samplesDir: string, dataDir: string, maxBytes: number, options: DatasetsOptions = {}) {
+    const { remote = [], fetchTimeoutMs, fetch: fetchImpl, ...limits } = options;
     this.#samplesDir = samplesDir;
     this.#uploadsDir = join(dataDir, "uploads");
     this.#maxBytes = maxBytes;
     // A parsed file takes up to about 12 times its size in memory (100,000 rows of tiny values): with 5 MB files, the
     // parsed uploads kept take about 60 MB at most, however many uploads there are.
     this.#limits = { maxUploads: 10, maxStoredBytes: 4 * maxBytes, maxParsedBytes: maxBytes, ...limits };
+    this.#remote = remote;
+    this.#fetchTimeoutMs = fetchTimeoutMs;
+    this.#fetch = fetchImpl;
   }
 
   get maxBytes(): number {
@@ -233,7 +284,7 @@ export class Datasets {
       try {
         // Parsed once for its summary; the table is let go, and read again when an analysis uses it.
         const table = Table.fromCsv(readFileSync(this.#csvPath(id), "utf8"));
-        this.#entries.set(id, this.#entry(summarize(id, meta.name, meta.fileName, table, size, { sample: false }), this.#csvPath(id), undefined, meta));
+        this.#entries.set(id, this.#entry(summarizeUpload(id, meta, table, size), this.#csvPath(id), undefined, meta));
         this.#uploads.push(id);
         stored += size;
       } catch (error) {
@@ -254,8 +305,14 @@ export class Datasets {
   list(): DatasetSummary[] {
     return [...SAMPLES.map((sample) => sample.id), ...this.#uploads].flatMap((id) => {
       const entry = this.#entries.get(id);
-      return entry ? [entry.dataset.summary] : [];
+      // A remote sample's copies stay out of the list: picking the sample fetches a fresh one.
+      return entry && !entry.meta?.remote ? [entry.dataset.summary] : [];
     });
+  }
+
+  /** The remote samples on offer, listed first in the sample picker. */
+  remoteSamples(): RemoteSampleSummary[] {
+    return this.#remote.map((sample) => ({ id: sample.id, name: sample.name, description: sample.description }));
   }
 
   get(id: string): Dataset | undefined {
@@ -269,6 +326,36 @@ export class Datasets {
   }
 
   /**
+   * The dataset an analysis starts from. A remote sample's ID fetches its file now, every time, and answers with that
+   * copy, kept the way an upload is; it fails, keeping nothing, when the file can't be fetched or isn't the one
+   * expected.
+   */
+  async open(id: string): Promise<Dataset> {
+    const sample = this.#remote.find((candidate) => candidate.id === id);
+    if (!sample) return this.require(id);
+    const bytes = await fetchSample(sample, {
+      maxBytes: this.#maxBytes,
+      ...(this.#fetchTimeoutMs !== undefined ? { timeoutMs: this.#fetchTimeoutMs } : {}),
+      ...(this.#fetch ? { fetch: this.#fetch } : {}),
+    });
+    // Its own digest: the same bytes uploaded as a file stay a separate dataset, with that file's name.
+    const copyId = `upload-${createHash("sha256").update(`${sample.id}\n`).update(bytes).digest("hex").slice(0, 16)}`;
+    const existing = this.#entries.get(copyId);
+    if (existing?.meta) return this.#renew(copyId, existing, existing.meta);
+    const table = readSample(sample, bytes);
+    const fetchedAt = new Date();
+    const meta: UploadMeta = {
+      name: sample.name,
+      fileName: sample.file,
+      uploadedAt: fetchedAt.toISOString(),
+      remote: { sample: sample.id, description: `${sample.label} as of ${utcMinute(fetchedAt)}`, prompts: sample.prompts, ...(sample.notes ? { notes: sample.notes } : {}) },
+    };
+    const dataset = this.#keep(copyId, meta, bytes, table);
+    log.info("Fetched a remote sample", { sample: sample.id, id: copyId, rows: table.rows.length });
+    return dataset;
+  }
+
+  /**
    * Adds an uploaded CSV file, dropping the oldest uploads beyond the limits; the same bytes again answer with the
    * dataset already added, which counts as the newest upload again.
    */
@@ -277,12 +364,7 @@ export class Datasets {
     if (bytes.length > this.#maxBytes) throw new DeskError("payload_too_large", `Upload a CSV file up to ${Math.round(this.#maxBytes / (1024 * 1024))} MB.`, 413);
     const id = `upload-${createHash("sha256").update(bytes).digest("hex").slice(0, 16)}`;
     const existing = this.#entries.get(id);
-    if (existing?.meta) {
-      existing.meta = { ...existing.meta, uploadedAt: new Date().toISOString() };
-      this.#writeMeta(id, existing.meta);
-      this.#uploads = [id, ...this.#uploads.filter((other) => other !== id)];
-      return existing.dataset;
-    }
+    if (existing?.meta) return this.#renew(id, existing, existing.meta);
     const text = bytes.toString("utf8");
     if (text.includes("\u0000")) throw new DeskError("invalid_request", "That isn't a text file. Upload a CSV file.");
     let table: Table;
@@ -293,22 +375,37 @@ export class Datasets {
     }
     if (table.rows.length === 0) throw new DeskError("invalid_request", "That file has a header but no rows.");
     const meta: UploadMeta = { name: displayName(originalName), fileName: sandboxFileName(originalName), uploadedAt: new Date().toISOString() };
+    const dataset = this.#keep(id, meta, bytes, table);
+    log.info("Added an uploaded dataset", { id, rows: table.rows.length, columns: table.header.length });
+    return dataset;
+  }
+
+  /** The same file again: it counts as the newest upload again. */
+  #renew(id: string, entry: Entry, meta: UploadMeta): Dataset {
+    entry.meta = { ...meta, uploadedAt: new Date().toISOString() };
+    this.#writeMeta(id, entry.meta);
+    this.#uploads = [id, ...this.#uploads.filter((other) => other !== id)];
+    return entry.dataset;
+  }
+
+  /** Keeps a new file as the newest upload, dropping the oldest ones beyond the limits. */
+  #keep(id: string, meta: UploadMeta, bytes: Buffer, table: Table): Dataset {
     mkdirSync(this.#uploadsDir, { recursive: true });
     writeAtomically(this.#csvPath(id), bytes);
     this.#writeMeta(id, meta);
-    const entry = this.#entry(summarize(id, meta.name, meta.fileName, table, bytes.length, { sample: false }), this.#csvPath(id), undefined, meta);
+    const entry = this.#entry(summarizeUpload(id, meta, table, bytes.length), this.#csvPath(id), undefined, meta);
     this.#entries.set(id, entry);
     this.#uploads.unshift(id);
     this.#keepParsed(id, bytes.length, table);
-    log.info("Added an uploaded dataset", { id, rows: table.rows.length, columns: table.header.length });
     this.#trim();
     return entry.dataset;
   }
 
   #entry(summary: DatasetSummary, path: string, table?: Table, meta?: UploadMeta): Entry {
     const id = summary.id;
+    const notes = meta?.remote?.notes;
     return {
-      dataset: { summary, table: () => this.#table(id), bytes: () => this.#bytes(id) },
+      dataset: { summary, ...(notes ? { notes } : {}), table: () => this.#table(id), bytes: () => this.#bytes(id) },
       path,
       size: summary.bytes,
       ...(table ? { table } : {}),

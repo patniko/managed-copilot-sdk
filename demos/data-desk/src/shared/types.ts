@@ -56,7 +56,7 @@ export interface SuggestedPrompt {
 }
 
 export interface DatasetSummary {
-  /** `sample-<name>` for the bundled ones, `upload-<digest>` for uploaded files. */
+  /** `sample-<name>` for the bundled ones, `upload-<digest>` for uploaded files and remote samples' copies. */
   readonly id: string;
   readonly name: string;
   /** The file's name in the sandbox, under `data/`. */
@@ -67,6 +67,17 @@ export interface DatasetSummary {
   readonly bytes: number;
   readonly columns: readonly ColumnSummary[];
   readonly prompts: readonly SuggestedPrompt[];
+}
+
+/**
+ * A sample another app serves: Downhill's shop sales, with `DOWNHILL_URL`. Picking it fetches the file fresh, and the
+ * analysis starts on that copy, a dataset like an upload.
+ */
+export interface RemoteSampleSummary {
+  /** `live-<name>`; pass it as `datasetId` to start an analysis of a fresh copy. */
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
 }
 
 /** A page of a dataset's rows for the grid. */
@@ -243,6 +254,8 @@ export interface DeskState {
   readonly platform: PlatformStatus;
   readonly environments: readonly EnvironmentView[];
   readonly datasets: readonly DatasetSummary[];
+  /** Samples fetched fresh from other apps each time they're picked, listed first. */
+  readonly remoteSamples: readonly RemoteSampleSummary[];
   readonly analyses: readonly AnalysisSummary[];
   readonly attachCommand: string;
   readonly canLaunchTerminal: boolean;
@@ -253,6 +266,7 @@ export interface DeskState {
 }
 
 export interface CreateAnalysisRequest {
+  /** A dataset, or a remote sample: its file is fetched fresh first. */
   readonly datasetId: string;
 }
 

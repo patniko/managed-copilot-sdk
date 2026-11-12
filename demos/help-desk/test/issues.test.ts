@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { groupIssues, issueWorkOrder, type ReportedConversation } from "../src/server/issues.js";
-import type { BugArea, BugReport, RoutedWorkOrder } from "../src/shared/types.js";
+import { groupIssues, issueKey, issueWorkOrder, parseIssueKey, playerScope, type ReportedConversation } from "../src/server/issues.js";
+import type { BugArea, BugReport, RoutedWorkOrder, ShopCheckout } from "../src/shared/types.js";
 
 const at = (minute: number) => `2026-11-03T10:${String(minute).padStart(2, "0")}:00.000Z`;
 const report = (area: BugArea, minute: number, extra: Partial<BugReport> = {}): BugReport => ({
@@ -51,7 +51,7 @@ describe("software issues", () => {
 
   it("quote what customers wrote up to their report, oldest first, and always end with the ask", () => {
     const short = Array.from({ length: 20 }, (_, index) => conversation(index + 1, report("order-status", 40 - index, { orderId: `CO-4${index}`, expected: `Expectation ${index % 3}.` }), `It says delivered (${index + 1}).`));
-    const request = issueWorkOrder({ area: "order-status", runId: "r1", appUrl: "https://help-desk.example.io", reports: short, project: [{ path: "package.json", content: "{}" }] });
+    const request = issueWorkOrder({ area: "order-status", scope: "r1", appUrl: "https://help-desk.example.io", reports: short, project: [{ path: "package.json", content: "{}" }] });
 
     expect(request.title).toBe("Fix: wrong order status on My orders");
     expect(request.origin).toEqual({ app: "help-desk", name: "Help Desk", label: "Order status · 20 tickets", url: "https://help-desk.example.io/#/c/c20", key: "r1:order-status" });
@@ -69,11 +69,46 @@ describe("software issues", () => {
 
     const long = "The label on My orders is wrong. ".repeat(20);
     const lengthy = Array.from({ length: 20 }, (_, index) => conversation(index + 1, report("order-status", 40 - index, { whatHappened: long }), long.repeat(5)));
-    const big = issueWorkOrder({ area: "order-status", runId: "r1", appUrl: "https://help-desk.example.io", reports: lengthy, project: [] });
+    const big = issueWorkOrder({ area: "order-status", scope: "r1", appUrl: "https://help-desk.example.io", reports: lengthy, project: [] });
     expect(big.brief.length).toBeLessThanOrEqual(8_000);
     expect(big.brief).toMatch(/\d+ more reports in BUG_REPORT\.md\./);
     expect(big.brief.endsWith("the support conversations in `.factory/context/transcripts.md`.")).toBe(true);
     for (const file of big.context ?? []) expect(file.content.length, file.path).toBeLessThanOrEqual(60_000);
     expect(big.context?.[0]?.content).toContain("### 20. Out for delivery shown as Delivered");
+  });
+
+  it("key work orders by simulation or by the first player ticket, so the two never collide", () => {
+    expect(issueKey("mhv3k2a1abc", "promo-codes")).toBe("mhv3k2a1abc:promo-codes");
+    expect(parseIssueKey("mhv3k2a1abc:promo-codes")).toEqual({ scope: "mhv3k2a1abc", area: "promo-codes" });
+    expect(parseIssueKey(issueKey(playerScope("mhv3k2a1q9z4f2"), "cart"))).toEqual({ scope: "player-mhv3k2a1q9z4f2", area: "cart" });
+    expect(parseIssueKey("mhv3k2a1abc:checkout")).toBeUndefined();
+    expect(parseIssueKey("INC-1004")).toBeUndefined();
+  });
+
+  it("list a player's report as theirs, and tell Software Factory it came from the Downhill Shop's checkout", () => {
+    const checkout: ShopCheckout = {
+      code: "trail15",
+      error: "Invalid code.",
+      offer: "Launch week: 15% off everything with code trail15",
+      items: [{ sku: "mona-neon", name: "Neon Mona", priceCents: 499 }],
+      subtotalCents: 499,
+    };
+    const words = "The launch offer's code trail15 didn't work in the Downhill Shop: checkout said “Invalid code.” I was buying Neon Mona ($4.99).";
+    const player: ReportedConversation = {
+      ticketId: "mhv3k2a1q9z4f2",
+      name: "Mona",
+      bug: report("promo-codes", 10, { title: "Launch code rejected", whatHappened: "trail15 says invalid.", expected: "15% off." }),
+      items: [{ kind: "message", id: "u1", from: "customer", text: words, at: at(9), attachment: "Checkout details" }],
+      shop: { checkout, gameVersion: "1.0.0" },
+    };
+    expect(groupIssues([player], new Map())[0]?.reports).toEqual([{ ticketId: "mhv3k2a1q9z4f2", product: "downhill", name: "Mona", whatHappened: "trail15 says invalid.", at: at(10) }]);
+
+    const request = issueWorkOrder({ area: "promo-codes", scope: playerScope("mhv3k2a1q9z4f2"), appUrl: "http://localhost:7440", reports: [player], project: [] });
+    expect(request.origin).toEqual({ app: "help-desk", name: "Help Desk", label: "Promo codes · 1 ticket", url: "http://localhost:7440/#/p/mhv3k2a1q9z4f2", key: "player-mhv3k2a1q9z4f2:promo-codes" });
+    expect(request.brief).toMatch(/^Contoso Outdoors support received a report of the same problem, promo codes rejected at checkout, from 1 player in the Downhill Shop\./);
+    expect(request.brief).toContain("## The Downhill Shop");
+    expect(request.brief).toContain("## What they reported");
+    expect(request.context?.[0]?.content).toContain("- Order: none (the player didn't buy)");
+    expect(request.context?.[1]?.content).toContain(`## Mona (Downhill Shop)\n\nPlayer: ${words}`);
   });
 });

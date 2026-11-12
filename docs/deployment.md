@@ -52,7 +52,7 @@ flowchart LR
 | Storage account (FileStorage, Premium SSD v2) + NFS share `managed-copilot` (32 GiB) | Durable state: the gateway at `gateway/`, each app at `apps/<name>/`, proxy CA at `egress/`. NFS 4.1, reachable only from the trusted `platform` and `egress` subnets, not the sandbox subnet; shared-key access disabled. |
 | Container registry + pull identity | Holds the gateway, app, egress proxy, and sandbox images. |
 | `copilot` container app | The gateway: external HTTPS ingress, exactly one replica, Single revision mode, `/data` on the NFS share, startup/liveness over TCP and readiness over HTTP. |
-| One container app per `publishApp` | Your apps (the demos, and the demo gallery at `https://gallery.<environment-domain>`): external HTTPS ingress restricted to `Parameters:app-allowed-ips`, one replica, their own NFS directory. The gallery gets no GitHub token. An app published with `public: true` accepts any address, gets no GitHub token, and is tagged `managed-copilot-access: public` (see "Who can open the apps"). |
+| One container app per `publishApp` | Your apps (the demos, and the demo gallery at `https://gallery.<environment-domain>`): external HTTPS ingress restricted to `Parameters:app-allowed-ips`, one replica, their own NFS directory. The gallery and Downhill get no GitHub token. An app published with `public: true` accepts any address, gets no GitHub token, and is tagged `managed-copilot-access: public` (see "Who can open the apps"). |
 | `copilot-gateway-identity` | User-assigned identity of the gateway. Its roles: **Container Apps SandboxGroup Data Owner** on the sandbox group, and **AcrPull** on the registry (for the registry tokens it hands to disk-image imports). |
 | Sandboxes group (`Microsoft.App/sandboxGroups`) + VNet connection | Isolated placement. Created only when the AppHost declares isolated environments. |
 | Internal Container Apps environment `mc-egress-<suffix>` + `egress` container app | The sandboxes' only way out: the platform's egress proxy (`services/egress`, external mode) on TCP 3128 of the environment's internal load balancer, one replica, linked to the gateway over HTTPS. Created with the sandbox group. |
@@ -400,7 +400,7 @@ A published app is one of two kinds, chosen in the AppHost:
 
 | | Allowlisted (the default) | Public (`public: true`) |
 | --- | --- | --- |
-| For | Apps with no sign-in of their own. They act as the GitHub account in `Parameters:app-github-token`, or hold no account (`githubToken: false`, like the gallery) | Apps that sign in their own users: with each user's own GitHub token, or users the app vouches for with an app credential |
+| For | Apps with no sign-in of their own. They act as the GitHub account in `Parameters:app-github-token`, or hold no account (`githubToken: false`, like the gallery and Downhill) | Apps that sign in their own users: with each user's own GitHub token, or users the app vouches for with an app credential |
 | Who can open it | The addresses in `Parameters:app-allowed-ips` (default: this machine's public address, which `aspire deploy` prints), plus the platform subnet for webhooks | Any address |
 | GitHub token | `Parameters:app-github-token` as `MANAGED_COPILOT_GITHUB_TOKEN`, unless `githubToken: false` | Never: `githubToken: true` is refused, and `MANAGED_COPILOT_GITHUB_TOKEN` is never passed through `env` |
 | `npx managed-copilot access ips` | Changes its allowlist at once | Never applies; `access` lists it under **Public apps** |

@@ -29,7 +29,7 @@ import {
 import { log } from "./log.js";
 import { reconnectDelay, type CoordinatorSession, type IncidentPlatform } from "./platform.js";
 import { alertPrompt, fixWorkerFallback, runbook, TOOLS } from "./runbook.js";
-import type { ServiceCatalog } from "./services.js";
+import { ServiceLoadError, type ServiceCatalog } from "./services.js";
 import type { StoredApproval, StoredFactoryWork, StoredIncident, Store } from "./store.js";
 import {
   failure,
@@ -451,34 +451,48 @@ export class IncidentRun implements ToolHost {
         if (error instanceof ToolInputError) return { kind: "reject", feedback: `${error.message} Call ${TOOLS.deploy} again.` };
         throw error;
       }
-      await this.#recordApproval(id, input);
+      const refused = await this.#recordApproval(id, input);
+      if (refused) return { kind: "reject", feedback: refused };
     }
     // Leave the request to the platform: it waits there for a person, and the app lets go of the session.
     if (via === "live") setImmediate(() => void this.detach());
     return { kind: "no-result" };
   }
 
-  /** Snapshots the changes from Copilot's own sandbox, so the person reviews (and approves) exactly what ships. */
-  async #recordApproval(id: string, input: DeployInput): Promise<void> {
+  /**
+   * Snapshots the changes from Copilot's own sandbox, so the person reviews (and approves) exactly what ships: the files
+   * that differ from what runs now. Returns why the request is refused instead, when none of the files changed.
+   */
+  async #recordApproval(id: string, input: DeployInput): Promise<string | undefined> {
     const incident = this.#incident;
     const service = incident.alert.service;
-    const snapshot: { path: string; content: string }[] = [];
-    const files: FileChange[] = [];
-    let problem: string | undefined;
+    const read: { path: string; content: string }[] = [];
+    const problems: string[] = [];
     try {
       const own = await this.#ownSandbox();
       if (!own) throw new Error("Copilot's own sandbox isn't running");
-      const originals = await this.#host.catalog.originals(service);
       for (const raw of input.files) {
         const path = servicePath(service, raw);
         if (!path) throw new Error(`${raw} isn't inside the service's folder`);
-        const content = await this.#host.platform.readFile(own.id, `${service}/${path}`);
-        snapshot.push({ path, content });
-        files.push(diffFile(path, originals.get(path), content));
+        if (!read.some((file) => file.path === path)) read.push({ path, content: await this.#host.platform.readFile(own.id, `${service}/${path}`) });
       }
     } catch (error) {
-      problem = `Couldn't read the changes from Copilot's sandbox: ${errorText(error)}.`;
+      problems.push(`Couldn't read the changes from Copilot's sandbox: ${errorText(error)}.`);
     }
+    let originals: ReadonlyMap<string, string> | undefined;
+    try {
+      originals = await this.#host.catalog.originals(service);
+    } catch (error) {
+      const why = error instanceof ServiceLoadError ? sentence(error.message) : `Couldn't read the ${service} service's files: ${sentence(errorText(error))}`;
+      problems.push(`${why} So the change can't be shown here; what ships is Copilot's copy of ${pathList(read, 6) || "the files it listed"}.`);
+    }
+    // A file Copilot listed but didn't change doesn't ship.
+    const snapshot = originals ? read.filter((file) => originals.get(file.path) !== file.content) : read;
+    if (problems.length === 0 && snapshot.length === 0) {
+      return `None of the files you listed differ from what runs in production now (${pathList(read, 6)}). Make sure the fix is in /workspace/${service} in your own sandbox, then call ${TOOLS.deploy} again with the files it changed and added.`;
+    }
+    const files: FileChange[] = originals ? snapshot.map((file) => diffFile(file.path, originals.get(file.path), file.content)) : [];
+    const problem = problems.length ? problems.join(" ") : undefined;
     // The fix Software Factory released, copied into Copilot's sandbox: the person sees where it came from.
     const work = incident.factory;
     const factory = work?.appliedAt && work.files?.length ? { number: work.number, url: work.url } : undefined;
@@ -500,7 +514,8 @@ export class IncidentRun implements ToolHost {
     });
     const detail = [input.tests ? `Tests: ${input.tests}` : "", factory ? `Built by Software Factory as ${workOrderLabel(factory.number)}` : ""].filter(Boolean).join("\n");
     this.#note("approval", `Copilot asked to deploy: ${input.summary}`, detail || undefined);
-    log.info("Deploy requested; waiting for a person", { incident: this.id, files: files.length });
+    log.info("Deploy requested; waiting for a person", { incident: this.id, files: snapshot.length });
+    return undefined;
   }
 
   // ─── Session events ────────────────────────────────────────────────────────────────────────────────────────
@@ -719,16 +734,33 @@ export class IncidentRun implements ToolHost {
     if (!own) return failure("Your own sandbox hasn't started yet. Run `pwd` with bash first, then call open_workspace again.");
     const incident = this.#incident;
     const service = incident.alert.service;
-    const { files } = await this.#host.catalog.workspace(service, incident.demo);
+    let workspace: Awaited<ReturnType<ServiceCatalog["workspace"]>>;
+    try {
+      workspace = await this.#host.catalog.workspace(service, incident.demo);
+    } catch (error) {
+      if (!(error instanceof ServiceLoadError)) throw error;
+      this.#note("error", error.message);
+      return failure(
+        `${sentence(error.message)} Wait half a minute (sleep 30 in your sandbox) and call ${TOOLS.openWorkspace} once more. If it fails again, record what the alert tells you, and that the service's files couldn't be loaded, with ${TOOLS.update}, then end your turn.`,
+      );
+    }
+    const { files, version } = workspace;
     if (files.size === 0) {
       return `No code, tests, or logs are on file for the "${service}" service. Work from the alert's details: record what it tells you and what to check next with ${TOOLS.update}.`;
+    }
+    // The incident opened while the service couldn't be loaded: its version comes with its files.
+    if (version && !incident.serviceVersion) {
+      this.#update((stored) => {
+        stored.serviceVersion ??= version;
+      });
     }
     const entries = [...files];
     await inBatches(entries, 4, async ([path, content]) => this.#host.platform.writeFile(own.id, `${service}/${path}`, content));
     this.#note("sandbox", `Copied the ${service} service into Copilot's sandbox (${files.size} files)`);
     void this.refresh();
     const folders = [...new Set(entries.map(([path]) => (path.includes("/") ? `${path.split("/")[0]}/` : path)))].sort();
-    return `Copied ${files.size} files into /workspace/${service}: ${folders.join(", ")}. Start with /workspace/${service}/README.md.`;
+    const start = files.has("README.md") ? ` Start with /workspace/${service}/README.md.` : "";
+    return `Copied ${files.size} files into /workspace/${service}: ${folders.join(", ")}.${start}`;
   }
 
   update(input: UpdateInput): ToolOutcome {
@@ -761,10 +793,16 @@ export class IncidentRun implements ToolHost {
     const files: string[] = [];
     for (const raw of input.files) {
       const path = servicePath(service, raw);
-      if (!path) return failure(`${raw} isn't inside the service's folder. List files relative to it, for example src/discounts.js, and call ${TOOLS.routeFix} again.`);
+      if (!path) return failure(`${raw} isn't inside the service's folder. List files relative to it, for example src/storage.js, and call ${TOOLS.routeFix} again.`);
       if (!files.includes(path)) files.push(path);
     }
-    const { files: workspace } = await this.#host.catalog.workspace(service, incident.demo);
+    let workspace: ReadonlyMap<string, string>;
+    try {
+      workspace = (await this.#host.catalog.workspace(service, incident.demo)).files;
+    } catch (error) {
+      if (error instanceof ServiceLoadError) return this.#routeFailed(error.message);
+      throw error;
+    }
     const project = projectFiles(workspace);
     if (project.length === 0) {
       return failure(`No code is on file for the "${service}" service, so Software Factory has nothing to change. Record what you found and what to check next with ${TOOLS.update}, then end your turn.`);
@@ -996,8 +1034,9 @@ export class IncidentRun implements ToolHost {
             : `Can't reach Software Factory to read ${label}'s release: ${sentence(errorText(error))} Incident Commander keeps trying.`,
         );
       }
+      const trouble = await this.#takeRelease(release);
+      if (trouble) return this.#factoryTrouble(trouble);
       this.#factoryReached();
-      await this.#takeRelease(release);
       work = this.#host.store.get(this.id)?.factory;
       if (!work) return;
     }
@@ -1048,11 +1087,14 @@ export class IncidentRun implements ToolHost {
     this.#note("error", `${label} no longer exists in Software Factory`, undefined, now);
   }
 
-  /** The released files: the fix to hand Copilot, or why there's none. */
-  async #takeRelease(release: ReleaseFiles): Promise<void> {
+  /**
+   * The released files: the fix to hand Copilot, or why there's none. Returns what to retry instead, when the service
+   * (over HTTP) can't be loaded to compare the release with.
+   */
+  async #takeRelease(release: ReleaseFiles): Promise<string | undefined> {
     const incident = this.#incident;
     const work = incident.factory;
-    if (!work) return;
+    if (!work) return undefined;
     const label = workOrderLabel(work.number);
     let fix: FixFile[] = [];
     let error: string | undefined;
@@ -1061,6 +1103,8 @@ export class IncidentRun implements ToolHost {
       fix = releasedFix(release, originals);
       if (fix.length === 0) error = `Software Factory released ${label} without changing the service's code.`;
     } catch (failed) {
+      // The service over HTTP is down for now: the release keeps, so it's taken on a later check.
+      if (failed instanceof ServiceLoadError) return `${sentence(failed.message)} Incident Commander needs it to take ${label}'s fix, and keeps trying.`;
       error = `Software Factory released ${label}, but Incident Commander can't use it: ${sentence(errorText(failed))}`;
     }
     const tests = release.tests ?? work.tests;
@@ -1072,10 +1116,11 @@ export class IncidentRun implements ToolHost {
     });
     if (error) {
       this.#note("error", error);
-      return;
+      return undefined;
     }
     log.info("Software Factory released a fix", { incident: this.id, workOrder: work.workOrderId, files: fix.length });
     this.#note("factory", `Software Factory released ${label}: ${pathList(fix)}${tests ? `; ${describeTests(tests)}` : ""}`, release.notes?.trim().slice(0, 1_500));
+    return undefined;
   }
 
   #factoryTrouble(problem: string): void {

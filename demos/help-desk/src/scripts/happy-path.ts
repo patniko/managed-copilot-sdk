@@ -131,7 +131,9 @@ async function main(): Promise<boolean> {
 
   const problems: string[] = [];
   const { counters } = state;
-  if (counters.sessions !== SIZE) problems.push(`Expected ${SIZE} sessions, the counters show ${counters.sessions}.`);
+  // Live players' tickets (from Downhill) stay through simulations, and count with them.
+  const players = (state.players ?? []).filter((ticket) => ticket.sessionId !== undefined).length;
+  if (counters.sessions !== SIZE + players) problems.push(`Expected ${SIZE} sessions${players ? ` and ${players} of players` : ""}, the counters show ${counters.sessions}.`);
   if (counters.runtimes !== 1) problems.push(`Expected 1 runtime, the counters show ${counters.runtimes}.`);
   if (counters.sandboxes !== 0) problems.push(`Expected no sandboxes, the counters show ${counters.sandboxes}.`);
   if (!(counters.premiumRequests > 0)) problems.push("No premium requests were counted.");
@@ -161,16 +163,18 @@ async function main(): Promise<boolean> {
   await api("DELETE", "/api/simulation");
   ours = false;
   const after = await api<HelpDeskState>("GET", "/api/state");
-  if (after.run || after.counters.sessions !== 0) problems.push("The simulation didn't end cleanly.");
+  const playersAfter = (after.players ?? []).filter((ticket) => ticket.sessionId !== undefined).length;
+  if (after.run || after.counters.sessions !== playersAfter) problems.push("The simulation didn't end cleanly.");
 
   console.log("");
   console.log(`Customers        ${state.tickets.map((ticket) => `${name(ticket.customerId)} (${ticket.status})`).join(", ")}`);
+  if (players) console.log(`Players          ${players} live ticket${players === 1 ? "" : "s"} from Downhill, left open`);
   console.log(`Counters         ${counters.sessions} sessions, ${counters.runtimes} runtime, ${counters.sandboxes} sandboxes, ${counters.messages} messages, ${counters.premiumRequests} premium requests`);
   console.log(`Approvals        ${decisions.length ? decisions.join("; ") : "none"}`);
   console.log(`Team knowledge   ${memories.length ? memories.join("; ") : "no facts proposed"}`);
   console.log(`Blocked lookups  ${blocked.length ? blocked.join("; ") : "none (the agent declined without calling a tool)"}`);
   const issues = state.issues ?? [];
-  console.log(`Software issues  ${issues.length ? issues.map((issue) => `${issue.title} (${issue.reports.map((report) => report.name).join(", ")})`).join("; ") : "none reported"}`);
+  console.log(`Software issues  ${issues.length ? issues.map((issue) => `${issue.title} (${issue.reports.map((report) => (report.product ? `${report.name} · Downhill` : report.name)).join(", ")})`).join("; ") : "none reported"}`);
   for (const problem of problems) console.log(`✗ ${problem}`);
   if (problems.length === 0) console.log("✓ Every check passed");
   return problems.length === 0;

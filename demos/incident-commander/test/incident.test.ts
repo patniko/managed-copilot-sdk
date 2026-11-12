@@ -145,6 +145,17 @@ describe("the deploy approval", () => {
     expect(incident().approval).toBeUndefined();
   });
 
+  it("ships only the files that changed, and refuses a request where none did", async () => {
+    const { platform, incident } = await started();
+    const cart = readFileSync(join(testConfig().demoServicesDir, "checkout", "src", "cart.js"), "utf8").replace(/\r\n/g, "\n");
+    platform.files.set("hands-1:checkout/src/cart.js", cart);
+    const unchanged = await platform.session.permission(deployRequest({ summary: "Fix it", files: ["src/cart.js"] }, "unchanged-call"));
+    expect(unchanged).toMatchObject({ kind: "reject", feedback: expect.stringContaining("None of the files you listed differ from what runs in production now (src/cart.js)") });
+    expect(incident().approval).toBeUndefined();
+    expect(await platform.session.permission(deployRequest({ ...DEPLOY_ARGS, files: [...DEPLOY_ARGS.files, "src/cart.js"] }))).toEqual({ kind: "no-result" });
+    expect(incident().approval?.snapshot.map((file) => file.path)).toEqual(["src/discounts.js", "test/expired.test.js"]);
+  });
+
   it("is answered when the person approves: the app re-attaches and the platform delivers the request again", async () => {
     const { platform, run, incident } = await waiting();
     const answers: PermissionRequestResult[] = [];

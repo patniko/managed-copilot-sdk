@@ -32,6 +32,8 @@ export interface HelpDeskConfig {
   readonly storefrontDir: string;
   /** How often the work orders of sent issues are checked while any is still running. */
   readonly factoryPollMs: number;
+  /** A player ticket that never got a message is dropped this long after the game last opened it. */
+  readonly playerIdleMs: number;
   /** Where the team knowledge base is kept (`HELP_DESK_DATA_DIR`). Without it, it lasts as long as the process. */
   readonly dataDir?: string;
   /** Ticket classification, when it's set up (`HELP_DESK_TRIAGE_ENVIRONMENT`). */
@@ -108,6 +110,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
     ...(factoryUrl ? { factoryUrl, ...(factoryPublicUrl ? { factoryPublicUrl } : {}) } : {}),
     storefrontDir: join(packageRoot, "storefront"),
     factoryPollMs: 5_000,
+    playerIdleMs: 30 * 60_000,
     dataDir: resolve(packageRoot, env.HELP_DESK_DATA_DIR?.trim() || ".data"),
     ...(triageEnvironment && triageModel ? { triage: { environment: triageEnvironment, model: triageModel } } : {}),
     ...(endpoint && deployment && key ? { decision: { endpoint, deployment, key, ...(subscription ? { subscription } : {}) } } : {}),

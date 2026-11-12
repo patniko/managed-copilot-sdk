@@ -54,6 +54,7 @@ builds the sandbox image, which takes a few minutes.
 | Help Desk | http://localhost:7440 | Shared |
 | Incident Commander | http://localhost:7445 | Mixed |
 | Front Desk | http://localhost:7450 | Shared |
+| Downhill | http://localhost:7455 | Its support tickets run in Help Desk (shared) |
 | Dispatch | http://localhost:7470 | Direct, delegate, mixed |
 | Software factory | http://localhost:7480 | Delegate, isolated |
 | Assistant | http://localhost:7490 | Shared, delegate |
@@ -102,12 +103,18 @@ pnpm --filter @managed-copilot/demo-pattern-race happy-path    # the quick answe
 
 1. Keep **25** customers and press **Simulate 25 customers**.
 2. Approve a refund on a yellow tile, then open **Liam O'Brien**.
+3. Open **Downhill** (http://localhost:7455): ride a run, open the **Shop**, press **Apply code** on the launch offer,
+   buy anyway, then press **Contact support**.
 
 - [ ] The counters read 25 sessions, 1 runtime, 0 sandboxes while answers arrive.
 - [ ] Liam's lookup of another customer's order shows as **Blocked**; his agent confirms nothing.
+- [ ] Downhill's checkout says **Invalid code.**; the support chat opens in the game and the agent answers.
+- [ ] The wall shows the player's tile (**Downhill**, **Live**); its report joins **Promo codes rejected at checkout**,
+      and the refund the agent asks for waits on the wall.
 
 ```powershell
 pnpm --filter @managed-copilot/demo-help-desk happy-path       # 5 customers and one approval
+pnpm --filter @managed-copilot/demo-downhill happy-path        # a ride, the rejected code, a live ticket (Microsoft Edge)
 ```
 
 ### 1.6 Repo Doctor (isolated, with network rules)
@@ -391,9 +398,9 @@ Repeat 1.4 to 1.14 with each card's **Azure** button. Differences to expect:
       verified on Azure before, so this is the one to watch.)
 - [ ] Front Desk: a GitHub user on their own Copilot plan and an email account on Foundry, neither seeing the other's
       conversations or memory; it opens from a phone off Wi-Fi, where the other apps answer 403.
-- [ ] Pattern Race, Help Desk, Repo Doctor, Data Desk, Research Swarm, and Incident Commander: their scripted checks
-      above, each with `--url https://<app>.<environment-domain>`. They have run locally only so far, so watch them
-      too.
+- [ ] Pattern Race, Help Desk, Downhill, Repo Doctor, Data Desk, Research Swarm, and Incident Commander: their scripted
+      checks above, each with `--url https://<app>.<environment-domain>`. They have run locally only so far, so watch
+      them too.
 - [ ] Console: health, sessions with Azure sandboxes, live feed.
 
 Platform checks from the terminal:

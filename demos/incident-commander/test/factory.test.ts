@@ -11,7 +11,7 @@ import { IncidentRun, summarize, type RunHost } from "../src/server/incident.js"
 import { runbook } from "../src/server/runbook.js";
 import { ServiceCatalog } from "../src/server/services.js";
 import { Store, type StoredIncident } from "../src/server/store.js";
-import { deployRequest, FakeFactory, FakePlatform, settle, testConfig, worker } from "./fakes.js";
+import { deployRequest, FakeFactory, FakePlatform, FakeRemoteService, settle, SHOP_PROMOTIONS, testConfig, worker } from "./fakes.js";
 
 const ALERT: AlertInfo = {
   source: "simulated",
@@ -90,8 +90,10 @@ async function fakeFactory(): Promise<FakeFactory> {
   return factory;
 }
 
-/** A started incident with Copilot's own sandbox running. */
-async function harness(options: { route?: FixRoute; connected?: boolean } = {}): Promise<Harness> {
+/** A started incident with Copilot's own sandbox running. `service`: an incident on another service than the demo's. */
+async function harness(
+  options: { route?: FixRoute; connected?: boolean; service?: { readonly alert: AlertInfo; readonly catalog: ServiceCatalog; readonly version?: string } } = {},
+): Promise<Harness> {
   const factory = await fakeFactory();
   const config = testConfig({ factory: factory.target });
   const dataDir = mkdtempSync(join(tmpdir(), "incident-factory-"));
@@ -101,12 +103,14 @@ async function harness(options: { route?: FixRoute; connected?: boolean } = {}):
     config,
     platform,
     store,
-    catalog: new ServiceCatalog(config.demoServicesDir),
+    catalog: options.service?.catalog ?? new ServiceCatalog(config.demoServicesDir),
     factory: options.connected === false ? undefined : new SoftwareFactory(factory.target),
     workerEnvironment: () => "incident-commander-node",
     changed: () => undefined,
   };
-  const created = store.create(ALERT, { seed: 7, at: "2026-11-04T07:00:00.000Z" }, "1.4.2", options.route ?? "factory");
+  const created = options.service
+    ? store.create(options.service.alert, undefined, options.service.version, options.route ?? "factory")
+    : store.create(ALERT, { seed: 7, at: "2026-11-04T07:00:00.000Z" }, "1.4.2", options.route ?? "factory");
   const run = new IncidentRun(host, created.id);
   closers.push(() => run.close());
   await run.start();
@@ -487,6 +491,105 @@ describe("apply_factory_fix", () => {
     await h.run.checkFactory();
     h.platform.workerList = [];
     expect(await h.call("apply_factory_fix", {})).toMatchObject({ resultType: "failure", textResultForLlm: expect.stringContaining("Your own sandbox isn't running") });
+  });
+});
+
+const SHOP_ALERT: AlertInfo = {
+  source: "generic",
+  name: "Launch code rejected at checkout",
+  summary: 'Checkout rejected the launch-week code trail15 with "Invalid code."',
+  service: "downhill-shop",
+  severity: "SEV2",
+  labels: { service: "downhill-shop" },
+  startsAt: "2026-11-12T17:30:40.000Z",
+  fingerprint: "downhill-promo-rejected",
+  links: [],
+};
+
+const SHOP_ROUTE = {
+  summary: "Checkout rejects the launch code trail15",
+  rootCause: "applyPromoCode looks codes up exactly as typed, so the banner's lowercase trail15 isn't found.",
+  failingPath: "checkout → applyPromoCode (src/promotions.js:16)",
+  expected: "A promo code matches whatever its case.",
+  files: ["src/promotions.js", "downhill-shop/test/promotions.test.js"],
+};
+
+describe("a service over HTTP", () => {
+  const shopHarness = (shop: FakeRemoteService) => harness({ service: { alert: SHOP_ALERT, catalog: shop.catalog(), version: "1.0.0" } });
+
+  it("goes to Software Factory as it runs now: its code as the project, its deploys and logs as context", async () => {
+    const shop = new FakeRemoteService();
+    const h = await shopHarness(shop);
+    expect(await h.call("route_fix_to_factory", SHOP_ROUTE)).toContain("Software Factory took the fix as WO-0012");
+    const body = h.factory.created[0] as { title: string; brief: string; project: { name: string; files: { path: string; content: string }[] }; context: { content: string }[] };
+    expect(body.title).toBe("Fix downhill-shop: Checkout rejects the launch code trail15");
+    expect(body.project.name).toBe("downhill-shop");
+    expect(body.project.files.map((file) => file.path).sort()).toEqual(["README.md", "package.json", "src/promotions.js", "test/promotions.test.js"]);
+    expect(body.project.files.find((file) => file.path === "src/promotions.js")?.content).toBe(SHOP_PROMOTIONS);
+    expect(body.brief).toContain("Keep every existing test passing (`npm test`).");
+    const context = body.context[0]!.content;
+    for (const expected of [
+      "- Service: downhill-shop (v1.0.0 in production)",
+      "## Recent deploys (deploys/HISTORY.md)",
+      "| 2026-11-12 16:47 | 1.0.0 | Launch-week banner: 15% off with code trail15, and a one-click Apply code button |",
+      "## Warnings in the production logs (the newest 2 of 2; it logged no errors)",
+      '2026-11-12T17:31:02.114Z level=warn msg="promo code rejected" status=400 code=trail15 error="Invalid code."',
+    ]) {
+      expect(context).toContain(expected);
+    }
+  });
+
+  it("takes the released fix once the service can be loaded again", async () => {
+    const shop = new FakeRemoteService();
+    const h = await shopHarness(shop);
+    await h.call("route_fix_to_factory", SHOP_ROUTE);
+    const fixed = SHOP_PROMOTIONS.replace("Object.hasOwn(PROMOTIONS, code) ? PROMOTIONS[code]", "Object.hasOwn(PROMOTIONS, code.toUpperCase()) ? PROMOTIONS[code.toUpperCase()]");
+    h.factory.releases.set("wo_12", {
+      files: [
+        { path: "package.json", content: shop.files["package.json"] },
+        { path: "src/promotions.js", content: fixed },
+        { path: "test/case.test.js", content: 'test("trail15 works", () => {});\n' },
+      ],
+      changes: [
+        { path: "src/promotions.js", status: "modified" },
+        { path: "test/case.test.js", status: "added" },
+      ],
+    });
+    h.factory.set("wo_12", { status: "completed" });
+    shop.answer = new TypeError("fetch failed");
+    await h.run.checkFactory();
+    expect(h.incident().factory).toMatchObject({
+      status: "completed",
+      problem: `Couldn't load downhill-shop from ${shop.url}: it isn't reachable (fetch failed). Incident Commander needs it to take WO-0012's fix, and keeps trying.`,
+    });
+    expect(h.incident().factory?.files).toBeUndefined();
+    expect(h.incident().factory?.error).toBeUndefined();
+
+    shop.answer = undefined;
+    await h.run.checkFactory();
+    expect(h.incident().factory?.files?.map((file) => [file.path, file.status])).toEqual([
+      ["src/promotions.js", "modified"],
+      ["test/case.test.js", "added"],
+    ]);
+    expect(h.incident().factory?.problem).toBeUndefined();
+    expect(sent(h.platform, "Software Factory released the fix as WO-0012")).toHaveLength(1);
+  });
+
+  it("falls back to a fix worker when the service can't be loaded, or is larger than a work order takes", async () => {
+    const shop = new FakeRemoteService();
+    const h = await shopHarness(shop);
+    shop.answer = () => new Response("", { status: 502 });
+    expect(await h.call("route_fix_to_factory", SHOP_ROUTE)).toMatchObject({
+      resultType: "failure",
+      textResultForLlm: expect.stringContaining(`Software Factory couldn't take the work order: Couldn't load downhill-shop from ${shop.url}: it answered HTTP 502. Instead, fix it with a "fix" worker`),
+    });
+    shop.answer = undefined;
+    shop.files["src/catalog.js"] = "x".repeat(600 * 1024);
+    expect(await h.call("route_fix_to_factory", SHOP_ROUTE)).toMatchObject({
+      resultType: "failure",
+      textResultForLlm: expect.stringContaining("The downhill-shop service is larger than a Software Factory work order takes (5 files, 602 KB;"),
+    });
+    expect(h.factory.created).toEqual([]);
   });
 });
 

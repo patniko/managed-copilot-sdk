@@ -138,6 +138,11 @@ export class Store {
     return this.#data.incidents.find((incident) => incident.status !== "resolved" && incident.alert.fingerprint === fingerprint);
   }
 
+  /** The newest incident an alert opened, open or resolved. */
+  latestByFingerprint(fingerprint: string): StoredIncident | undefined {
+    return this.#data.incidents.find((incident) => incident.alert.fingerprint === fingerprint);
+  }
+
   create(alert: AlertInfo, demo?: DemoSeed, serviceVersion?: string, fixRoute: FixRoute = "workers"): StoredIncident {
     const now = new Date().toISOString();
     const number = this.#data.next++;

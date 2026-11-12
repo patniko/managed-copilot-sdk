@@ -33,8 +33,10 @@ Below the header and a one-line hero, five tabs split the page. Each tab has its
 
   When the catalog lists Pattern Race (`pattern-race`), which runs one job through all six side by side, the section
   links it as **Compare all six**, and its app card says **All six patterns**; no pattern card lists it.
-- **Connected demos** tab: the Software Factory and the apps that send it work orders (Help Desk, Incident Commander,
-  and Data Desk; the tests check this against the apps the root AppHost gives `SOFTWARE_FACTORY_URL`).
+- **Connected demos** tab: Contoso Outdoors' launch day in story order. Downhill, whose shop sends players' support
+  tickets to Help Desk (the tests check this against the apps the root AppHost gives `HELP_DESK_URL`), then the Software
+  Factory and the apps that send it work orders: Help Desk, Data Desk, and Incident Commander (checked against the apps
+  the root AppHost gives `SOFTWARE_FACTORY_URL`).
 - **Staff assistant** tab: Hack the Harness's six stages (shared, isolated, promotable, direct, workers, and mixed),
   one row each with **Open**, which opens the local app at that stage (`?stage=<id>`). Every stage runs at once, so
   you can flip between them during a talk. Local only, so a deployed gallery leaves the tab out.

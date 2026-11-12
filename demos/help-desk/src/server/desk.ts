@@ -1,13 +1,16 @@
-// The help desk: the current simulation's tickets, one session per customer on the shared runtime, and the counters
-// the wall shows. Sessions are named after their simulation and customer, so after a restart Help Desk adopts the
-// latest simulation from the platform, rebuilds each conversation from its history, and deletes older leftovers.
-// Problems with the store's website the agents report are grouped into software issues, which the operator sends to
-// Software Factory; each work order's origin carries the simulation and area, so a restart finds them again.
-// Facts the agents propose wait in the team knowledge base until the operator adds or declines them, outside the agents'
-// turns; added facts outlive simulations and are part of every later session's instructions.
+// The help desk: the current simulation's tickets (one session per customer on the shared runtime), live players'
+// tickets from the Downhill Shop (independent of simulations), and the counters the wall shows. Session IDs name what
+// they belong to (`hd-<simulation>-<customer>`, `hd-player-<ticket>`), so after a restart Help Desk adopts the latest
+// simulation and every player ticket from the platform, rebuilds each conversation from its history, and deletes older
+// simulations' leftovers. Problems with the store's checkout code that the agents report are grouped into software
+// issues, which the operator sends to Software Factory; each work order's origin carries the issue's scope and area, so
+// a restart finds them again. Facts the customers' agents propose wait in the team knowledge base until the operator
+// adds or declines them, outside the agents' turns; added facts outlive simulations and are part of every later
+// customer session's instructions.
 import type { StoredMemory } from "@github/copilot-sdk";
 import type { SessionInfo } from "@managed-copilot/sdk";
 import {
+  BUG_AREAS,
   CLASSIFICATION_METHODS,
   SIMULATION_SIZES,
   type BugArea,
@@ -19,6 +22,8 @@ import {
   type HelpDeskState,
   type KnowledgeEntry,
   type MemoryProposal,
+  type PlayerTicket,
+  type PlayerTicketCreated,
   type RoutedWorkOrder,
   type RunInfo,
   type ServerEvent,
@@ -31,12 +36,13 @@ import type { HelpDeskConfig } from "./config.js";
 import { HelpDeskError, errorText, isMissingSession } from "./errors.js";
 import { FACTORY_NOT_CONNECTED, readProject, SoftwareFactory, workOrderName, workOrderUrl, type FactoryClient, type WorkOrderSummary } from "./factory.js";
 import { KnowledgeBase } from "./knowledge.js";
-import { groupIssues, isBugArea, issueKey, issueWorkOrder, type Reported, type ReportedConversation } from "./issues.js";
+import { groupIssues, isBugArea, issueKey, issueWorkOrder, parseIssueKey, playerScope, type Reported, type ReportedConversation } from "./issues.js";
 import { log } from "./log.js";
 import type { DeskPlatform } from "./platform.js";
+import { chatPath, contextOf, newTicketId, parsePlayerSessionId, parsePlayerTicket, PLAYER_TOOLS, sameOpening } from "./player.js";
 import { CUSTOMERS } from "./seed.js";
 import { Shop } from "./shop.js";
-import { parseSessionId, sessionIdFor, TicketSession, type TicketHost } from "./ticket.js";
+import { CustomerTicket, parseSessionId, PlayerTicketSession, sessionIdFor, type TicketHost, type TicketSession } from "./ticket.js";
 import { TOOLS } from "./tools.js";
 import { Triage } from "./triage.js";
 
@@ -45,6 +51,10 @@ const COUNTERS_MS = 300;
 const MAX_MESSAGE = 2_000;
 /** What classification reads of a conversation: the customer's messages, the latest last, up to this many characters. */
 const MAX_TRIAGE_TEXT = 4_000;
+/** Open player tickets at most: each becomes a live session, with its own premium requests, once the player writes. */
+export const MAX_PLAYER_TICKETS = 25;
+/** What a player hears while Help Desk can't tell yet whether their ticket still exists. */
+const RECONNECTING = "Support is reconnecting. Try again in a moment.";
 /** Work orders Software Factory is still working on. */
 const ACTIVE: ReadonlySet<WorkOrderStatus> = new Set(["queued", "planning", "building", "releasing"]);
 const MAX_FACTORY_BACKOFF_MS = 60_000;
@@ -56,9 +66,13 @@ interface Run {
   ending?: boolean;
 }
 
-/** An issue's work order, and the factory poll it was known by (a later poll that doesn't list it means it's gone). */
+/**
+ * An issue's work order, the scope it was sent in (a simulation's ID, or `player-<ticket>`), and the factory poll it was
+ * known by (a later poll that doesn't list it means it's gone).
+ */
 interface Routing {
   readonly workOrder: RoutedWorkOrder;
+  readonly scope: string;
   readonly poll: number;
 }
 
@@ -83,7 +97,7 @@ async function eachLimited<T>(items: readonly T[], limit: number, work: (item: T
 }
 
 /** The customer's messages in a ticket's conversation, oldest first. */
-function customerText(ticket: TicketSession): string {
+function customerText(ticket: CustomerTicket): string {
   return ticket
     .view()
     .items.flatMap((item) => (item.kind === "message" && item.from === "customer" ? [item.text] : []))
@@ -91,13 +105,7 @@ function customerText(ticket: TicketSession): string {
 }
 
 const gone = (session: SessionInfo) => session.state === "deleting" || session.state === "deleted";
-
-/** The area of the simulation's issue a work order was made of, if it's one of Help Desk's for that simulation. */
-function areaOf(summary: WorkOrderSummary, runId: string): BugArea | undefined {
-  const key = summary.origin?.app === "help-desk" ? summary.origin.key : undefined;
-  const area = key?.startsWith(`${runId}:`) ? key.slice(runId.length + 1) : undefined;
-  return area && isBugArea(area) ? area : undefined;
-}
+const firstOpened = (a: PlayerTicketSession, b: PlayerTicketSession) => a.openedAt.getTime() - b.openedAt.getTime() || a.ticketId.localeCompare(b.ticketId);
 
 export class HelpDesk implements TicketHost {
   readonly platform: DeskPlatform;
@@ -107,11 +115,14 @@ export class HelpDesk implements TicketHost {
   readonly #publish: (event: ServerEvent) => void;
   readonly #factory: FactoryClient;
   #run: Run | undefined;
-  /** By customer ID, in the store's customer order. */
-  readonly #tickets = new Map<string, TicketSession>();
-  /** The platform's records of the run's sessions: placement and sandbox. */
+  /** The simulation's customers' tickets, by customer ID, in the store's customer order. */
+  readonly #tickets = new Map<string, CustomerTicket>();
+  /** Live players' tickets, by ticket ID. Simulations never touch them. */
+  readonly #players = new Map<string, PlayerTicketSession>();
+  /** The platform's records of the tickets' sessions: placement and sandbox. */
   #records = new Map<string, SessionInfo>();
   #counters: Counters = { sessions: 0, runtimes: 0, sandboxes: 0, messages: 0, premiumRequests: 0 };
+  /** Coalesced publishing, by session ID. */
   readonly #ticketTimers = new Map<string, NodeJS.Timeout>();
   readonly #startTimers = new Set<NodeJS.Timeout>();
   #countersTimer: NodeJS.Timeout | undefined;
@@ -119,9 +130,14 @@ export class HelpDesk implements TicketHost {
   #operation: Promise<unknown> | undefined;
   #syncing: Promise<void> | undefined;
   #syncAgain = false;
+  /**
+   * Connected, but the platform's sessions not listed since: a player ticket Help Desk doesn't know may be one it hasn't
+   * picked up yet (right after a restart), not an ended one.
+   */
+  #pickingUp = false;
   readonly #unsubscribe: (() => void)[] = [];
-  /** The run's issues sent to Software Factory, by area. */
-  readonly #routings = new Map<BugArea, Routing>();
+  /** Issues sent to Software Factory, by issue key (`<scope>:<area>`). */
+  readonly #routings = new Map<string, Routing>();
   /** Issues being sent right now, by issue key. */
   readonly #sending = new Set<string>();
   /** The issues as last published. */
@@ -131,8 +147,8 @@ export class HelpDesk implements TicketHost {
   #factoryPolling: Promise<void> | undefined;
   #factoryTimer: NodeJS.Timeout | undefined;
   #factoryFailures = 0;
-  /** The run whose work orders were looked up in Software Factory: a new run has none, an adopted one may. */
-  #lookedUp: string | undefined;
+  /** Scopes whose work orders were looked up in Software Factory: a new simulation or ticket has none, a picked-up one may. */
+  readonly #lookedUp = new Set<string>();
   #closed = false;
   readonly #triage: Triage;
   /** The run's classifications, by customer ID. */
@@ -163,12 +179,20 @@ export class HelpDesk implements TicketHost {
 
   start(): void {
     this.#unsubscribe.push(
-      this.platform.onConnected(() => void this.sync()),
+      this.platform.onConnected(() => {
+        this.#pickingUp = true;
+        void this.sync();
+      }),
       this.platform.onStatus(() => this.#publish({ type: "platform", platform: this.platform.status, desk: this.desk() })),
       this.#triage.onChange(() => this.#publish({ type: "platform", platform: this.platform.status, desk: this.desk() })),
       this.#llmTriage.onChange(() => this.#publish({ type: "platform", platform: this.platform.status, desk: this.desk() })),
     );
-    this.#pollTimer = setInterval(() => void this.#poll(), this.#config.countersIntervalMs);
+    this.#pollTimer = setInterval(() => {
+      this.dropIdlePlayers();
+      // A listing that failed is tried again: until one works, open chats can't be told from ended ones.
+      if (this.#pickingUp && !this.#syncing && this.platform.status.state === "connected") void this.sync();
+      void this.#poll();
+    }, this.#config.countersIntervalMs);
     this.#pollTimer.unref?.();
   }
 
@@ -182,12 +206,12 @@ export class HelpDesk implements TicketHost {
     if (this.#countersTimer) clearTimeout(this.#countersTimer);
     if (this.#pollTimer) clearInterval(this.#pollTimer);
     this.#stopFactoryPolls();
-    for (const ticket of this.#tickets.values()) ticket.close();
+    for (const ticket of this.#allTickets()) ticket.close();
   }
 
   desk(): DeskInfo {
     const factory = { configured: this.#factory.configured, ...(this.#factory.configured && this.#factory.publicUrl ? { url: this.#factory.publicUrl } : {}) };
-    return { environment: this.#config.environment, ...(this.platform.model ? { model: this.platform.model } : {}), tools: TOOLS, factory, triage: this.#triage.status, llmTriage: this.#llmTriage.status };
+    return { environment: this.#config.environment, ...(this.platform.model ? { model: this.platform.model } : {}), tools: TOOLS, playerTools: PLAYER_TOOLS, factory, triage: this.#triage.status, llmTriage: this.#llmTriage.status };
   }
 
   #runInfo(): RunInfo | undefined {
@@ -195,18 +219,22 @@ export class HelpDesk implements TicketHost {
     return run ? { id: run.id, size: run.size, startedAt: run.startedAt.toISOString(), ...(run.ending ? { ending: true } : {}) } : undefined;
   }
 
+  #allTickets(): TicketSession[] {
+    return [...this.#tickets.values(), ...this.#players.values()];
+  }
+
   #views(): Ticket[] {
     return [...this.#tickets.values()].map((ticket) => this.#view(ticket));
   }
 
   /** A ticket as the wall shows it: its conversation, and its classification. */
-  #view(ticket: TicketSession): Ticket {
+  #view(ticket: CustomerTicket): Ticket {
     const triage = this.#triaged.get(ticket.customer.id);
     return { ...ticket.view(), ...(triage ? { triage } : {}) };
   }
 
   /** Classifies a customer's conversation (`text`: the customer's messages), when classification is set up. */
-  #classify(ticket: TicketSession, text: string): void {
+  #classify(ticket: CustomerTicket, text: string): void {
     const run = this.#run;
     // Not connected to the triage environment: the wall says why, rather than every ticket.
     if (!this.#triage.connected || !run) return;
@@ -228,14 +256,31 @@ export class HelpDesk implements TicketHost {
     });
   }
 
-  /** The run's software issues: its tickets' bug reports by area, and the work orders sent for them. */
+  /** Newest first. */
+  #playerViews(): PlayerTicket[] {
+    return [...this.#players.values()]
+      .sort((a, b) => firstOpened(b, a))
+      .map((ticket) => ticket.view());
+  }
+
+  /** The software issues: the simulation's customers' and the players' bug reports by area, and the work orders sent for them. */
   issues(): SoftwareIssue[] {
     const reports: Reported[] = [];
     for (const ticket of this.#tickets.values()) {
       const bug = ticket.bug;
       if (bug) reports.push({ customerId: ticket.customer.id, name: ticket.customer.name, bug });
     }
-    return groupIssues(reports, new Map([...this.#routings].map(([area, routing]) => [area, routing.workOrder])));
+    for (const ticket of this.#players.values()) {
+      const bug = ticket.bug;
+      if (bug) reports.push({ ticketId: ticket.ticketId, name: ticket.name, bug });
+    }
+    const routed = new Map<BugArea, RoutedWorkOrder>();
+    for (const area of BUG_AREAS) {
+      const scope = this.#scopeOf(area);
+      const routing = scope ? this.#routings.get(issueKey(scope, area)) : undefined;
+      if (routing) routed.set(area, routing.workOrder);
+    }
+    return groupIssues(reports, routed);
   }
 
   state(): HelpDeskState {
@@ -246,6 +291,7 @@ export class HelpDesk implements TicketHost {
       customers: this.shop.customers(),
       ...(run ? { run } : {}),
       tickets: this.#views(),
+      players: this.#playerViews(),
       ...(this.#classification ? { classification: this.#classification } : {}),
       classifications: this.#classifications,
       issues: this.issues(),
@@ -262,9 +308,26 @@ export class HelpDesk implements TicketHost {
       { type: "platform", platform: this.platform.status, desk: this.desk() },
       { type: "run", ...(run ? { run } : {}), tickets: this.#views(), issues: this.issues() },
       this.#classificationEvent(),
+      { type: "players", players: this.#playerViews() },
       { type: "counters", counters: this.#counters },
       this.#knowledgeEvent(),
     ];
+  }
+
+  /**
+   * What a player's chat page gets when it connects: the platform's status, and the ticket (none once it ended). While
+   * Help Desk can't tell yet whether a ticket it doesn't know ended, the page gets no ticket news at all.
+   */
+  playerEvents(ticketId: string): ServerEvent[] {
+    const ticket = this.#players.get(ticketId);
+    const platform: ServerEvent = { type: "platform", platform: this.platform.status, desk: this.desk() };
+    if (!ticket && this.#unsure()) return [platform];
+    return [platform, { type: "players", players: ticket ? [ticket.view()] : [] }];
+  }
+
+  /** Whether a ticket Help Desk doesn't know may still exist: it isn't connected, or hasn't picked up its tickets yet. */
+  #unsure(): boolean {
+    return this.#pickingUp || this.platform.status.state !== "connected";
   }
 
   #requireConnected(): void {
@@ -344,7 +407,7 @@ export class HelpDesk implements TicketHost {
     return current;
   }
 
-  /** Ends the current simulation, then starts `size` customers' sessions in a quick wave. */
+  /** Ends the current simulation, then starts `size` customers' sessions in a quick wave. Player tickets stay. */
   simulate(size: number): Promise<RunInfo> {
     if (!(SIMULATION_SIZES as readonly number[]).includes(size)) throw new HelpDeskError("invalid_request", `Simulate ${SIMULATION_SIZES.join(", ")} customers.`);
     this.#requireConnected();
@@ -355,11 +418,10 @@ export class HelpDesk implements TicketHost {
       const run: Run = { id: runIdAt(startedAt), size, startedAt };
       this.shop.reset(startedAt);
       this.#run = run;
-      this.#records = new Map();
       // A new simulation has no work orders in Software Factory yet.
-      this.#lookedUp = run.id;
+      this.#lookedUp.add(run.id);
       const customers = CUSTOMERS.slice(0, size);
-      for (const customer of customers) this.#tickets.set(customer.id, new TicketSession(this, customer, sessionIdFor(run.id, customer.id)));
+      for (const customer of customers) this.#tickets.set(customer.id, new CustomerTicket(this, customer, sessionIdFor(run.id, customer.id)));
       this.#publishRun();
       for (const customer of customers) this.#classify(this.#tickets.get(customer.id)!, customer.opening);
       customers.forEach((customer, index) => {
@@ -375,7 +437,7 @@ export class HelpDesk implements TicketHost {
     });
   }
 
-  /** Ends the simulation: deletes its sessions. */
+  /** Ends the simulation: deletes its sessions. Player tickets stay. */
   end(): Promise<void> {
     this.#requireConnected();
     return this.#exclusive(() => this.#endRun());
@@ -393,16 +455,15 @@ export class HelpDesk implements TicketHost {
     await Promise.all(tickets.map((ticket) => ticket.settled()));
     for (const ticket of tickets) ticket.close();
     await eachLimited(tickets, 8, (ticket) => this.#delete(ticket.sessionId));
-    for (const timer of this.#ticketTimers.values()) clearTimeout(timer);
-    this.#ticketTimers.clear();
+    for (const ticket of tickets) {
+      this.#clearTimer(ticket);
+      this.#records.delete(ticket.sessionId);
+    }
     this.#tickets.clear();
     this.#triaged.clear();
-    this.#records = new Map();
     this.#run = undefined;
-    // Software Factory keeps the work orders; the next simulation starts with no issues.
-    this.#routings.clear();
-    this.#lookedUp = undefined;
-    this.#stopFactoryPolls();
+    // Software Factory keeps the work orders; the next simulation's issues start over. The players' issues stay.
+    this.#dropScope(run.id);
     log.info("Ended a simulation", { run: run.id, sessions: tickets.length });
     this.#publishRun();
     this.#updateCounters();
@@ -416,7 +477,7 @@ export class HelpDesk implements TicketHost {
     }
   }
 
-  /** Sessions of earlier simulations that weren't deleted (Help Desk stopped while they ran). */
+  /** Sessions of earlier simulations that weren't deleted (Help Desk stopped while they ran). Players' sessions stay. */
   async #deleteLeftovers(sessions?: readonly SessionInfo[]): Promise<void> {
     let listed = sessions;
     if (!listed) {
@@ -432,7 +493,7 @@ export class HelpDesk implements TicketHost {
     await eachLimited(leftovers, 8, (session) => this.#delete(session.id));
   }
 
-  #require(customerId: string): TicketSession {
+  #require(customerId: string): CustomerTicket {
     const ticket = this.#tickets.get(customerId);
     if (!ticket) throw new HelpDeskError("not_found", "That customer isn't in the current simulation.", 404);
     return ticket;
@@ -442,11 +503,17 @@ export class HelpDesk implements TicketHost {
     return this.#view(this.#require(customerId));
   }
 
-  async send(customerId: string, text: unknown): Promise<void> {
-    this.#requireConnected();
+  /** A message someone typed: trimmed, and not too long. */
+  #message(text: unknown): string {
     const message = typeof text === "string" ? text.trim() : "";
     if (!message) throw new HelpDeskError("invalid_request", "Write a message first.");
     if (message.length > MAX_MESSAGE) throw new HelpDeskError("invalid_request", `Keep messages under ${MAX_MESSAGE.toLocaleString("en-US")} characters.`);
+    return message;
+  }
+
+  async send(customerId: string, text: unknown): Promise<void> {
+    this.#requireConnected();
+    const message = this.#message(text);
     const ticket = this.#require(customerId);
     const said = customerText(ticket);
     await ticket.send(message);
@@ -487,46 +554,203 @@ export class HelpDesk implements TicketHost {
     this.#publish(this.#knowledgeEvent());
   }
 
+  // ─── Players ───────────────────────────────────────────────────────────────────────────────────────────────
+
   /**
-   * Sends a software issue to Software Factory: a work order to fix the storefront, once per simulation and area. A
-   * failed send can be tried again. `appUrl` is Help Desk's address as the operator uses it, for the link back.
+   * Opens a live player's ticket when they open support in the game. It has no session yet: the player's first message
+   * starts it. With the `ticketId` of an open ticket of the same rider, that ticket is reopened instead and takes the
+   * context the game sent (`reopened`); so does the same opening sent twice (the game retried it).
+   */
+  openPlayerTicket(body: unknown): { readonly ticket: PlayerTicketCreated; readonly reopened: boolean } {
+    const request = parsePlayerTicket(body);
+    this.#requireConnected();
+    const context = contextOf(request);
+    const asked = request.ticketId ? this.#players.get(request.ticketId) : undefined;
+    // The game reopening a ticket that isn't picked up yet: wait for it rather than open a second one.
+    if (request.ticketId && !asked && this.#pickingUp) throw new HelpDeskError("platform_unavailable", RECONNECTING, 503);
+    const open =
+      asked && !asked.ending && asked.context?.player.rider === context.player.rider
+        ? asked
+        : [...this.#players.values()].find((ticket) => !ticket.ending && ticket.context !== undefined && sameOpening(ticket.context, context));
+    if (open) {
+      open.reopen(context);
+      log.info("A player opened support again", { player: open.ticketId, opener: context.opener, checkout: context.checkout !== undefined });
+      return { ticket: { ticketId: open.ticketId, chatPath: chatPath(open.ticketId) }, reopened: true };
+    }
+    if (this.#players.size >= MAX_PLAYER_TICKETS) {
+      throw new HelpDeskError("too_many_tickets", `Help Desk has ${MAX_PLAYER_TICKETS} open player tickets already. End some on the wall, then try again.`, 429);
+    }
+    let ticketId = newTicketId();
+    while (this.#players.has(ticketId)) ticketId = newTicketId();
+    const ticket = new PlayerTicketSession(this, ticketId, context);
+    this.#players.set(ticketId, ticket);
+    // A new ticket has no work orders in Software Factory yet.
+    this.#lookedUp.add(playerScope(ticketId));
+    this.#publishPlayers();
+    log.info("A player opened support", { player: ticketId, opener: context.opener, checkout: context.checkout !== undefined });
+    return { ticket: { ticketId, chatPath: chatPath(ticketId) }, reopened: false };
+  }
+
+  #requirePlayer(ticketId: string): PlayerTicketSession {
+    const ticket = this.#players.get(ticketId);
+    if (ticket) return ticket;
+    if (this.#unsure()) throw new HelpDeskError("platform_unavailable", RECONNECTING, 503);
+    throw new HelpDeskError("not_found", "There's no such support chat. It may have ended.", 404);
+  }
+
+  playerTicket(ticketId: string): PlayerTicket {
+    return this.#requirePlayer(ticketId).view();
+  }
+
+  /** Sends a message as the player (from their chat page, or from the wall). The first one starts the session. */
+  async sendAsPlayer(ticketId: string, text: unknown): Promise<void> {
+    this.#requireConnected();
+    const message = this.#message(text);
+    const ticket = this.#requirePlayer(ticketId);
+    if (ticket.ending) throw new HelpDeskError("not_found", "This support chat has ended.", 404);
+    await ticket.send(message);
+  }
+
+  answerPlayer(ticketId: string, approvalId: string, approve: boolean): void {
+    this.#requirePlayer(ticketId).answer(approvalId, approve);
+  }
+
+  /** Ends a player's ticket: deletes its session, if it has one. The player's chat page says it ended. */
+  async endPlayer(ticketId: string): Promise<void> {
+    this.#requireConnected();
+    const ticket = this.#requirePlayer(ticketId);
+    if (ticket.ending) throw new HelpDeskError("busy", "This ticket is being ended already.", 409);
+    ticket.ending = true;
+    this.#publish({ type: "player", ticket: ticket.view() });
+    try {
+      // A create in flight finishes first, so its session is deleted too.
+      await ticket.settled();
+      ticket.close();
+      if (ticket.created) await this.#delete(ticket.sessionId);
+    } finally {
+      this.#removePlayer(ticket);
+    }
+    log.info("Ended a player's ticket", { player: ticketId });
+  }
+
+  /**
+   * Drops the player tickets that never got a message (no session, nothing to delete) once `playerIdleMs` passed since
+   * the game last opened them, so stray opens don't clutter the wall. Tickets with a conversation stay until ended.
+   */
+  dropIdlePlayers(now = Date.now()): void {
+    for (const ticket of [...this.#players.values()]) {
+      if (ticket.created || ticket.ending || ticket.status() === "starting" || now - ticket.lastOpenedAt < this.#config.playerIdleMs) continue;
+      this.#removePlayer(ticket);
+      log.info("Dropped a player's ticket that never got a message", { player: ticket.ticketId });
+    }
+  }
+
+  #removePlayer(ticket: PlayerTicketSession): void {
+    ticket.close();
+    if (this.#players.get(ticket.ticketId) === ticket) this.#players.delete(ticket.ticketId);
+    this.#clearTimer(ticket);
+    this.#records.delete(ticket.sessionId);
+    this.#dropScope(playerScope(ticket.ticketId));
+    this.#publishPlayers();
+    this.#updateIssues();
+    this.#updateCounters();
+  }
+
+  // ─── Software issues ───────────────────────────────────────────────────────────────────────────────────────
+
+  /** The open player tickets that reported a problem in `area`, the first opened first. */
+  #playerReporters(area: BugArea): PlayerTicketSession[] {
+    return [...this.#players.values()].filter((ticket) => ticket.bug?.area === area).sort(firstOpened);
+  }
+
+  /**
+   * Whose reports an area's issue goes to Software Factory with, its scope: the running simulation's (players' reports
+   * join it), or with none running, the first opened player ticket's that reported it. An issue is sent once per scope.
+   */
+  #scopeOf(area: BugArea): string | undefined {
+    if (this.#run) return this.#run.id;
+    const first = this.#playerReporters(area)[0];
+    return first ? playerScope(first.ticketId) : undefined;
+  }
+
+  /** The scopes whose work orders matter now: the simulation's, and each open player ticket's. */
+  #scopes(): Set<string> {
+    const scopes = new Set<string>();
+    if (this.#run) scopes.add(this.#run.id);
+    for (const ticketId of this.#players.keys()) scopes.add(playerScope(ticketId));
+    return scopes;
+  }
+
+  #needsLookup(): boolean {
+    return [...this.#scopes()].some((scope) => !this.#lookedUp.has(scope));
+  }
+
+  /** A simulation or player ticket ended: its issues' work orders no longer show (Software Factory keeps them). */
+  #dropScope(scope: string): void {
+    for (const [key, routing] of [...this.#routings]) if (routing.scope === scope) this.#routings.delete(key);
+    this.#lookedUp.delete(scope);
+    if (this.#scopes().size === 0) this.#stopFactoryPolls();
+  }
+
+  /**
+   * Sends a software issue to Software Factory: a work order to fix the storefront's code, once per scope and area (see
+   * `#scopeOf`). A failed send can be tried again. `appUrl` is Help Desk's address as the operator uses it, for the link
+   * back.
    */
   async routeIssue(area: string, appUrl: string): Promise<SoftwareIssue> {
     if (!isBugArea(area)) throw new HelpDeskError("not_found", "There's no such software issue.", 404);
     if (!this.#factory.configured) throw new HelpDeskError("factory_unavailable", FACTORY_NOT_CONNECTED, 503);
     const run = this.#run;
-    if (!run || run.ending) throw new HelpDeskError("not_found", "No simulation is running: software issues come from its conversations.", 404);
+    if (run?.ending) throw new HelpDeskError("busy", "The simulation is ending. Try again in a moment.", 409);
     const reports = this.#conversations(area);
-    if (reports.length === 0) throw new HelpDeskError("not_found", "No customer of this simulation has reported this problem.", 404);
-    const sent = this.#routings.get(area)?.workOrder;
+    if (reports.length === 0) {
+      const nobody = !run
+        ? "No player has reported this problem, and no simulation is running."
+        : this.#players.size > 0
+          ? "No customer or player has reported this problem."
+          : "No customer of this simulation has reported this problem.";
+      throw new HelpDeskError("not_found", nobody, 404);
+    }
+    const scope = this.#scopeOf(area)!;
+    const key = issueKey(scope, area);
+    const sent = this.#routings.get(key)?.workOrder;
     if (sent) throw new HelpDeskError("conflict", `This issue was sent to Software Factory already, as ${workOrderName(sent.number)}.`, 409);
-    const key = issueKey(run.id, area);
     if (this.#sending.has(key)) throw new HelpDeskError("conflict", "This issue is being sent to Software Factory right now.", 409);
     this.#sending.add(key);
     try {
       // Sent before Help Desk restarted, while Software Factory couldn't be asked: it isn't sent twice.
-      const existing = (await this.#factory.list()).find((summary) => areaOf(summary, run.id) === area);
+      const existing = (await this.#factory.list()).find((summary) => summary.origin?.app === "help-desk" && summary.origin.key === key);
       if (existing) {
-        if (this.#run === run) this.#track(area, existing);
+        if (this.#scopeOf(area) === scope) this.#track(key, scope, existing);
         throw new HelpDeskError("conflict", `This issue was sent to Software Factory already, as ${workOrderName(existing.number)}.`, 409);
       }
-      const request = issueWorkOrder({ area, runId: run.id, appUrl, reports, project: await readProject(this.#config.storefrontDir) });
+      const request = issueWorkOrder({ area, scope, appUrl, reports, project: await readProject(this.#config.storefrontDir) });
       const created = await this.#factory.create(request);
-      log.info("Sent a software issue to Software Factory", { area, workOrder: workOrderName(created.number), reports: reports.length });
-      if (this.#run !== run) throw new HelpDeskError("conflict", `The simulation ended while the issue was being sent. Software Factory has it as ${workOrderName(created.number)}.`, 409);
-      this.#track(area, created);
+      log.info("Sent a software issue to Software Factory", { area, scope, workOrder: workOrderName(created.number), reports: reports.length });
+      if (this.#scopeOf(area) !== scope) {
+        const what = run && scope === run.id ? "The simulation ended" : this.#run ? "A simulation started" : "The ticket that reported it first was ended";
+        throw new HelpDeskError("conflict", `${what} while the issue was being sent. Software Factory has it as ${workOrderName(created.number)}.`, 409);
+      }
+      this.#track(key, scope, created);
       return this.issues().find((issue) => issue.area === area)!;
     } finally {
       this.#sending.delete(key);
     }
   }
 
-  /** The run's tickets that reported a problem in `area`, with their conversations. */
-  #conversations(area: string): ReportedConversation[] {
-    return [...this.#tickets.values()].flatMap((ticket) => {
+  /** The tickets that reported a problem in `area`, with their conversations: the simulation's customers, and players. */
+  #conversations(area: BugArea): ReportedConversation[] {
+    const customers = [...this.#tickets.values()].flatMap((ticket): ReportedConversation[] => {
       const view = ticket.view();
       return view.bug?.area === area ? [{ customerId: ticket.customer.id, name: ticket.customer.name, bug: view.bug, items: view.items }] : [];
     });
+    const players = [...this.#players.values()].flatMap((ticket): ReportedConversation[] => {
+      const view = ticket.view();
+      if (view.bug?.area !== area) return [];
+      const shop = view.checkout ? { shop: { checkout: view.checkout, ...(view.gameVersion ? { gameVersion: view.gameVersion } : {}) } } : {};
+      return [{ ticketId: ticket.ticketId, name: view.player.name, bug: view.bug, items: view.items, ...shop }];
+    });
+    return [...customers, ...players];
   }
 
   #routed(summary: WorkOrderSummary): RoutedWorkOrder {
@@ -535,8 +759,8 @@ export class HelpDesk implements TicketHost {
   }
 
   /** Follows an issue's work order from now on. */
-  #track(area: BugArea, summary: WorkOrderSummary): void {
-    this.#routings.set(area, { workOrder: this.#routed(summary), poll: this.#factoryPolls });
+  #track(key: string, scope: string, summary: WorkOrderSummary): void {
+    this.#routings.set(key, { workOrder: this.#routed(summary), scope, poll: this.#factoryPolls });
     this.#updateIssues();
     this.#scheduleFactoryPoll();
   }
@@ -545,7 +769,7 @@ export class HelpDesk implements TicketHost {
     return [...this.#routings.values()].some((routing) => ACTIVE.has(routing.workOrder.status));
   }
 
-  /** Reads Software Factory's work orders: the status of the run's own, and (after a restart) which issues were sent. */
+  /** Reads Software Factory's work orders: the status of the ones sent, and (after a restart) which issues were sent. */
   pollFactory(): Promise<void> {
     this.#factoryPolling ??= this.#pollFactory().finally(() => {
       this.#factoryPolling = undefined;
@@ -554,46 +778,50 @@ export class HelpDesk implements TicketHost {
   }
 
   async #pollFactory(): Promise<void> {
-    const run = this.#run;
-    if (!run || this.#closed || !this.#factory.configured) return;
+    const scopes = this.#scopes();
+    if (scopes.size === 0 || this.#closed || !this.#factory.configured) return;
     const poll = ++this.#factoryPolls;
     let summaries: WorkOrderSummary[];
     try {
       summaries = await this.#factory.list();
     } catch (error) {
       if (this.#factoryFailures++ === 0) log.warn("Couldn't read the work orders in Software Factory; trying again", { error: errorText(error) });
-      if (this.#run === run && (this.#lookedUp !== run.id || this.#anyActive())) {
+      if (this.#needsLookup() || this.#anyActive()) {
         this.#scheduleFactoryPoll(Math.min(MAX_FACTORY_BACKOFF_MS, this.#config.factoryPollMs * 2 ** Math.min(this.#factoryFailures, 4)));
       }
       return;
     }
     this.#factoryFailures = 0;
-    if (this.#run !== run) return;
+    // A simulation or ticket that ended while the list was read no longer counts.
+    const current = this.#scopes();
     const byId = new Map(summaries.map((summary) => [summary.id, summary]));
-    for (const [area, routing] of [...this.#routings]) {
+    for (const [key, routing] of [...this.#routings]) {
       const summary = byId.get(routing.workOrder.workOrderId);
-      if (summary) this.#routings.set(area, { workOrder: this.#routed(summary), poll });
+      if (!current.has(routing.scope)) this.#routings.delete(key);
+      else if (summary) this.#routings.set(key, { ...routing, workOrder: this.#routed(summary), poll });
       else if (routing.poll < poll) {
         // Known before this poll started, and not listed: deleted in Software Factory. The issue can be sent again.
-        this.#routings.delete(area);
-        log.info("A software issue's work order is no longer in Software Factory", { area, workOrder: workOrderName(routing.workOrder.number) });
+        this.#routings.delete(key);
+        log.info("A software issue's work order is no longer in Software Factory", { key, workOrder: workOrderName(routing.workOrder.number) });
       }
     }
-    // Newest first: an area's latest work order wins.
+    // Newest first: a key's latest work order wins.
     for (const summary of summaries) {
-      const area = areaOf(summary, run.id);
-      if (area && !this.#routings.has(area)) this.#routings.set(area, { workOrder: this.#routed(summary), poll });
+      const parsed = summary.origin?.app === "help-desk" && summary.origin.key ? parseIssueKey(summary.origin.key) : undefined;
+      if (!parsed || !current.has(parsed.scope)) continue;
+      const key = issueKey(parsed.scope, parsed.area);
+      if (!this.#routings.has(key)) this.#routings.set(key, { workOrder: this.#routed(summary), scope: parsed.scope, poll });
     }
-    if (this.#lookedUp !== run.id) {
-      this.#lookedUp = run.id;
-      if (this.#routings.size > 0) log.info("Found the simulation's work orders in Software Factory", { run: run.id, workOrders: this.#routings.size });
-    }
+    const found = [...scopes].filter((scope) => current.has(scope) && !this.#lookedUp.has(scope));
+    for (const scope of found) this.#lookedUp.add(scope);
+    const recovered = [...this.#routings.values()].filter((routing) => found.includes(routing.scope)).length;
+    if (recovered > 0) log.info("Found sent issues' work orders in Software Factory", { workOrders: recovered });
     this.#updateIssues();
     if (this.#anyActive()) this.#scheduleFactoryPoll();
   }
 
   #scheduleFactoryPoll(delay = this.#config.factoryPollMs): void {
-    if (this.#factoryTimer || this.#closed || !this.#factory.configured || !this.#run) return;
+    if (this.#factoryTimer || this.#closed || !this.#factory.configured || this.#scopes().size === 0) return;
     this.#factoryTimer = setTimeout(() => {
       this.#factoryTimer = undefined;
       void this.pollFactory();
@@ -606,6 +834,8 @@ export class HelpDesk implements TicketHost {
     this.#factoryTimer = undefined;
     this.#factoryFailures = 0;
   }
+
+  // ─── The platform ──────────────────────────────────────────────────────────────────────────────────────────
 
   /** After every (re)connection: sessions on the previous client are gone, and Help Desk may have restarted. */
   sync(): Promise<void> {
@@ -625,7 +855,7 @@ export class HelpDesk implements TicketHost {
   }
 
   async #sync(): Promise<void> {
-    for (const ticket of this.#tickets.values()) ticket.detach();
+    for (const ticket of this.#allTickets()) ticket.detach();
     let sessions: SessionInfo[];
     try {
       sessions = (await this.platform.listSessions()).filter((session) => !gone(session));
@@ -634,11 +864,12 @@ export class HelpDesk implements TicketHost {
     }
     const adopting = !this.#run;
     if (adopting) this.#adopt(sessions);
+    this.#adoptPlayers(sessions);
+    this.#pickingUp = false;
     const run = this.#run;
     void this.#deleteLeftovers(sessions);
-    if (!run) return;
     const existing = new Set(sessions.map((session) => session.id));
-    await eachLimited([...this.#tickets.values()], 6, async (ticket) => {
+    await eachLimited(this.#allTickets(), 6, async (ticket) => {
       // Being started right now: its start finishes on its own.
       if (ticket.pending) return;
       if (!existing.has(ticket.sessionId)) {
@@ -647,17 +878,21 @@ export class HelpDesk implements TicketHost {
       }
       if ((await ticket.attach()) === "gone") this.#dropTicket(ticket);
     });
-    // Refunds and cancellations live in the sessions' histories: apply them to the store (each only once).
-    for (const ticket of this.#tickets.values()) {
-      for (const effect of ticket.effects()) {
-        if (effect.tool === "request_refund") this.shop.refund(ticket.customer.id, effect.args["orderId"], effect.args["amount"], effect.id);
-        else this.shop.cancel(ticket.customer.id, effect.args["orderId"], effect.id);
+    // Refunds and cancellations live in the sessions' histories: apply them to the store (each only once). A player's
+    // ticket applies its own when its conversation is read.
+    if (run && this.#run === run) {
+      for (const ticket of this.#tickets.values()) {
+        for (const effect of ticket.effects()) {
+          if (effect.tool === "request_refund") this.shop.refund(ticket.customer.id, effect.args["orderId"], effect.args["amount"], effect.id);
+          else this.shop.cancel(ticket.customer.id, effect.args["orderId"], effect.id);
+        }
       }
     }
     this.#publishRun();
     if (adopting) for (const ticket of this.#tickets.values()) this.#classify(ticket, customerText(ticket) || ticket.customer.opening);
-    // An adopted simulation's issues may have been sent to Software Factory before the restart.
-    if (this.#lookedUp !== run.id) void this.pollFactory();
+    this.#publishPlayers();
+    // A picked-up simulation's or ticket's issues may have been sent to Software Factory before the restart.
+    if (this.#needsLookup()) void this.pollFactory();
     await this.#poll();
   }
 
@@ -674,22 +909,41 @@ export class HelpDesk implements TicketHost {
     const customers = new Set(runs.get(latest));
     this.shop.reset(startedAt);
     this.#run = { id: latest, size: customers.size, startedAt };
-    for (const customer of CUSTOMERS) if (customers.has(customer.id)) this.#tickets.set(customer.id, new TicketSession(this, customer, sessionIdFor(latest, customer.id), true));
+    for (const customer of CUSTOMERS) if (customers.has(customer.id)) this.#tickets.set(customer.id, new CustomerTicket(this, customer, sessionIdFor(latest, customer.id), true));
     log.info("Picked up the latest simulation from Managed Copilot", { run: latest, sessions: customers.size });
   }
 
-  #dropTicket(ticket: TicketSession): void {
-    ticket.close();
-    if (this.#tickets.get(ticket.customer.id) === ticket) this.#tickets.delete(ticket.customer.id);
-    log.info("A customer's session no longer exists", { customer: ticket.customer.id });
+  /** Picks up every player ticket left on the platform: their checkouts are read back from their conversations. */
+  #adoptPlayers(sessions: readonly SessionInfo[]): void {
+    let found = 0;
+    for (const session of sessions) {
+      const ticketId = parsePlayerSessionId(session.id);
+      if (!ticketId || this.#players.has(ticketId)) continue;
+      this.#players.set(ticketId, new PlayerTicketSession(this, ticketId));
+      found += 1;
+    }
+    if (found > 0) log.info("Picked up player tickets from Managed Copilot", { tickets: found });
   }
 
-  /** Reads the run's session records (placement and sandbox) for the counters. */
+  #dropTicket(ticket: TicketSession): void {
+    if (ticket instanceof PlayerTicketSession) {
+      log.info("A player's session no longer exists", { player: ticket.ticketId });
+      this.#removePlayer(ticket);
+      return;
+    }
+    ticket.close();
+    if (ticket instanceof CustomerTicket) {
+      if (this.#tickets.get(ticket.customer.id) === ticket) this.#tickets.delete(ticket.customer.id);
+      log.info("A customer's session no longer exists", { customer: ticket.customer.id });
+    }
+  }
+
+  /** Reads the tickets' session records (placement and sandbox) for the counters. */
   async #poll(): Promise<void> {
-    if (!this.#run || this.platform.status.state !== "connected") return;
+    if ((!this.#run && this.#players.size === 0) || this.platform.status.state !== "connected") return;
     try {
       const sessions = await this.platform.listSessions();
-      const ids = new Set([...this.#tickets.values()].map((ticket) => ticket.sessionId));
+      const ids = new Set(this.#allTickets().map((ticket) => ticket.sessionId));
       this.#records = new Map(sessions.filter((session) => ids.has(session.id) && !gone(session)).map((session) => [session.id, session]));
       this.#updateCounters();
     } catch (error) {
@@ -699,7 +953,7 @@ export class HelpDesk implements TicketHost {
 
   /** The wall's counters: sessions and messages from the tickets, runtimes and sandboxes from the platform's records. */
   computeCounters(): Counters {
-    const sessions = [...this.#tickets.values()].filter((ticket) => ticket.created);
+    const sessions = this.#allTickets().filter((ticket) => ticket.created);
     let shared = 0;
     let sandboxed = 0;
     let sandboxes = 0;
@@ -727,7 +981,7 @@ export class HelpDesk implements TicketHost {
     this.#publish({ type: "counters", counters: next });
   }
 
-  /** Publishes the run's software issues when they changed. */
+  /** Publishes the software issues when they changed. */
   #updateIssues(): void {
     const issues = this.issues();
     const json = JSON.stringify(issues);
@@ -743,13 +997,25 @@ export class HelpDesk implements TicketHost {
     this.#publish({ type: "run", ...(run ? { run } : {}), tickets: this.#views(), issues });
   }
 
+  #publishPlayers(): void {
+    // The list would leave out tickets not picked up yet, and their chat pages would take that as ended.
+    if (this.#pickingUp) return;
+    this.#publish({ type: "players", players: this.#playerViews() });
+  }
+
+  #clearTimer(ticket: TicketSession): void {
+    const timer = this.#ticketTimers.get(ticket.sessionId);
+    if (timer) clearTimeout(timer);
+    this.#ticketTimers.delete(ticket.sessionId);
+  }
+
   // TicketHost
 
   knowledgePrompt(): string {
     return this.knowledge.prompt();
   }
 
-  async remember(ticket: TicketSession, memory: StoredMemory): Promise<void> {
+  async remember(ticket: CustomerTicket, memory: StoredMemory): Promise<void> {
     let proposal: MemoryProposal | undefined;
     try {
       proposal = this.knowledge.propose({ ...memory, customerId: ticket.customer.id, customerName: ticket.customer.name, sessionId: ticket.sessionId });
@@ -764,19 +1030,23 @@ export class HelpDesk implements TicketHost {
     this.changed(ticket);
   }
 
-  proposal(ticket: TicketSession): MemoryProposal | undefined {
+  proposal(ticket: CustomerTicket): MemoryProposal | undefined {
     return this.knowledge.proposals().find((proposal) => proposal.source.sessionId === ticket.sessionId);
   }
 
   changed(ticket: TicketSession): void {
-    const id = ticket.customer.id;
-    if (!this.#ticketTimers.has(id)) {
+    const key = ticket.sessionId;
+    if (!this.#ticketTimers.has(key)) {
       const timer = setTimeout(() => {
-        this.#ticketTimers.delete(id);
-        if (this.#tickets.get(id) === ticket) this.#publish({ type: "ticket", ticket: this.#view(ticket) });
+        this.#ticketTimers.delete(key);
+        if (ticket instanceof PlayerTicketSession) {
+          if (this.#players.get(ticket.ticketId) === ticket) this.#publish({ type: "player", ticket: ticket.view() });
+        } else if (ticket instanceof CustomerTicket && this.#tickets.get(ticket.customer.id) === ticket) {
+          this.#publish({ type: "ticket", ticket: this.#view(ticket) });
+        }
       }, PUBLISH_MS);
       timer.unref?.();
-      this.#ticketTimers.set(id, timer);
+      this.#ticketTimers.set(key, timer);
     }
     if (!this.#countersTimer) {
       // The counters and the issues follow the tickets, a little behind.

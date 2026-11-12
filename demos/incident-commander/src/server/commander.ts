@@ -13,7 +13,7 @@ import type { EventHub } from "./hub.js";
 import { IncidentRun, summarize } from "./incident.js";
 import { log } from "./log.js";
 import type { IncidentPlatform } from "./platform.js";
-import type { ServiceCatalog } from "./services.js";
+import { ServiceLoadError, type ServiceCatalog, type ServiceEntry } from "./services.js";
 import type { Store } from "./store.js";
 
 /** A re-sent alert notes "fired again" at most this often. */
@@ -190,13 +190,15 @@ export class Commander {
   async #receive(status: IncomingAlert["status"], alert: AlertInfo): Promise<string> {
     const open = this.#store.openByFingerprint(alert.fingerprint);
     if (status === "resolved") {
-      if (!open) return "";
-      this.#store.update(open.id, (incident) => {
-        incident.alert = { ...incident.alert, resolvedAt: alert.resolvedAt ?? new Date().toISOString() };
+      // The alert's incident: the open one, or the one its deploy resolved before the alerting tool said so.
+      const incident = open ?? this.#store.latestByFingerprint(alert.fingerprint);
+      if (!incident || (!open && incident.alert.resolvedAt)) return "";
+      this.#store.update(incident.id, (stored) => {
+        stored.alert = { ...stored.alert, resolvedAt: alert.resolvedAt ?? new Date().toISOString() };
       });
-      this.#store.note(open.id, "resolved", `${alert.name} resolved in ${SOURCE_LABEL[alert.source]}`);
-      this.#changed(open.id);
-      return open.id;
+      this.#store.note(incident.id, "resolved", `${incident.alert.name} resolved in ${SOURCE_LABEL[alert.source]}`);
+      this.#changed(incident.id);
+      return incident.id;
     }
     if (open) {
       const last = open.timeline.filter((entry) => entry.kind === "alert").at(-1);
@@ -206,9 +208,23 @@ export class Commander {
       }
       return open.id;
     }
-    const service = await this.#catalog.find(alert.service);
+    let service: ServiceEntry | undefined;
+    let unavailable: string | undefined;
+    try {
+      service = await this.#catalog.find(alert.service);
+    } catch (error) {
+      // A service over HTTP that can't be loaded right now: the incident opens anyway, and Copilot tries again.
+      if (!(error instanceof ServiceLoadError)) throw error;
+      unavailable = error.message;
+      log.warn("Couldn't load an alert's service", { service: alert.service, error: unavailable });
+    }
     const demo = service?.demo ? { seed: randomInt(1, 2 ** 31), at: new Date().toISOString() } : undefined;
-    return this.#open(alert, demo, service?.version);
+    const id = await this.#open(alert, demo, service?.version);
+    if (unavailable) {
+      this.#store.note(id, "error", unavailable, "Copilot tries again when it opens the service's files.");
+      this.#changed(id);
+    }
+    return id;
   }
 
   async #open(alert: AlertInfo, demo: DemoSeed | undefined, version?: string, fixRoute: FixRoute = this.fixRoute()): Promise<string> {

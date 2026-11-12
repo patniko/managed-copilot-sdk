@@ -18,11 +18,14 @@ export interface PlatformStatus {
   readonly account?: AccountSummary;
 }
 
-/** The environment every customer's session runs in, the model and tools each session gets, and where issues go. */
+/** The environment every session runs in, the model and tools each session gets, and where issues go. */
 export interface DeskInfo {
   readonly environment: string;
   readonly model?: string;
+  /** A store customer's tools. */
   readonly tools: readonly ToolInfo[];
+  /** A Downhill player's tools. */
+  readonly playerTools: readonly ToolInfo[];
   readonly factory: FactoryInfo;
   readonly triage: TriageInfo;
   /** Classification with the support sessions' ordinary LLM, which Classify offers to compare with the decision model. */
@@ -77,7 +80,7 @@ export interface FactoryInfo {
 }
 
 export interface ToolInfo {
-  readonly name: ToolName;
+  readonly name: ToolName | PlayerToolName;
   /** Runs only after the operator approves it. */
   readonly approval: boolean;
 }
@@ -85,7 +88,14 @@ export interface ToolInfo {
 export const TOOL_NAMES = ["list_my_orders", "get_order", "track_shipment", "request_refund", "cancel_order", "report_bug", "resolve_conversation"] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
-/** The parts of the store's website an agent reports problems with (`report_bug`). */
+/** A Downhill player's tools: their checkout, a refund of their Downhill Shop order, and the store's bug report. */
+export const PLAYER_TOOL_NAMES = ["get_checkout", "request_refund", "report_bug", "resolve_conversation"] as const;
+export type PlayerToolName = (typeof PLAYER_TOOL_NAMES)[number];
+
+/**
+ * The parts of the store's website an agent reports problems with (`report_bug`). The Downhill Shop runs on the same
+ * checkout code, so a player's agent reports with the same areas.
+ */
 export const BUG_AREAS = ["promo-codes", "cart", "order-status", "other"] as const;
 export type BugArea = (typeof BUG_AREAS)[number];
 
@@ -115,6 +125,7 @@ export interface CustomerCard {
 }
 
 /**
+ * - `opened`: a player opened support and hasn't written yet (their session starts with their first message).
  * - `starting`: its session is being created.
  * - `answering`: the agent is working on the customer's message.
  * - `approval`: a refund or a cancellation waits for the operator. A proposed team memory doesn't hold the ticket.
@@ -122,7 +133,7 @@ export interface CustomerCard {
  * - `resolved`: the agent marked the request handled.
  * - `failed`: the session couldn't start or the platform reported an error.
  */
-export type TicketStatus = "starting" | "answering" | "approval" | "waiting" | "resolved" | "failed";
+export type TicketStatus = "opened" | "starting" | "answering" | "approval" | "waiting" | "resolved" | "failed";
 
 /**
  * A tool call as the transcript shows it.
@@ -138,11 +149,14 @@ export type ToolCallStatus = "running" | "asking" | "done" | "refused" | "declin
 export interface MessageItem {
   readonly kind: "message";
   readonly id: string;
+  /** `customer`: the person asking for help, a store customer or a Downhill player. */
   readonly from: "customer" | "agent";
   readonly text: string;
   readonly at: string;
   /** Still being written. */
   readonly streaming?: boolean;
+  /** What came with the message, for example "Checkout details" from the Downhill Shop. */
+  readonly attachment?: string;
 }
 
 export interface ToolItem {
@@ -161,7 +175,7 @@ export interface ToolItem {
 
 export type TranscriptItem = MessageItem | ToolItem;
 
-/** A refund or cancellation waiting for the operator. */
+/** A refund or cancellation waiting for the operator (a Downhill player's refunds are of their Downhill Shop order). */
 export interface ApprovalRequest {
   readonly id: string;
   readonly action: "refund" | "cancel";
@@ -205,7 +219,10 @@ export interface KnowledgeEntry {
   readonly at: string;
 }
 
-/** A problem with the store's website that a customer ran into, as their agent reported it with `report_bug`. */
+/**
+ * A problem with the store's website (or the Downhill Shop's checkout, which runs on its code) that a customer or player
+ * ran into, as their agent reported it with `report_bug`.
+ */
 export interface BugReport {
   readonly area: BugArea;
   /** One line. */
@@ -238,9 +255,14 @@ export interface Ticket {
   readonly triage?: TicketTriage;
 }
 
-/** One customer's report in a software issue. */
+/** One report in a software issue: a store customer's (`customerId`), or a Downhill player's (`ticketId`). */
 export interface IssueReport {
-  readonly customerId: string;
+  /** The simulation's customer who reported it. */
+  readonly customerId?: string;
+  /** The player ticket that reported it. */
+  readonly ticketId?: string;
+  /** Where a player ran into it: the Downhill Shop. */
+  readonly product?: Product;
   readonly name: string;
   readonly whatHappened: string;
   readonly orderId?: string;
@@ -265,7 +287,10 @@ export interface RoutedWorkOrder {
   readonly error?: string;
 }
 
-/** The current simulation's reports about one area of the website: one issue to send to Software Factory. */
+/**
+ * The reports about one area of the store's checkout code: the current simulation's customers and Downhill players. One
+ * issue to send to Software Factory.
+ */
 export interface SoftwareIssue {
   readonly area: BugArea;
   /** What's wrong, for example "Promo codes rejected at checkout". */
@@ -274,6 +299,112 @@ export interface SoftwareIssue {
   readonly reports: readonly IssueReport[];
   /** The work order it was sent as. */
   readonly routed?: RoutedWorkOrder;
+}
+
+/**
+ * Downhill: Contoso Outdoors' free mountain-biking browser game. Its in-game shop, the Downhill Shop, sells rider outfits
+ * and bike paint, and its checkout runs on the store's own checkout code.
+ */
+export type Product = "downhill";
+export const PRODUCT_NAME = "Downhill";
+export const SHOP_NAME = "Downhill Shop";
+
+/** One thing in a Downhill Shop cart: a rider outfit or a bike paint. */
+export interface ShopItem {
+  readonly sku: string;
+  readonly name: string;
+  readonly priceCents: number;
+}
+
+/** A Downhill Shop order the player paid for. */
+export interface ShopOrder {
+  /** For example `DH-1042`. */
+  readonly id: string;
+  readonly totalCents: number;
+  readonly paidAt: string;
+}
+
+/** What a player tried at the Downhill Shop's checkout, as the game sent it. */
+export interface ShopCheckout {
+  /** The promotion code exactly as checkout got it, for example `trail15`. None when no code reached checkout. */
+  readonly code?: string;
+  /** What checkout said about the code, for example "Invalid code.". */
+  readonly error?: string;
+  /** The shop's offer the code came from. */
+  readonly offer?: string;
+  readonly items: readonly ShopItem[];
+  readonly subtotalCents: number;
+  /** Present when the player bought anyway, at full price. */
+  readonly order?: ShopOrder;
+}
+
+/** Where in the game the player opened support. */
+export const OPENERS = ["support-button", "promo-error", "receipt"] as const;
+export type Opener = (typeof OPENERS)[number];
+
+/**
+ * The body of `POST /api/player-tickets`: a player opens support in Downhill (its Support button, under a rejected code,
+ * or on a receipt). With the `ticketId` of a ticket that's still open, that ticket is reopened instead.
+ */
+export interface PlayerTicketRequest {
+  readonly product: Product;
+  readonly player: { readonly name: string; readonly rider: string };
+  /** What the player last tried at the Downhill Shop's checkout; none when they haven't tried one. */
+  readonly checkout?: ShopCheckout;
+  readonly opener?: Opener;
+  /** A ticket the game opened before. */
+  readonly ticketId?: string;
+  readonly gameVersion: string;
+  readonly userAgent?: string;
+  /** When the player opened support. */
+  readonly at: string;
+}
+
+/** What a ticket keeps of the request: the player and their checkout. It travels, hidden, with the player's messages. */
+export type PlayerContext = Omit<PlayerTicketRequest, "ticketId">;
+
+/** The answer to `POST /api/player-tickets`. `chatPath` is Help Desk's page for the player's support chat. */
+export interface PlayerTicketCreated {
+  readonly ticketId: string;
+  readonly chatPath: string;
+}
+
+/** A Downhill player as the wall shows them. */
+export interface PlayerCard {
+  readonly name: string;
+  /** The game's rider ID. */
+  readonly rider: string;
+  readonly initials: string;
+  readonly color: AvatarColor;
+}
+
+/**
+ * A live player's conversation: a session of the help desk environment, which starts with the player's first message.
+ * It stays until the operator ends it, whether or not a simulation runs.
+ */
+export interface PlayerTicket {
+  readonly ticketId: string;
+  readonly product: Product;
+  readonly player: PlayerCard;
+  /** Where in the game they last opened support. */
+  readonly opener?: Opener;
+  /** What they last tried at checkout, if the game sent it. */
+  readonly checkout?: ShopCheckout;
+  readonly gameVersion?: string;
+  readonly userAgent?: string;
+  readonly createdAt: string;
+  readonly sessionId?: string;
+  readonly status: TicketStatus;
+  readonly items: readonly TranscriptItem[];
+  readonly approval?: ApprovalRequest;
+  /** The software problem the agent reported (its latest report). */
+  readonly bug?: BugReport;
+  /** USD refunded on the player's Downhill Shop order so far. */
+  readonly refunded?: number;
+  readonly premiumRequests?: number;
+  readonly problem?: string;
+  /** Its session is being deleted. */
+  readonly ending?: boolean;
 }
 
 export interface Counters {
@@ -334,11 +465,13 @@ export interface HelpDeskState {
   readonly customers: readonly CustomerCard[];
   readonly run?: RunInfo;
   readonly tickets: readonly Ticket[];
+  /** Live players' tickets, newest first. */
+  readonly players: readonly PlayerTicket[];
   /** The latest Classify, when there's no simulation since. */
   readonly classification?: ClassificationRun;
   /** The latest Classify of each method, when there's no simulation since. */
   readonly classifications: ClassificationRuns;
-  /** The current simulation's software issues. */
+  /** The software issues of the current simulation's customers and of the players. */
   readonly issues: readonly SoftwareIssue[];
   readonly counters: Counters;
   /** The team knowledge base, newest first. It outlives simulations. */
@@ -351,6 +484,9 @@ export type ServerEvent =
   | { readonly type: "platform"; readonly platform: PlatformStatus; readonly desk: DeskInfo }
   | { readonly type: "run"; readonly run?: RunInfo; readonly tickets: readonly Ticket[]; readonly issues: readonly SoftwareIssue[] }
   | { readonly type: "ticket"; readonly ticket: Ticket }
+  /** Every player ticket, newest first: one was opened, ended, or picked up after a restart. */
+  | { readonly type: "players"; readonly players: readonly PlayerTicket[] }
+  | { readonly type: "player"; readonly ticket: PlayerTicket }
   | { readonly type: "issues"; readonly issues: readonly SoftwareIssue[] }
   | { readonly type: "counters"; readonly counters: Counters }
   | { readonly type: "knowledge"; readonly knowledge: readonly KnowledgeEntry[]; readonly proposals: readonly MemoryProposal[] }

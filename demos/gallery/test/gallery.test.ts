@@ -139,12 +139,15 @@ describe("patterns", () => {
 describe("tabs", () => {
   const apphost = readFileSync(fileURLToPath(new URL("../../../apphost.mts", import.meta.url)), "utf8");
 
-  it("lists the Software Factory and exactly the apps the root AppHost routes to it as connected", () => {
-    // The demo each .withEnvironment("SOFTWARE_FACTORY_URL", …) belongs to: the nearest addDemo Dockerfile above it.
-    const routed = [...apphost.matchAll(/\.withEnvironment\("SOFTWARE_FACTORY_URL"/g)].map((match) => {
-      const before = [...apphost.slice(0, match.index).matchAll(/dockerfile: "demos\/([\w-]+)\/Dockerfile"/g)];
-      return before.at(-1)![1]!;
-    });
+  it("lists the Software Factory and exactly the apps the root AppHost routes to it or to Help Desk as connected", () => {
+    // The demo each .withEnvironment("SOFTWARE_FACTORY_URL" | "HELP_DESK_URL", …) belongs to: the nearest addDemo Dockerfile above it.
+    const routedBy = (variable: string) =>
+      [...apphost.matchAll(new RegExp(`\\.withEnvironment\\("${variable}"`, "g"))].map((match) => {
+        const before = [...apphost.slice(0, match.index).matchAll(/dockerfile: "demos\/([\w-]+)\/Dockerfile"/g)];
+        return before.at(-1)![1]!;
+      });
+    const routed = [...routedBy("SOFTWARE_FACTORY_URL"), ...routedBy("HELP_DESK_URL")];
+    expect(routedBy("HELP_DESK_URL")).toEqual(["downhill"]);
     expect(APPS.filter((app) => app.group === "connected").map((app) => app.id).sort()).toEqual(["software-factory", ...routed].sort());
     expect(APPS.filter((app) => app.group === "staff").map((app) => app.id)).toEqual([HARNESS_APP_ID]);
   });

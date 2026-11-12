@@ -2,6 +2,7 @@
 // a platform that keeps sessions, written files, and published outputs in memory, and Software Factory in memory.
 import type { MessageOptions, PermissionRequest, ResumeSessionConfig, SessionConfig, SessionEvent } from "@github/copilot-sdk";
 import type { ArtifactInfo, PlatformEvent, SessionInfo } from "@managed-copilot/sdk";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DeskConfig } from "../src/server/config.js";
@@ -196,6 +197,25 @@ export function info(id: string, placement: "shared" | "sandbox", sandboxId?: st
 }
 
 export const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+/**
+ * What Downhill's `GET /api/sales.csv` answers in tests: launch at 07:00, TRAIL15 working, the launch-week banner at
+ * 09:15 (minute 135) with its lowercase `trail15` rejected from then on, and the presenter's failed sale last (live).
+ */
+export const DOWNHILL_SALES = readFileSync(join(PACKAGE_ROOT, "test", "fixtures", "downhill-sales.csv"), "utf8");
+
+export const csvResponse = (body: string, init: { status?: number; statusText?: string; headers?: Record<string, string> } = {}): Response =>
+  new Response(body, { ...init, headers: { "content-type": "text/csv; charset=utf-8", ...init.headers } });
+
+/** Downhill's sales export in memory: each call is recorded, and answered by `answer` (the fixture, by default). */
+export function fakeDownhill(answer: (call: number, init?: RequestInit) => Response | Promise<Response> = () => csvResponse(DOWNHILL_SALES)) {
+  const calls: string[] = [];
+  const fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    calls.push(String(input));
+    return answer(calls.length, init);
+  }) as typeof globalThis.fetch;
+  return { calls, fetch };
+}
 
 /** Software Factory in memory: it keeps the work orders Data Desk creates, and the test moves them along. */
 export class FakeFactory implements FactoryClient {

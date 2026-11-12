@@ -4,6 +4,7 @@
 // the routing contract Help Desk and Data Desk share. People follow links to the factory's own pages.
 import type { AlertInfo, FactoryStatus, FactoryTests } from "../shared/types.js";
 import type { FactoryTarget } from "./config.js";
+import { isEvidence } from "./services.js";
 import type { RouteFixInput } from "./tools.js";
 
 export const FACTORY_STATUSES: readonly FactoryStatus[] = ["queued", "planning", "building", "releasing", "completed", "failed", "cancelled"];
@@ -260,14 +261,11 @@ export class SoftwareFactory implements FactoryClient {
 /** The contract's limits on a work order's project. */
 export const LIMITS = { projectFiles: 300, fileBytes: 512 * 1024, projectBytes: 2 * 1024 * 1024 } as const;
 
-/** Evidence of the incident (the coordinator's, and the factory's context), not the service's code. */
-const EVIDENCE = /^(logs|deploys)\//;
-
 const bytes = (text: string): number => Buffer.byteLength(text, "utf8");
 
-/** The service's code and tests as they run in production: its folder, without the incident's evidence. */
+/** The service's code and tests as they run in production: its folder, without the incident's evidence (logs, deploys). */
 export function projectFiles(workspace: ReadonlyMap<string, string>): FactoryFile[] {
-  return [...workspace].filter(([path]) => !EVIDENCE.test(path)).map(([path, content]) => ({ path, content }));
+  return [...workspace].filter(([path]) => !isEvidence(path)).map(([path, content]) => ({ path, content }));
 }
 
 /** Why the project can't go to the factory, if it's larger than a work order takes. */
@@ -286,10 +284,17 @@ function fence(text: string): string {
 
 const ERROR_LEVEL = /\blevel=(?:error|fatal|crit|critical)\b|"level"\s*:\s*"(?:error|fatal|critical)"/i;
 const ERROR_WORD = /\b(?:ERROR|FATAL|CRITICAL)\b/;
+const WARNING_LEVEL = /\blevel=warn(?:ing)?\b|"level"\s*:\s*"warn(?:ing)?"/i;
+const WARNING_WORD = /\bWARN(?:ING)?\b/;
 const CONTINUATION = /^\s+(?:at\s|\.\.\.)/;
 
-/** The newest error entries in the service's logs, each with its stack trace. */
-export function errorExcerpt(workspace: ReadonlyMap<string, string>, maxEntries = 6, maxChars = 6_000): { readonly text: string; readonly shown: number; readonly total: number } | undefined {
+/** Log entries `matches` picks out (each with its stack trace): the newest `maxEntries`, at most `maxChars` together. */
+function logExcerpt(
+  workspace: ReadonlyMap<string, string>,
+  matches: (line: string) => boolean,
+  maxEntries: number,
+  maxChars: number,
+): { readonly text: string; readonly shown: number; readonly total: number } | undefined {
   const entries: string[][] = [];
   for (const [path, content] of workspace) {
     if (!path.startsWith("logs/")) continue;
@@ -299,7 +304,7 @@ export function errorExcerpt(workspace: ReadonlyMap<string, string>, maxEntries 
         current.push(line);
         continue;
       }
-      current = ERROR_LEVEL.test(line) || ERROR_WORD.test(line) ? [line] : undefined;
+      current = matches(line) ? [line] : undefined;
       if (current) entries.push(current);
     }
   }
@@ -307,6 +312,16 @@ export function errorExcerpt(workspace: ReadonlyMap<string, string>, maxEntries 
   const shown = entries.slice(-maxEntries);
   const text = shown.map((entry) => entry.join("\n")).join("\n");
   return { text: text.length > maxChars ? `${text.slice(0, maxChars)}\n…` : text, shown: shown.length, total: entries.length };
+}
+
+/** The newest error entries in the service's logs, each with its stack trace. */
+export function errorExcerpt(workspace: ReadonlyMap<string, string>, maxEntries = 6, maxChars = 6_000): { readonly text: string; readonly shown: number; readonly total: number } | undefined {
+  return logExcerpt(workspace, (line) => ERROR_LEVEL.test(line) || ERROR_WORD.test(line), maxEntries, maxChars);
+}
+
+/** The newest warnings in the service's logs: what a service that logs failed requests as warnings has to show. */
+export function warningExcerpt(workspace: ReadonlyMap<string, string>, maxEntries = 6, maxChars = 6_000): { readonly text: string; readonly shown: number; readonly total: number } | undefined {
+  return logExcerpt(workspace, (line) => WARNING_LEVEL.test(line) || WARNING_WORD.test(line), maxEntries, maxChars);
 }
 
 export interface FixOrderInput {
@@ -323,7 +338,10 @@ export interface FixOrderInput {
   readonly incidentUrl: string;
 }
 
-/** `INCIDENT.md`: the alert, the root cause and its evidence, the failing path, the bad deploy, and the errors. */
+/**
+ * `INCIDENT.md`: the alert, the root cause and its evidence, the failing path, the bad deploy, and the errors. A service
+ * without a diff for its version gets its deploy history instead, and one whose logs have no errors, its warnings.
+ */
 export function incidentContext(input: FixOrderInput): string {
   const { alert, fix } = input;
   const labels = Object.entries(alert.labels)
@@ -332,7 +350,10 @@ export function incidentContext(input: FixOrderInput): string {
   const version = input.serviceVersion;
   const diffPath = version ? [`deploys/v${version}.diff`, `deploys/${version}.diff`].find((path) => input.workspace.has(path)) : undefined;
   const diff = diffPath ? clip(input.workspace.get(diffPath)!.trimEnd(), 40_000) : undefined;
+  const history = diff ? undefined : input.workspace.get("deploys/HISTORY.md")?.trimEnd();
+  const shownHistory = history ? clip(history, 20_000) : undefined;
   const errors = errorExcerpt(input.workspace);
+  const warnings = errors ? undefined : warningExcerpt(input.workspace);
   const lines = [
     `# ${input.incidentId}: ${alert.summary}`,
     "",
@@ -361,8 +382,12 @@ export function incidentContext(input: FixOrderInput): string {
     "",
     fix.expected,
     ...(diff && diffPath ? ["", `## The deploy that caused it (${diffPath})`, "", `${fence(diff)}diff`, diff, fence(diff)] : []),
+    ...(shownHistory ? ["", "## Recent deploys (deploys/HISTORY.md)", "", `${fence(shownHistory)}markdown`, shownHistory, fence(shownHistory)] : []),
     ...(errors
       ? ["", `## Errors in the production logs (the newest ${errors.shown} of ${errors.total})`, "", `${fence(errors.text)}text`, errors.text, fence(errors.text)]
+      : []),
+    ...(warnings
+      ? ["", `## Warnings in the production logs (the newest ${warnings.shown} of ${warnings.total}; it logged no errors)`, "", `${fence(warnings.text)}text`, warnings.text, fence(warnings.text)]
       : []),
     "",
   ];

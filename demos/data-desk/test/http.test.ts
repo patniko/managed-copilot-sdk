@@ -4,15 +4,16 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Datasets } from "../src/server/datasets.js";
+import { Datasets, type DatasetsOptions } from "../src/server/datasets.js";
 import { DeskError } from "../src/server/errors.js";
 import type { FactoryClient } from "../src/server/factory.js";
 import { createRequestHandler, hostAllowed } from "../src/server/http.js";
 import { EventHub } from "../src/server/hub.js";
 import { AnalysisManager } from "../src/server/manager.js";
+import { downhillSales } from "../src/server/remote.js";
 import { Store } from "../src/server/store.js";
-import type { AnalysisView, DeskState, SendToFactoryResponse } from "../src/shared/types.js";
-import { event, FakeFactory, FakePlatform, testConfig } from "./fakes.js";
+import type { AnalysisView, DeskState, RowsPage, SendToFactoryResponse } from "../src/shared/types.js";
+import { csvResponse, event, FakeFactory, fakeDownhill, FakePlatform, testConfig } from "./fakes.js";
 
 const servers: Server[] = [];
 const hubs: EventHub[] = [];
@@ -24,12 +25,12 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise((resolve) => server.close(resolve))));
 });
 
-async function serve(options: { factory?: FactoryClient } = {}) {
+async function serve(options: { factory?: FactoryClient; datasets?: DatasetsOptions } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "desk-http-"));
   const config = testConfig(dataDir);
   mkdirSync(config.webRoot, { recursive: true });
   writeFileSync(join(config.webRoot, "index.html"), "<!doctype html><title>Data Desk</title>");
-  const datasets = new Datasets(config.samplesDir, dataDir, config.maxUploadBytes);
+  const datasets = new Datasets(config.samplesDir, dataDir, config.maxUploadBytes, options.datasets);
   datasets.load();
   const platform = new FakePlatform();
   const hub = new EventHub();
@@ -52,6 +53,7 @@ describe("the API", () => {
     expect(await (await fetch(`${url}/api/health`)).json()).toEqual({ status: "ok", platform: "connected" });
     const state = (await (await fetch(`${url}/api/state`)).json()) as DeskState;
     expect(state.datasets.map((dataset) => dataset.id)).toEqual(["sample-checkout-funnel", "sample-coffee-sales", "sample-bike-rides", "sample-support-tickets"]);
+    expect(state.remoteSamples).toEqual([]);
     expect(state.environments.map((environment) => environment.name)).toEqual(["data-desk", "data-desk-python"]);
     expect(state.attachCommand).toBe("npx managed-copilot attach {sessionId}");
     expect(state.factory).toEqual({ configured: false });
@@ -133,6 +135,42 @@ describe("the API", () => {
     const view = (await (await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "sample-coffee-sales" }) })).json()) as AnalysisView;
     const attach = (await (await fetch(`${url}/api/analyses/${view.id}/attach`, { method: "POST" })).json()) as { command: string; launched: boolean };
     expect(attach).toMatchObject({ command: `npx managed-copilot attach ${view.id}`, launched: false });
+  });
+
+  it("offers Downhill's shop sales with DOWNHILL_URL, and starts an analysis of a fresh copy", async () => {
+    const downhill = fakeDownhill();
+    const { url, platform } = await serve({ datasets: { remote: [downhillSales("http://downhill.test")], fetch: downhill.fetch } });
+    const state = (await (await fetch(`${url}/api/state`)).json()) as DeskState;
+    expect(state.remoteSamples).toEqual([{ id: "live-downhill-sales", name: "Downhill shop sales", description: "Live from Downhill's shop, since launch" }]);
+    expect(downhill.calls).toEqual([]);
+
+    const created = await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "live-downhill-sales" }) });
+    expect(created.status).toBe(201);
+    const view = (await created.json()) as AnalysisView;
+    expect(downhill.calls).toEqual(["http://downhill.test/api/sales.csv"]);
+    expect(view).toMatchObject({ title: "Downhill shop sales", placement: "shared", dataset: { name: "Downhill shop sales", fileName: "downhill-sales.csv", rows: 103 } });
+    expect(view.dataset?.prompts.map((prompt) => prompt.text)).toEqual([
+      "How many promo codes were rejected in the last hour? List them, newest first",
+      "Chart promotional sales and rejected promo codes every 10 minutes since launch",
+    ]);
+    // The grid pages through the copy, whose newest row is the presenter's failed sale.
+    const page = (await (await fetch(`${url}/api/datasets/${view.datasetId}/rows?offset=102`)).json()) as RowsPage;
+    expect(page.rows).toEqual([["2026-11-18 10:23:41", "203", "promo_rejected", "", "Neon Mona", "outfit", "4.99", "trail15", "rejected", "", "", "presenter", "live"]]);
+    const instructions = (platform.sessions.get(view.id)!.config as { systemMessage?: { content: string } }).systemMessage?.content;
+    expect(instructions).toContain("count promotional sales as purchases with promo_result applied");
+    expect(instructions).toContain("/workspace/data/downhill-sales.csv");
+    expect(((await (await fetch(`${url}/api/state`)).json()) as DeskState).datasets.map((dataset) => dataset.id)).not.toContain(view.datasetId);
+  });
+
+  it("says why Downhill's sales couldn't be loaded", async () => {
+    const downhill = fakeDownhill(() => csvResponse("", { status: 404, statusText: "Not Found" }));
+    const { url, platform } = await serve({ datasets: { remote: [downhillSales("http://downhill.test")], fetch: downhill.fetch } });
+    const response = await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "live-downhill-sales" }) });
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: { code: "sample_unavailable", message: "Couldn't load Downhill's sales from http://downhill.test/api/sales.csv: it answered HTTP 404 Not Found." },
+    });
+    expect(platform.sessions.size).toBe(0);
   });
 });
 

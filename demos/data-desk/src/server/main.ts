@@ -8,15 +8,17 @@ import { EventHub } from "./hub.js";
 import { log } from "./log.js";
 import { AnalysisManager } from "./manager.js";
 import { Platform } from "./platform.js";
+import { remoteSamples } from "./remote.js";
 import { Store } from "./store.js";
 
 const config = loadConfig();
-const datasets = new Datasets(config.samplesDir, config.dataDir, config.maxUploadBytes);
+const datasets = new Datasets(config.samplesDir, config.dataDir, config.maxUploadBytes, { remote: remoteSamples(config) });
 datasets.load();
 const store = new Store(config.dataDir);
 const hub = new EventHub();
 const platform = new Platform(config);
 if (process.env.SOFTWARE_FACTORY_URL?.trim() && !config.factoryUrl) log.warn("SOFTWARE_FACTORY_URL isn't an http(s) address, so sending to Software Factory is off");
+if (process.env.DOWNHILL_URL?.trim() && !config.downhillUrl) log.warn("DOWNHILL_URL isn't an http(s) address, so Downhill's shop sales aren't offered");
 const analyses = new AnalysisManager(platform, config, store, datasets, hub, createFactory(config));
 analyses.start();
 
@@ -46,6 +48,7 @@ log.info(`Data Desk: http://localhost:${config.port}${config.dev ? " (dev)" : ""
   environment: config.environment,
   model: config.model,
   softwareFactory: config.factoryUrl ?? "not set",
+  downhill: config.downhillUrl ?? "not set",
 });
 
 let stopping = false;

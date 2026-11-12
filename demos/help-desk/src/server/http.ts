@@ -7,7 +7,7 @@ import type { HelpDeskConfig } from "./config.js";
 import type { Decider } from "./decision.js";
 import type { HelpDesk } from "./desk.js";
 import { HelpDeskError } from "./errors.js";
-import type { EventHub } from "./hub.js";
+import { playerView, type EventHub } from "./hub.js";
 import { log } from "./log.js";
 import { authorized, complete, EndpointError } from "./triage-endpoint.js";
 
@@ -178,7 +178,12 @@ function buildRouter(ctx: ApiContext): Router {
 
   router.add("GET", "/api/health", (_req, res) => sendJson(res, 200, { status: "ok", platform: desk.platform.status.state }));
   router.add("GET", "/api/state", (_req, res) => sendJson(res, 200, desk.state()));
-  router.add("GET", "/api/events", (req, res) => ctx.hub.attach(req, res, desk.initialEvents()));
+  router.add("GET", "/api/events", (req, res) => {
+    // A player's chat page (`?player=<ticket>`) gets the platform's status and that one ticket.
+    const player = new URL(req.url ?? "/", "http://localhost").searchParams.get("player");
+    if (player !== null) ctx.hub.attach(req, res, desk.playerEvents(player), playerView(player));
+    else ctx.hub.attach(req, res, desk.initialEvents());
+  });
   router.add("POST", "/api/simulation", async (req, res) => {
     const body = await readJson<Partial<SimulateRequest>>(req);
     sendJson(res, 202, await desk.simulate(Number(body.size)));
@@ -217,6 +222,32 @@ function buildRouter(ctx: ApiContext): Router {
   });
   router.add("DELETE", "/api/knowledge/:id", (_req, res, params) => {
     desk.forget(params.id!);
+    res.writeHead(204).end();
+  });
+
+  // Live players. Downhill's server opens a ticket when the player opens support in the game, server to server; the
+  // player's chat page (`/chat/<ticket>`, same origin as these routes) reads it and writes in it; the wall answers and
+  // ends it.
+  router.add("POST", "/api/player-tickets", async (req, res) => {
+    const body = await readJson<unknown>(req, 32 * 1024);
+    // A ticket that's still open is reopened (200); otherwise a new one is opened (201). The same body either way.
+    const { ticket, reopened } = desk.openPlayerTicket(body);
+    sendJson(res, reopened ? 200 : 201, ticket);
+  });
+  router.add("GET", "/api/player-tickets/:ticketId", (_req, res, params) => sendJson(res, 200, desk.playerTicket(params.ticketId!)));
+  router.add("DELETE", "/api/player-tickets/:ticketId", async (_req, res, params) => {
+    await desk.endPlayer(params.ticketId!);
+    res.writeHead(204).end();
+  });
+  router.add("POST", "/api/player-tickets/:ticketId/messages", async (req, res, params) => {
+    const body = await readJson<Partial<SendRequest>>(req);
+    await desk.sendAsPlayer(params.ticketId!, body.text);
+    res.writeHead(202).end();
+  });
+  router.add("POST", "/api/player-tickets/:ticketId/approvals/:approvalId", async (req, res, params) => {
+    const body = await readJson<Partial<ApprovalAnswer>>(req);
+    if (typeof body.approve !== "boolean") throw new HelpDeskError("invalid_request", "Pass approve: true or false.");
+    desk.answerPlayer(params.ticketId!, params.approvalId!, body.approve);
     res.writeHead(204).end();
   });
   return router;
