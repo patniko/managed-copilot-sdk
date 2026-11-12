@@ -25,6 +25,8 @@ export interface DeskInfo {
   readonly tools: readonly ToolInfo[];
   readonly factory: FactoryInfo;
   readonly triage: TriageInfo;
+  /** Classification with the support sessions' ordinary LLM, which Classify offers to compare with the decision model. */
+  readonly llmTriage: TriageInfo;
 }
 
 /**
@@ -291,19 +293,37 @@ export interface RunInfo {
   readonly ending?: boolean;
 }
 
+/** How Classify classifies: with the decision model (Microsoft-Decision-1), or with the support sessions' ordinary LLM. */
+export const CLASSIFICATION_METHODS = ["decision", "llm"] as const;
+export type ClassificationMethod = (typeof CLASSIFICATION_METHODS)[number];
+
+/** The tokens classifications used, from their sessions' usage metrics. */
+export interface ClassificationUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+}
+
 /**
  * Classify on its own: the first `size` customers' opening messages, classified without starting their sessions, to
- * show how fast the decision model is. Ends when a simulation starts.
+ * show how fast and cheap the decision model is next to an ordinary LLM. Ends when a simulation starts.
  */
 export interface ClassificationRun {
   readonly id: string;
+  readonly method: ClassificationMethod;
+  /** The model the classification sessions use. */
+  readonly model?: string;
   readonly size: number;
   readonly startedAt: string;
   /** Each message's classification so far, by customer ID. */
   readonly results: Readonly<Record<string, TicketTriage>>;
   /** From the start to the last result, once every message has one. */
   readonly elapsedMs?: number;
+  /** The classifications' usage so far, summed; `measured` of them could be read. */
+  readonly usage: ClassificationUsage & { readonly measured: number };
 }
+
+/** The latest Classify of each method, to compare them; the latest of all is `HelpDeskState.classification`. */
+export type ClassificationRuns = Readonly<Partial<Record<ClassificationMethod, ClassificationRun>>>;
 
 export const SIMULATION_SIZES = [5, 10, 25] as const;
 export type SimulationSize = (typeof SIMULATION_SIZES)[number];
@@ -316,6 +336,8 @@ export interface HelpDeskState {
   readonly tickets: readonly Ticket[];
   /** The latest Classify, when there's no simulation since. */
   readonly classification?: ClassificationRun;
+  /** The latest Classify of each method, when there's no simulation since. */
+  readonly classifications: ClassificationRuns;
   /** The current simulation's software issues. */
   readonly issues: readonly SoftwareIssue[];
   readonly counters: Counters;
@@ -332,10 +354,16 @@ export type ServerEvent =
   | { readonly type: "issues"; readonly issues: readonly SoftwareIssue[] }
   | { readonly type: "counters"; readonly counters: Counters }
   | { readonly type: "knowledge"; readonly knowledge: readonly KnowledgeEntry[]; readonly proposals: readonly MemoryProposal[] }
-  | { readonly type: "classification"; readonly classification?: ClassificationRun };
+  | { readonly type: "classification"; readonly classification?: ClassificationRun; readonly classifications: ClassificationRuns };
 
 export interface SimulateRequest {
   readonly size: number;
+}
+
+export interface ClassifyRequest {
+  readonly size: number;
+  /** Defaults to `decision`. */
+  readonly method?: ClassificationMethod;
 }
 
 export interface SendRequest {

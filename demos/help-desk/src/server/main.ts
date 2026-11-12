@@ -18,10 +18,12 @@ const factory = new SoftwareFactory(config.factoryUrl, config.factoryPublicUrl);
 // decision model through this server's triage endpoint (demos/help-desk/README.md).
 const triagePlatform = config.triage ? new Platform({ ...config, environment: config.triage.environment, model: config.triage.model }) : undefined;
 const triage = new Triage(triagePlatform, config.triage?.environment);
+// The same classification on the support sessions' ordinary LLM, in Help Desk's own environment, for comparison.
+const llmTriage = new Triage(platform, config.environment, "llm");
 const decider = config.decision
   ? new DecisionClient({ endpoint: config.decision.endpoint, deployment: config.decision.deployment, tokens: new AzureCliTokenSource(config.decision.subscription) })
   : undefined;
-const desk = new HelpDesk(platform, config, (event) => hub.publish(event), factory, triage);
+const desk = new HelpDesk(platform, config, (event) => hub.publish(event), factory, triage, llmTriage);
 desk.start();
 
 const server = createServer();

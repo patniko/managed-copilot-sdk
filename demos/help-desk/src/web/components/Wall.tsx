@@ -1,6 +1,19 @@
-import { KebabHorizontalIcon, PlayIcon, TrashIcon, ZapIcon } from "@primer/octicons-react";
+import { CpuIcon, KebabHorizontalIcon, PlayIcon, TrashIcon, TriangleDownIcon, ZapIcon } from "@primer/octicons-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
-import { SIMULATION_SIZES, TICKET_CATEGORIES, TICKET_CATEGORY_INFO, type ClassificationRun, type CustomerCard, type Ticket, type TicketCategory, type TicketTriage } from "../../shared/types.js";
+import {
+  CLASSIFICATION_METHODS,
+  SIMULATION_SIZES,
+  TICKET_CATEGORIES,
+  TICKET_CATEGORY_INFO,
+  type ClassificationMethod,
+  type ClassificationRun,
+  type ClassificationRuns,
+  type CustomerCard,
+  type Ticket,
+  type TicketCategory,
+  type TicketTriage,
+  type TriageInfo,
+} from "../../shared/types.js";
 import { chooseSize, classify, endSimulation, simulate, useStore } from "../lib/store.js";
 import { useDismiss } from "../lib/useDismiss.js";
 import { Issues } from "./Issues.js";
@@ -19,6 +32,7 @@ export function Wall() {
   const run = useStore((state) => state.run);
   const size = useStore((state) => state.size);
   const classification = useStore((state) => state.classification);
+  const classifications = useStore((state) => state.classifications);
   return (
     <main className="mx-auto w-full max-w-[1360px] px-4 py-4 sm:px-6">
       <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
@@ -30,7 +44,7 @@ export function Wall() {
       </div>
       <PlatformNotice />
       <TriageNotice />
-      {!run && classification ? <ClassificationSummary classification={classification} /> : null}
+      {!run && classification ? <ClassificationSummary latest={classification} runs={classifications} /> : null}
       <div className="mt-4">
         <Stats />
       </div>
@@ -133,27 +147,56 @@ function Grouped({ entries, rest }: { readonly entries: readonly Entry[]; readon
   );
 }
 
-/** How far Classify got, and how long it took: the point is how fast the decision model is. */
-function ClassificationSummary({ classification }: { readonly classification: ClassificationRun }) {
-  const results = Object.values(classification.results);
+const METHOD_LABELS: Readonly<Record<ClassificationMethod, string>> = { decision: "Decision model", llm: "LLM" };
+
+/**
+ * Each method's latest Classify, side by side: how far it got, how long it took, and what it cost. The point is how
+ * much faster and cheaper the decision model is than an ordinary LLM at the same job.
+ */
+function ClassificationSummary({ latest, runs }: { readonly latest: ClassificationRun; readonly runs: ClassificationRuns }) {
+  const shown = CLASSIFICATION_METHODS.flatMap((method) => (runs[method] ? [runs[method]] : []));
+  return (
+    <div className="mt-2 flex flex-col gap-1" role="status" aria-label="Classify results">
+      {(shown.length > 0 ? shown : [latest]).map((run) => (
+        <ClassificationLine key={run.method} run={run} latest={run.id === latest.id && run.method === latest.method} />
+      ))}
+    </div>
+  );
+}
+
+function ClassificationLine({ run, latest }: { readonly run: ClassificationRun; readonly latest: boolean }) {
+  const results = Object.values(run.results);
   const done = results.filter((result) => result.state === "done").length;
   const failed = results.filter((result) => result.state === "failed");
-  const finished = classification.elapsedMs !== undefined;
-  const seconds = `${((classification.elapsedMs ?? 0) / 1000).toFixed(1)}s`;
+  const finished = run.elapsedMs !== undefined;
+  const seconds = `${((run.elapsedMs ?? 0) / 1000).toFixed(1)}s`;
+  const Icon = run.method === "decision" ? ZapIcon : CpuIcon;
+  const usage = run.usage;
+  const tokens = usage.inputTokens + usage.outputTokens;
   return (
-    <p className="mt-2 flex items-center gap-1.5 text-sm" role="status">
-      {finished ? <ZapIcon size={16} className="shrink-0 text-fg-attention" /> : <Spinner size={14} />}
-      <span>
+    <p className={`flex items-center gap-1.5 text-sm ${latest ? "" : "text-fg-muted"}`}>
+      {finished ? <Icon size={16} className={`shrink-0 ${run.method === "decision" ? "text-fg-attention" : "text-fg-muted"}`} /> : <Spinner size={14} />}
+      <span className="shrink-0">
+        <span className="font-semibold">{METHOD_LABELS[run.method]}</span>
+        {run.model ? <code className="ml-1 text-xs">{run.model}</code> : null}
+        {": "}
         {finished ? (
           <>
             <span className="font-semibold">
               {done} classified{failed.length > 0 ? `, ${failed.length} failed` : ""} in {seconds}
             </span>
-            <span className="text-fg-muted"> · first messages only, no support sessions started</span>
+            {usage.measured > 0 ? (
+              <span className="text-fg-muted">
+                {" "}
+                · {tokens.toLocaleString("en-US")} tokens
+                {usage.measured < done ? ` (usage of ${usage.measured})` : ""}
+              </span>
+            ) : null}
+            {latest ? <span className="text-fg-muted"> · first messages only, no support sessions started</span> : null}
           </>
         ) : (
           <>
-            Classifying {classification.size} customers' first messages… <span className="text-fg-muted">{done + failed.length} done</span>
+            classifying {run.size} customers' first messages… <span className="text-fg-muted">{done + failed.length} done</span>
           </>
         )}
       </span>
@@ -170,6 +213,7 @@ function Controls() {
   const connected = useStore((state) => state.platform?.state === "connected");
   const [confirm, setConfirm] = useState<"restart" | "end" | undefined>();
   const triage = useStore((state) => state.desk?.triage);
+  const llmTriage = useStore((state) => state.desk?.llmTriage);
   const classifying = useStore((state) => Boolean(state.classification && state.classification.elapsedMs === undefined));
   const busy = working !== undefined || Boolean(run?.ending);
   return (
@@ -188,17 +232,14 @@ function Controls() {
           {size} customers
         </span>
       </button>
-      {triage && triage.state !== "off" ? (
-        <button
-          type="button"
-          className="btn"
-          disabled={!connected || busy || classifying || Boolean(run) || triage.state === "connecting"}
-          title={run ? "End the simulation first: Classify reads the customers' first messages without starting their sessions." : `Classify the first ${size} customers' messages with ${triage.model ?? "the decision model"}, without starting their sessions.`}
-          onClick={() => void classify()}
-        >
-          {working === "classify" || classifying ? <Spinner size={16} /> : <ZapIcon size={16} />}
-          <span>Classify</span>
-        </button>
+      {(triage && triage.state !== "off") || (llmTriage && llmTriage.state !== "off") ? (
+        <ClassifyMenu
+          disabled={!connected || busy || classifying || Boolean(run)}
+          working={working === "classify" || classifying}
+          title={run ? "End the simulation first: Classify reads the customers' first messages without starting their sessions." : `Classify the first ${size} customers' messages, without starting their sessions.`}
+          triage={triage}
+          llmTriage={llmTriage}
+        />
       ) : null}
       {run ? <Overflow disabled={busy} onEnd={() => setConfirm("end")} /> : null}
       {confirm === "restart" ? (
@@ -227,6 +268,68 @@ function Controls() {
         >
           Its {run?.size} sessions are deleted.
         </ConfirmDialog>
+      ) : null}
+    </div>
+  );
+}
+
+/** Classify, as a menu: with the decision model, or with the ordinary LLM to compare. */
+function ClassifyMenu(props: {
+  readonly disabled: boolean;
+  readonly working: boolean;
+  readonly title: string;
+  readonly triage: TriageInfo | undefined;
+  readonly llmTriage: TriageInfo | undefined;
+}) {
+  const [open, setOpen] = useState(false);
+  const container = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => setOpen(false), []);
+  useDismiss(container, open, close);
+  const options: ReadonlyArray<{ readonly method: ClassificationMethod; readonly label: string; readonly info: TriageInfo | undefined; readonly Icon: typeof ZapIcon }> = [
+    { method: "decision", label: "Use decision model", info: props.triage, Icon: ZapIcon },
+    { method: "llm", label: "Use LLM", info: props.llmTriage, Icon: CpuIcon },
+  ];
+  return (
+    <div ref={container} className="relative">
+      <button type="button" className="btn" aria-haspopup="menu" aria-expanded={open} disabled={props.disabled} title={props.title} onClick={() => setOpen((value) => !value)}>
+        {props.working ? <Spinner size={16} /> : <ZapIcon size={16} />}
+        <span>Classify</span>
+        <TriangleDownIcon size={16} />
+      </button>
+      {open ? (
+        <div role="menu" className="Overlay absolute top-full right-0 z-40 mt-2 w-72 animate-scale-in">
+          <ul className="ActionList">
+            {options.map(({ method, label, info, Icon }) => {
+              const usable = info !== undefined && (info.state === "ready" || info.state === "unavailable");
+              const description =
+                !info || info.state === "off"
+                  ? "Not set up: Help Desk's README shows how to turn it on."
+                  : info.state === "connecting"
+                    ? "Connecting…"
+                    : `${info.model ?? "Its model"} in ${info.environment ?? "its environment"}`;
+              return (
+                <li role="none" key={method}>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="ActionList-item w-full"
+                    disabled={!usable}
+                    onClick={() => {
+                      close();
+                      void classify(method);
+                    }}
+                  >
+                    <Icon size={16} />
+                    <span className="ActionList-item-label flex flex-col items-start">
+                      <span>{label}</span>
+                      <span className="text-xs text-fg-muted">{description}</span>
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       ) : null}
     </div>
   );
@@ -269,8 +372,10 @@ function Overflow({ disabled, onEnd }: { readonly disabled: boolean; readonly on
 /** Whether customers' messages are classified: set up (and by which model), not set up, or failing. */
 function TriageNotice() {
   const triage = useStore((state) => state.desk?.triage);
+  const llmTriage = useStore((state) => state.desk?.llmTriage);
   const connected = useStore((state) => state.platform?.state === "connected");
   if (!triage || !connected || triage.state === "connecting") return null;
+  const compare = llmTriage?.state === "ready" ? llmTriage : undefined;
   if (triage.state === "unavailable") {
     return (
       <div className="flash flash-warn mt-4 text-sm" role="status">
@@ -283,6 +388,16 @@ function TriageNotice() {
       {triage.state === "ready" ? (
         <>
           Each customer message is classified by <code>{triage.model}</code> in the <code>{triage.environment}</code> environment, then grouped below.
+          {compare ? (
+            <>
+              {" "}
+              To compare time and cost, Classify can use <code>{compare.model}</code> instead.
+            </>
+          ) : null}
+        </>
+      ) : compare ? (
+        <>
+          The decision model isn't set up, so tickets aren't grouped as they arrive. Classify can still use <code>{compare.model}</code>; Help Desk's README shows how to add the decision model.
         </>
       ) : (
         <>Ticket classification isn't set up, so tickets aren't grouped by request. Help Desk's README shows how to turn it on.</>

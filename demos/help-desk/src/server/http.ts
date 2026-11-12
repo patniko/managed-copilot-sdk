@@ -2,7 +2,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
 import { isManagedCopilotError } from "@managed-copilot/sdk";
-import type { ApiErrorBody, ApprovalAnswer, SendRequest, SimulateRequest } from "../shared/types.js";
+import type { ApiErrorBody, ApprovalAnswer, ClassifyRequest, SendRequest, SimulateRequest } from "../shared/types.js";
 import type { HelpDeskConfig } from "./config.js";
 import type { Decider } from "./decision.js";
 import type { HelpDesk } from "./desk.js";
@@ -184,8 +184,8 @@ function buildRouter(ctx: ApiContext): Router {
     sendJson(res, 202, await desk.simulate(Number(body.size)));
   });
   router.add("POST", "/api/classification", async (req, res) => {
-    const body = await readJson<Partial<SimulateRequest>>(req);
-    sendJson(res, 202, desk.classifyOpenings(Number(body.size)));
+    const body = await readJson<Partial<ClassifyRequest>>(req);
+    sendJson(res, 202, desk.classifyOpenings(Number(body.size), body.method ?? "decision"));
   });
   router.add("DELETE", "/api/simulation", async (_req, res) => {
     await desk.end();

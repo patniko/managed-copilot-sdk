@@ -2,7 +2,9 @@ import { useSyncExternalStore } from "react";
 import {
   SIMULATION_SIZES,
   type BugArea,
+  type ClassificationMethod,
   type ClassificationRun,
+  type ClassificationRuns,
   type Counters,
   type CustomerCard,
   type DeskInfo,
@@ -37,6 +39,8 @@ export interface StoreState {
   readonly tickets: Readonly<Record<string, Ticket>>;
   /** The latest Classify, when there's no simulation since. */
   readonly classification?: ClassificationRun;
+  /** The latest Classify of each method, to compare them. */
+  readonly classifications: ClassificationRuns;
   /** The current simulation's software issues. */
   readonly issues: readonly SoftwareIssue[];
   readonly counters: Counters;
@@ -74,6 +78,7 @@ let state: StoreState = {
   connection: "connecting",
   customers: [],
   tickets: {},
+  classifications: {},
   issues: [],
   counters: ZERO,
   knowledge: [],
@@ -126,7 +131,7 @@ export function reduce(current: StoreState, event: ServerEvent): StoreState {
       return { ...current, knowledge: event.knowledge, proposals: event.proposals };
     case "classification": {
       const { classification: _previous, ...rest } = current;
-      return event.classification ? { ...rest, classification: event.classification } : rest;
+      return { ...rest, ...(event.classification ? { classification: event.classification } : {}), classifications: event.classifications };
     }
   }
 }
@@ -139,6 +144,7 @@ async function loadState(): Promise<void> {
       return {
         ...(loaded.run ? { ...rest, run: loaded.run } : rest),
         ...(loaded.classification ? { classification: loaded.classification } : {}),
+        classifications: loaded.classifications,
         phase: "ready",
         platform: loaded.platform,
         desk: loaded.desk,
@@ -247,12 +253,12 @@ export async function simulate(): Promise<void> {
   }
 }
 
-/** Classifies the chosen number of customers' first messages, without starting their sessions. */
-export async function classify(): Promise<void> {
+/** Classifies the chosen number of customers' first messages with `method`, without starting their sessions. */
+export async function classify(method: ClassificationMethod): Promise<void> {
   if (state.working) return;
   setState((current) => ({ ...current, working: "classify" }));
   try {
-    await api.classify(state.size);
+    await api.classify(state.size, method);
   } catch (error) {
     showToast("Couldn't classify the customers' messages", errorMessage(error));
   } finally {
