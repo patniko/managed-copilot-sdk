@@ -76,6 +76,7 @@ export class TrickTracker {
     this.active = false;
     if (!res.ok) return null;
     const tricks = this.describe(air, bike);
+    if (res.fakie) tricks.push({ name: 'Fakie Revert', points: 400 });
     const height = Math.max(0, air.maxY - Math.min(air.startY, bike.pos.y));
     if (air.time > 0.55) tricks.unshift({ name: height > 5 ? 'Big Air' : 'Air', points: Math.round(air.time * 120 + height * 25) });
     if (!tricks.length) return null;

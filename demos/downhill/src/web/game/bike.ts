@@ -27,9 +27,18 @@ const PEDAL_TOP = 17.5;
 /** Boosts (trick landings) surge at this rate (m/s²) and stop adding speed above BOOST_TOP (m/s). */
 const BOOST_ACCEL = 10;
 const BOOST_TOP = 22;
+/** Flip rotation: top rate (rad/s) and how quickly the rider winds up to it, so a short tap only tips the bike. */
+const FLIP_RATE = 6.2;
+const FLIP_WINDUP = 3.6;
+/** Landing limits (rad): nose-down past OVER crashes, nose-up (rear wheel first) is forgiven further, out to LOOP. */
+const OVER_LIMIT = 0.85;
+const LOOP_LIMIT = 1.15;
+/** Beyond SKETCHY either way the landing holds but scrubs speed and squishes hard. */
+const SKETCHY = 0.5;
+const YAW_LIMIT = 1.0;
 
 export type LandingResult =
-  | { ok: true; perfect: boolean; impact: number; pitchErr: number; yawErr: number }
+  | { ok: true; perfect: boolean; impact: number; pitchErr: number; yawErr: number; fakie: boolean; sketchy: boolean }
   | { ok: false; reason: string; impact: number };
 
 export interface AirState {
@@ -84,6 +93,11 @@ export class BikePhysics {
   lean = 0;
   pitch = 0;
   compress = 0;
+  /** Visual-only springs: the frame's pitch rebounding after a touchdown, and the yaw left to swing round after a fakie landing. */
+  squishPitch = 0;
+  revert = 0;
+  private compressVel = 0;
+  private squishPitchVel = 0;
   preload = 0;
   skid = 0;
   pedaling = false;
@@ -114,6 +128,9 @@ export class BikePhysics {
   private lastPopT = -10;
   private t = 0;
   private prevGrab = { tailwhip: false, barspin: false };
+  /** Flip/spin input held through takeoff (pedalling up, steering off the lip) is ignored until it's let go. */
+  private flipLatched = false;
+  private spinLatched = false;
   /** Assist strength 0..1 (auto-level in the air). */
   assist = 1;
   /** Speed still to be added by an active boost (m/s). */
@@ -132,6 +149,7 @@ export class BikePhysics {
     this.crashed = false;
     this.normal.set(this.hit.nx, this.hit.ny, this.hit.nz);
     this.steer = this.lean = this.compress = this.preload = this.skid = 0;
+    this.compressVel = this.squishPitch = this.squishPitchVel = this.revert = 0;
     this.air.flip = this.air.spin = this.air.roll = this.air.flipVel = this.air.spinVel = 0;
     this.tricks.grabs.superman = this.tricks.grabs.noHander = this.tricks.grabs.canCan = 0;
     this.tricks.tailwhip = this.tricks.barspin = 0;
@@ -196,6 +214,7 @@ export class BikePhysics {
     if (this.grounded) this.stepGround(dt, inp, popCharge);
     else this.stepAir(dt, inp);
     this.stepTricks(dt, inp);
+    this.stepSprings(dt);
 
     // obstacles
     const c = this.ground.collide(this.pos.x, this.pos.z, this.pos.y + 0.4, 0.35);
@@ -290,7 +309,9 @@ export class BikePhysics {
       v *= k;
       vl *= k;
     }
-    this.compress = damp(this.compress, clamp(-vn0 * 0.5, 0, 1) + this.preload * 0.6, 6, dt);
+    this.compressToward(clamp(-vn0 * 0.5, 0, 1) + this.preload * 0.6, dt);
+    this.flipLatched = Math.abs(inp.flip) > 0.1;
+    this.spinLatched = Math.abs(inp.spin) > 0.1;
 
     // longitudinal forces
     let a = -GRAVITY * ty;
@@ -361,9 +382,23 @@ export class BikePhysics {
     this.airTime = 0;
   }
 
+  /** Springy (underdamped) suspension: it overshoots and rebounds instead of easing. */
+  private compressToward(target: number, dt: number) {
+    this.compressVel += (200 * (target - this.compress) - 8.5 * this.compressVel) * dt;
+    this.compress = clamp(this.compress + this.compressVel * dt, -0.25, 1.2);
+  }
+
+  private stepSprings(dt: number) {
+    if (!this.grounded) return;
+    this.squishPitchVel += (-260 * this.squishPitch - 13 * this.squishPitchVel) * dt;
+    this.squishPitch += this.squishPitchVel * dt;
+    this.revert = damp(this.revert, 0, 6, dt);
+  }
+
   private launch(popped: boolean, fromFeature: boolean) {
     this.grounded = false;
     const a = this.air;
+    this.squishPitch = this.squishPitchVel = this.revert = 0;
     a.time = 0;
     a.flip = 0;
     a.spin = 0;
@@ -391,7 +426,7 @@ export class BikePhysics {
     this.vel.multiplyScalar(1 - DRAG * 0.6 * s * dt);
     this.pos.addScaledVector(this.vel, dt);
     a.maxY = Math.max(a.maxY, this.pos.y);
-    this.compress = damp(this.compress, this.preload * 0.5 + 0.15, 6, dt);
+    this.compressToward(this.preload * 0.5 + 0.15, dt);
     this.lean = damp(this.lean, 0, 3, dt);
     this.steer = damp(this.steer, 0, 4, dt);
     this.skid = 0;
@@ -403,24 +438,28 @@ export class BikePhysics {
     const lx = this.pos.x + this.vel.x * 0.25,
       lz = this.pos.z + this.vel.z * 0.25;
     const slopePitch = Math.atan2(this.ground.heightAt(lx - fx, lz - fz) - this.ground.heightAt(lx + fx, lz + fz), HALF_WB * 2);
-    // flips
-    const flipTarget = inp.flip * 6.9;
-    if (Math.abs(inp.flip) > 0.1) a.flipVel = damp(a.flipVel, flipTarget, 7, dt);
+    // flips (wind up gradually: a tap tips the bike, a hold commits to the rotation)
+    if (this.flipLatched && Math.abs(inp.flip) <= 0.1) this.flipLatched = false;
+    const flipIn = this.flipLatched ? 0 : inp.flip;
+    if (Math.abs(flipIn) > 0.1) a.flipVel = damp(a.flipVel, flipIn * FLIP_RATE, FLIP_WINDUP, dt);
     else {
-      a.flipVel = damp(a.flipVel, 0, 6.5, dt);
+      a.flipVel = damp(a.flipVel, 0, 8, dt);
       const pitchNow = a.takeoffPitch + a.flip;
       const err = wrapAngle(slopePitch - pitchNow);
       // assist: level out toward the landing when close (or when no rotation is underway)
-      if (Math.abs(err) < 0.9 && Math.abs(a.flipVel) < 4) a.flip += err * Math.min(1, 3.2 * dt) * this.assist;
+      if (Math.abs(err) < 1.2 && Math.abs(a.flipVel) < 4.5) a.flip += err * Math.min(1, 3.4 * dt) * this.assist;
     }
     a.flip += a.flipVel * dt;
-    // spins
-    const spinTarget = inp.spin * 7.6;
-    if (Math.abs(inp.spin) > 0.1) a.spinVel = damp(a.spinVel, spinTarget, 7, dt);
+    // spins (the assist squares up to whichever way the bike is closer to: forwards or fakie)
+    if (this.spinLatched && Math.abs(inp.spin) <= 0.1) this.spinLatched = false;
+    const spinIn = this.spinLatched ? 0 : inp.spin;
+    const spinTarget = spinIn * 7.6;
+    if (Math.abs(spinIn) > 0.1) a.spinVel = damp(a.spinVel, spinTarget, 7, dt);
     else {
       a.spinVel = damp(a.spinVel, 0, 6.5, dt);
       const travel = Math.atan2(this.vel.x, -this.vel.z);
-      const err = wrapAngle(travel - (a.takeoffHeading + a.spin));
+      let err = wrapAngle(travel - (a.takeoffHeading + a.spin));
+      if (Math.abs(err) > Math.PI / 2) err = wrapAngle(err + Math.PI);
       if (Math.abs(err) < 0.85 && Math.abs(a.spinVel) < 4) a.spin += err * Math.min(1, 3 * dt) * this.assist;
     }
     a.spin += a.spinVel * dt;
@@ -467,15 +506,21 @@ export class BikePhysics {
     const impact = Math.max(0, -this.vel.dot(n));
     const hdg = a.takeoffHeading + a.spin;
     const travel = Math.atan2(this.vel.x, -this.vel.z);
-    const yawErr = wrapAngle(hdg - travel);
-    const pitchErr = wrapAngle(a.takeoffPitch + a.flip - slopePitch);
+    let yawErr = wrapAngle(hdg - travel);
+    // landing backwards: ride it out fakie and swing the bike back round
+    const fakie = Math.abs(yawErr) > Math.PI - YAW_LIMIT;
+    if (fakie) yawErr = wrapAngle(yawErr + Math.PI);
+    // backwards, the rear wheel leads: a nose-down frame is a rear-wheel-first landing and vice versa
+    const bikePitch = a.takeoffPitch + a.flip;
+    const pitchErr = wrapAngle((fakie ? -bikePitch : bikePitch) - (fakie ? -slopePitch : slopePitch));
     const tw = this.tricks;
     const midRotation = (tw.tailwhip > 0.12 && tw.tailwhip < 0.8) || (tw.barspin > 0.12 && tw.barspin < 0.8);
     const grab = Math.max(tw.grabs.superman, tw.grabs.noHander, tw.grabs.canCan);
     let reason = '';
-    if (impact > 15) reason = 'Too hard — flat landing!';
-    else if (Math.abs(pitchErr) > 0.8) reason = pitchErr > 0 ? 'Over-rotated!' : 'Looped out!';
-    else if (Math.abs(yawErr) > 0.9) reason = 'Landed sideways!';
+    if (impact > 17) reason = 'Too hard — flat landing!';
+    else if (pitchErr > OVER_LIMIT) reason = 'Over-rotated!';
+    else if (pitchErr < -LOOP_LIMIT) reason = 'Looped out!';
+    else if (Math.abs(yawErr) > YAW_LIMIT) reason = 'Landed sideways!';
     else if (Math.abs(a.roll) > 0.65) reason = 'Too much tabletop!';
     else if (grab > 0.55) reason = 'Still holding the grab!';
     else if (midRotation) reason = 'Bike still spinning!';
@@ -487,11 +532,17 @@ export class BikePhysics {
     // complete partially finished rotations
     if (tw.tailwhip >= 0.8) tw.tailwhip = 0;
     if (tw.barspin >= 0.8) tw.barspin = 0;
-    this.heading = wrapAngle(hdg);
+    const newHeading = wrapAngle(fakie ? hdg + Math.PI : hdg);
+    this.heading = newHeading;
     this.grounded = true;
     const vn = this.vel.dot(n);
     this.vel.addScaledVector(n, -vn);
-    const loss = 0.22 * clamp(impact / 12, 0, 1) + 0.25 * clamp((Math.abs(yawErr) - 0.25) / 0.6, 0, 1);
+    const sketchy = Math.abs(pitchErr) > SKETCHY;
+    const loss =
+      0.15 * clamp(impact / 12, 0, 1) +
+      0.25 * clamp((Math.abs(yawErr) - 0.25) / 0.6, 0, 1) +
+      (sketchy ? 0.12 : 0) +
+      (fakie ? 0.08 : 0);
     this.vel.multiplyScalar(1 - loss);
     // align velocity with the new heading
     const sp = this.vel.length();
@@ -499,10 +550,17 @@ export class BikePhysics {
     const fd = f2.dot(n);
     const t = f2.addScaledVector(n, -fd).normalize();
     this.vel.copy(t).multiplyScalar(sp);
+    // the suspension soaks the hit and rebounds; the frame slaps down from its air pitch onto the slope
     this.compress = clamp(impact / 7, 0.25, 1);
-    this.pitch = slopePitch;
-    const perfect = Math.abs(pitchErr) < 0.2 && Math.abs(yawErr) < 0.22 && impact < 9;
-    this.events.onLand?.({ ok: true, perfect, impact, pitchErr, yawErr }, a, this);
+    this.compressVel = clamp(impact * 0.35, 1, 6) + (sketchy ? 2 : 0);
+    // pitch and squish are kept along the new heading (a fakie landing reverses them); orientation() turns them back
+    const dir = fakie ? -1 : 1;
+    this.pitch = slopePitch * dir;
+    this.squishPitch = wrapAngle(bikePitch - slopePitch) * dir;
+    this.squishPitchVel = a.flipVel * 0.25 * dir;
+    this.revert = fakie ? wrapAngle(hdg - newHeading) : 0;
+    const perfect = !fakie && Math.abs(pitchErr) < 0.2 && Math.abs(yawErr) < 0.22 && impact < 9;
+    this.events.onLand?.({ ok: true, perfect, impact, pitchErr, yawErr, fakie, sketchy }, a, this);
     a.flip = a.spin = a.roll = a.flipVel = a.spinVel = 0;
   }
 
@@ -548,7 +606,11 @@ export class BikePhysics {
 
   /** Visual orientation of the bike (rotation order YXZ). */
   orientation(out: THREE.Euler) {
-    if (this.grounded) return out.set(-this.pitch, -this.heading, -this.lean, 'YXZ');
+    if (this.grounded) {
+      // mid-revert the frame still points (partly) the other way, so the pitch along the heading reads reversed
+      const p = (this.pitch + this.squishPitch) * Math.cos(this.revert);
+      return out.set(-p, -(this.heading + this.revert), -this.lean, 'YXZ');
+    }
     const a = this.air;
     return out.set(-(a.takeoffPitch + a.flip), -(a.takeoffHeading + a.spin), -a.roll, 'YXZ');
   }
