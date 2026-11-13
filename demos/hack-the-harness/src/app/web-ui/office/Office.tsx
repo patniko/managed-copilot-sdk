@@ -166,14 +166,15 @@ const THOUGHT_LINGER_MS = 2500;
 function useShowing(thought: Thought | null) {
   const [showing, setShowing] = useState(false);
   const { text, done, at } = thought ?? {};
+  const visible = !!thought;
 
   useEffect(() => {
-    setShowing(!!thought);
-    if (thought?.done) {
+    setShowing(visible);
+    if (done) {
       const timer = setTimeout(() => setShowing(false), THOUGHT_LINGER_MS);
       return () => clearTimeout(timer);
     }
-  }, [!!thought, text, done, at]);
+  }, [visible, text, done, at]);
 
   return showing;
 }

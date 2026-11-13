@@ -5,6 +5,7 @@
 !pnpm-workspace.yaml
 !tsconfig.base.json
 !libraries/protocol/**
+!libraries/demo-log/**
 !libraries/sdk/**
 !libraries/github-theme/**
 !demos/front-desk/**

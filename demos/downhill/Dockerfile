@@ -31,27 +31,29 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json tsconfig.base.json ./
 RUN cpu="$(case "${TARGETARCH}" in amd64) echo x64;; *) echo "${TARGETARCH}";; esac)" \
  && printf '\nsupportedArchitectures:\n  os: [current, linux]\n  cpu: [current, %s]\n  libc: [current, glibc]\n' "${cpu}" >> pnpm-workspace.yaml \
  && pnpm fetch
+COPY libraries/demo-log/ libraries/demo-log/
 COPY demos/downhill/ demos/downhill/
 COPY demos/help-desk/storefront/ demos/help-desk/storefront/
 COPY deployments/azure/ deployments/azure/
-RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/demo-downhill --filter @managed-copilot/azure \
- && pnpm --filter @managed-copilot/demo-downhill --filter @managed-copilot/azure run build
+RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/demo-log --filter @managed-copilot/demo-downhill --filter @managed-copilot/azure \
+ && pnpm --filter @managed-copilot/demo-log --filter @managed-copilot/demo-downhill --filter @managed-copilot/azure run build
 # The single-writer lease supervisor (no dependencies).
 RUN mkdir -p /out-azure \
  && cp deployments/azure/package.json /out-azure/ && cp -r deployments/azure/dist /out-azure/ \
  && find /out-azure -name '*.map' -delete
-# The server's runtime dependencies are OpenTelemetry's logs SDK and OTLP exporter (pure JavaScript): a production-only
-# install in its own workspace root (/out). With the built server and game go the files it locates its package root by,
-# and the storefront as it shipped (its package.json, README, code, and tests), which checkout imports and Incident
-# Commander reads.
-RUN mkdir -p /out/demos/downhill /out/demos/help-desk/storefront \
+# The server's runtime dependencies are OpenTelemetry's logs SDK and OTLP exporter (pure JavaScript) and the shared
+# demo logger: a production-only install in its own workspace root (/out). With the built server and game go the files
+# it locates its package root by, and the storefront as it shipped (its package.json, README, code, and tests), which
+# checkout imports and Incident Commander reads.
+RUN mkdir -p /out/libraries/demo-log /out/demos/downhill /out/demos/help-desk/storefront \
  && cp package.json pnpm-lock.yaml /out/ \
  && sed '/^supportedArchitectures:/,$d' pnpm-workspace.yaml > /out/pnpm-workspace.yaml \
+ && cp libraries/demo-log/package.json /out/libraries/demo-log/ && cp -r libraries/demo-log/dist /out/libraries/demo-log/ \
  && cp demos/downhill/package.json demos/downhill/apphost.mts /out/demos/downhill/ \
  && cp -r demos/downhill/dist /out/demos/downhill/ \
  && cp -r demos/help-desk/storefront/package.json demos/help-desk/storefront/README.md demos/help-desk/storefront/src demos/help-desk/storefront/test /out/demos/help-desk/storefront/ \
  && cd /out \
- && pnpm install --prod --offline --frozen-lockfile --ignore-scripts --filter @managed-copilot/demo-downhill \
+ && pnpm install --prod --offline --frozen-lockfile --ignore-scripts --filter @managed-copilot/demo-log --filter @managed-copilot/demo-downhill \
  && find /out -name '*.map' -delete
 
 FROM ${NODE_IMAGE}

@@ -64,11 +64,12 @@ export function App() {
   }, []);
 
   // Load the selected chat, and reload it after reconnecting to the server.
+  const { connected, open: openChat } = data;
   useEffect(() => {
-    if (activeId && data.connected) {
-      void data.open(activeId);
+    if (activeId && connected) {
+      void openChat(activeId);
     }
-  }, [activeId, data.connected, data.open]);
+  }, [activeId, connected, openChat]);
 
   function setPendingFiles(id: string, update: (files: File[]) => File[]) {
     setFiles(previous => ({ ...previous, [id]: update(previous[id] ?? []) }));

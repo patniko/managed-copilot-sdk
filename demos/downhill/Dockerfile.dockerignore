@@ -4,6 +4,7 @@
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
 !tsconfig.base.json
+!libraries/demo-log/**
 !demos/downhill/**
 !demos/help-desk/storefront/**
 !deployments/azure/**

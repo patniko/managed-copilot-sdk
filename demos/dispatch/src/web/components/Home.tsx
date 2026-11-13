@@ -50,7 +50,7 @@ export function Home() {
     }
   };
 
-  const useTemplate = (template: Template): void => {
+  const applyTemplate = (template: Template): void => {
     setText(template.prompt);
     // A template written for one style picks it, when this deployment has it.
     const opens = templateStyle(template, styles);
@@ -103,7 +103,7 @@ export function Home() {
           </h2>
           <div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {templates.map((template) => (
-              <TemplateCard key={template.id} template={template} onUse={() => useTemplate(template)} disabled={!ready} style={style} styles={styles} />
+              <TemplateCard key={template.id} template={template} onUse={() => applyTemplate(template)} disabled={!ready} style={style} styles={styles} />
             ))}
           </div>
         </section>

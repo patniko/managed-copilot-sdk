@@ -13,7 +13,7 @@ import { PlatformTools, RuntimeRequests } from "./registries.js";
 import { registerConnectRoute } from "./router.js";
 import { registerRoutes } from "./routes.js";
 import { SharedRuntime } from "./runtime.js";
-import { SessionManager } from "./sessions.js";
+import { SessionManager } from "./sessions/index.js";
 
 export const coreModule: GatewayModule = {
   name: "core",

@@ -103,7 +103,7 @@ function BehindTheScenes({ customer, ticket }: { readonly customer: CustomerCard
         />
       ) : null}
 
-      {ticket.memory ? <MemoryProposalBox customerId={customer.id} ticket={ticket} /> : null}
+      {ticket.memory ? <MemoryProposalBox ticket={ticket} /> : null}
 
       <TeamNotes
         items={ticket.items}
@@ -276,7 +276,7 @@ export function Approval({
  * A fact the agent proposed for the team knowledge base, or a known issue: every later conversation is told it once
  * it's added (recorded).
  */
-function MemoryProposalBox({ customerId, ticket }: { readonly customerId: string; readonly ticket: Ticket }) {
+function MemoryProposalBox({ ticket }: { readonly ticket: Ticket }) {
   const memory = ticket.memory!;
   const busy = useStore((state) => Boolean(state.answering[memory.id]));
   const issue = memory.kind === "known-issue";

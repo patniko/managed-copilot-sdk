@@ -23,7 +23,6 @@ import {
   type Counters,
   type DeskInfo,
   type HelpDeskState,
-  type KnowledgeEntry,
   type KnownIssue,
   type KnownIssueAnswer,
   type KnownIssueTicket,

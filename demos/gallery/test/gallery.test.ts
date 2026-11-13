@@ -174,7 +174,7 @@ describe("Hack the Harness stages", () => {
   const stages = readFileSync(fileURLToPath(new URL("../../hack-the-harness/src/app/server/stages.ts", import.meta.url)), "utf8");
 
   it("lists the app's stages in its order, each showing one of the six patterns", () => {
-    const ids = [...stages.matchAll(/^    id: "(\w+)",$/gm)].map((match) => match[1]);
+    const ids = [...stages.matchAll(/^ {4}id: "(\w+)",$/gm)].map((match) => match[1]);
     expect(HARNESS_STAGES.map((stage) => stage.id)).toEqual(ids);
     for (const stage of HARNESS_STAGES) expect(PATTERNS.map((pattern) => pattern.id), stage.id).toContain(stage.pattern);
     expect(new Set(HARNESS_STAGES.map((stage) => stage.pattern)).size).toBe(PATTERNS.length);

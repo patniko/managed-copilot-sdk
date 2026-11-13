@@ -51,10 +51,16 @@ try {
   let wo;
   for (;;) {
     wo = await (await fetch(`${BASE}/api/work-orders/${id}`)).json();
-    if (seen.wo !== wo.status) rec.mark(`wo ${wo.status}`), (seen.wo = wo.status);
+    if (seen.wo !== wo.status) {
+      rec.mark(`wo ${wo.status}`);
+      seen.wo = wo.status;
+    }
     for (const s of wo.stations) {
       const value = `${s.status} r${s.round}`;
-      if (seen[s.id] !== value) rec.mark(`${s.id} ${value}`), (seen[s.id] = value);
+      if (seen[s.id] !== value) {
+        rec.mark(`${s.id} ${value}`);
+        seen[s.id] = value;
+      }
     }
     if (["completed", "failed", "cancelled"].includes(wo.status)) break;
     if (Date.now() - started > 20 * 60_000) throw new Error("the work order took longer than 20 minutes");

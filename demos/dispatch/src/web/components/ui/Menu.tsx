@@ -25,6 +25,7 @@ export function OverflowMenu({ label, items, className }: { readonly label: stri
       // Escape or a press outside removed the focused item: back to the menu's button (a no-op behind a modal dialog).
       if (!document.activeElement || document.activeElement === document.body) focusTrigger();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- focusTrigger only reads the container ref
   }, [open]);
 
   const onKeyDown = (event: KeyboardEvent<HTMLUListElement>): void => {

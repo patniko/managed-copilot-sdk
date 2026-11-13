@@ -18,7 +18,7 @@ export function Tile({ customer, ticket }: { readonly customer: CustomerCard; re
   const bar = approval ? (
     <ApprovalBar approval={approval} onAnswer={(approve) => void answer(customer.id, approval.id, approve)} />
   ) : ticket.memory ? (
-    <MemoryBar customerId={customer.id} ticket={ticket} />
+    <MemoryBar ticket={ticket} />
   ) : ticket.knownIssue ? (
     <KnownIssueBar known={ticket.knownIssue} />
   ) : ticket.blocked > 0 ? (
@@ -145,7 +145,7 @@ function ApprovalBar({ approval, to, onAnswer }: { readonly approval: ApprovalRe
 }
 
 /** The agent proposed a fact for the team knowledge base, or a known issue: the operator adds (records) it or not. */
-function MemoryBar({ customerId, ticket }: { readonly customerId: string; readonly ticket: Ticket }) {
+function MemoryBar({ ticket }: { readonly ticket: Ticket }) {
   const memory = ticket.memory!;
   const busy = useStore((state) => Boolean(state.answering[memory.id]));
   const issue = memory.kind === "known-issue";

@@ -2,7 +2,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { pathScrubber } from "../src/modules/core/sessions.js";
+import { pathScrubber } from "../src/modules/core/sessions/index.js";
 import { AhpObserver, TOO_DEEP, decideAction, decideRequest, elicitationResult, filterResult, uriAwareScrubber, withinNesting } from "../src/modules/attach/policy.js";
 
 const SESSION = "ahp-session:/s1";

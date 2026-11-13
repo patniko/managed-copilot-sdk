@@ -15,7 +15,6 @@ import {
   type AccountInfo,
   type CustomizationFile,
   type CustomizationFileInfo,
-  type EnvironmentConfig,
   type GatewayStatus,
   type InfraFact,
   type OperatorConnection,
@@ -45,7 +44,7 @@ import type { PlatformTools } from "./registries.js";
 import { deploymentInfo } from "./routes.js";
 import type { ClientConnection } from "./router.js";
 import type { SharedRuntime } from "./runtime.js";
-import { pathScrubber, type LiveSessionSnapshot, type SessionManager } from "./sessions.js";
+import { pathScrubber, type LiveSessionSnapshot, type SessionManager } from "./sessions/index.js";
 
 /** What the operator console shows of a customization file at most. */
 const FILE_LIMIT_BYTES = 256 * 1024;

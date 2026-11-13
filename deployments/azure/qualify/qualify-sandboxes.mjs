@@ -139,7 +139,6 @@ const shell = async (id, command) => {
 const curl = (target, extra = "") => `curl -sS -m 12 -o /dev/null -w 'http=%{http_code} ip=%{remote_ip}' ${extra} ${target} 2>&1; echo " exit=$?"`;
 
 async function main() {
-  let image;
   let sandbox;
   const key = randomBytes(24).toString("hex");
   const disks = await ensureDisks(`qualify-${randomBytes(3).toString("hex")}`).catch((error) => {
@@ -149,7 +148,7 @@ async function main() {
   if (steps.has("api")) await attempt("data-plane", async () => ({ sandboxes: (await api.listSandboxes(labels)).length, apiVersion: env.AZ_SANDBOX_API_VERSION ?? "2026-02-01-preview" }));
   if (disks) record("data-disks", "passed", { disks });
 
-  image = await diskImage().catch((error) => record("disk-image", "failed", { error: error.message, status: error.status }) && undefined);
+  const image = await diskImage().catch((error) => record("disk-image", "failed", { error: error.message, status: error.status }) && undefined);
   if (image) record("disk-image", image.status?.state?.toLowerCase() === "failed" ? "failed" : "passed", { id: image.id, state: image.status?.state, error: image.status?.errorMessage });
   if (!image || image.status?.state?.toLowerCase() === "failed") return;
 

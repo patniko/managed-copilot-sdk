@@ -7,7 +7,7 @@ import { accountInfo } from "./auth.js";
 import type { Environments } from "./environments.js";
 import type { PlatformEvents } from "./events.js";
 import type { SharedRuntime } from "./runtime.js";
-import type { SessionManager } from "./sessions.js";
+import type { SessionManager } from "./sessions/index.js";
 
 const SESSION_STATES: readonly SessionState[] = ["creating", "ready", "running", "waiting", "idle", "stopped", "promoting", "deleting", "deleted", "failed"];
 

@@ -731,7 +731,7 @@ describe("durable schedules", () => {
       schedules = build({ maxRunLifetimeMs: 60_000 });
       const aborted: string[] = [];
       const request = sessions.request.bind(sessions);
-      sessions.request = (async (sessionId: string, method: string, params: Record<string, unknown>) => {
+      sessions.request = (async (sessionId: string, method: string, _params: Record<string, unknown>) => {
         if (method === "session.abort") {
           aborted.push(sessionId);
           return {};

@@ -2,10 +2,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { isManagedCopilotError, NETWORK_ENABLED, parseConfig, type PlatformEvent } from "@managed-copilot/protocol";
 import { openDatabase, transaction } from "../src/db.js";
-import { redact } from "../src/log.js";
+import { logRing, redact } from "../src/log.js";
 import {
   admitOptionsUpdate,
   admitSession,
@@ -23,7 +23,7 @@ import { Environments, parseAgentFile } from "../src/modules/core/environments.j
 import { PlatformEvents } from "../src/modules/core/events.js";
 import { EVENTS_START, SessionLedger } from "../src/modules/core/ledger.js";
 import { processStartTime, reapStaleRuntime } from "../src/modules/core/runtime.js";
-import { pathScrubber } from "../src/modules/core/sessions.js";
+import { pathScrubber } from "../src/modules/core/sessions/index.js";
 import { createLogger } from "../src/log.js";
 import { sleep, startGitHubStub } from "./harness.js";
 
@@ -588,6 +588,28 @@ describe("gateway primitives", () => {
     const circular: Record<string, unknown> = { idempotencyKey: "k1", value: "secret", headers: { authorization: "x" }, nested: { placeholder: "mcrt_1", token: "t" }, big: 10n };
     circular["self"] = circular;
     expect(redact(circular)).toEqual({ idempotencyKey: "k1", value: "[redacted]", headers: "[redacted]", nested: { placeholder: "[redacted]", token: "[redacted]" }, big: "10", self: "[circular]" });
+  });
+
+  it("masks credentials inside log messages and text fields", () => {
+    const token = "ghp_0123456789abcdefghijABCDEFGHIJ";
+    const writes: string[] = [];
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => (writes.push(String(chunk)), true));
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => (writes.push(String(chunk)), true));
+    try {
+      const log = createLogger("redaction-test", "info");
+      log.warn(`GitHub rejected ${token} (Authorization: Bearer abcdefgh12345678)`, { error: `fetch https://user:pw@host.example/x failed with ${token}`, sessionId: "614fdd39-ad63-46aa-b08b-480cf209eaaa" });
+      const entry = logRing.recent({ limit: 1 })[0]!;
+      for (const text of [...writes, entry.message, JSON.stringify(entry.fields)]) {
+        expect(text).not.toContain(token);
+        expect(text).not.toContain("abcdefgh12345678");
+        expect(text).not.toContain("user:pw");
+      }
+      expect(entry.message).toBe("GitHub rejected [redacted] (Authorization: Bearer [redacted])");
+      expect(entry.fields).toEqual({ error: "fetch https://***@host.example/x failed with [redacted]", sessionId: "614fdd39-ad63-46aa-b08b-480cf209eaaa" });
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+    }
   });
 
   it("nests transactions and rejects async callbacks", () => {

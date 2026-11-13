@@ -27,7 +27,7 @@ export function addressOf(input: string): string {
 
 /** RFC 2047 encoded-word for non-ASCII header text; plain ASCII passes through. */
 export function encodeWord(text: string): string {
-  // eslint-disable-next-line no-control-regex
+   
   if (/^[\x20-\x7e]*$/.test(text)) return /[",;<>@()]/.test(text) ? `"${text.replace(/["\\]/g, "\\$&")}"` : text;
   return `=?UTF-8?B?${Buffer.from(text, "utf8").toString("base64")}?=`;
 }
@@ -37,7 +37,7 @@ export function encodeWord(text: string): string {
  * there), anything else as RFC 2047 encoded-words of whole characters, each short enough for one header line.
  */
 export function encodeHeaderText(text: string): string {
-  // eslint-disable-next-line no-control-regex
+   
   if (/^[\x20-\x7e]*$/.test(text)) return text;
   const words: string[] = [];
   let chunk = "";

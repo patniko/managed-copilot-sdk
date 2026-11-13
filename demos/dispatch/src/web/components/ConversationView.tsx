@@ -138,7 +138,7 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
 
       <div className="grid min-h-0 flex-1 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
         <div className={cx("flex min-h-0 flex-col border-line xl:border-r", pane !== "chat" && "max-xl:hidden")}>
-          <Chat view={view} blueprints={blueprints} />
+          <Chat view={view} />
         </div>
         <div className={cx("flex min-h-0 flex-col bg-canvas-inset", pane !== "sandboxes" && "max-xl:hidden")}>
           <nav aria-label="Sandboxes and timeline" className="UnderlineNav shrink-0 bg-canvas px-3">

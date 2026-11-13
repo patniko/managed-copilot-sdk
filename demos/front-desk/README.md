@@ -199,9 +199,9 @@ and prints where each person's model use went. A run with Foundry configured (34
 
 ```text
 Where each person's model use went (Managed Copilot's own record of each session):
-  email user 1   front-desk-e2e-89b913-1@example.com  →  Azure AI Foundry (mc-foundry-dev), grok-4.7  [owner app-user front-desk/u_oq91jSJ_o381AVDD]
-  email user 2   front-desk-e2e-89b913-2@example.com  →  Azure AI Foundry (mc-foundry-dev), grok-4.7  [owner app-user front-desk/u_W-DFZqgOUF_AL3nn]
-  GitHub user    @patniko  →  their Copilot plan, claude-sonnet-5  [owner github patniko]
+  email user 1   front-desk-e2e-89b913-1@example.com  →  Azure AI Foundry (my-foundry), grok-4.7  [owner app-user front-desk/u_oq91jSJ_o381AVDD]
+  email user 2   front-desk-e2e-89b913-2@example.com  →  Azure AI Foundry (my-foundry), grok-4.7  [owner app-user front-desk/u_W-DFZqgOUF_AL3nn]
+  GitHub user    @octocat  →  their Copilot plan, claude-sonnet-5  [owner github octocat]
 ```
 
 The gateway's log agrees: it logs "Session model calls go to Azure AI Foundry" with the session ID and owner for each
@@ -215,7 +215,7 @@ and saved a secret: neither email user could list, open, send to, stop, or delet
 from their assistant, the GitHub user couldn't open theirs, and the deployment's own record
 (`npx managed-copilot operator sessions`) showed the GitHub user's session in `front-desk`, owned by their GitHub
 account with `inference: { route: "copilot" }`, and each email user's in `front-desk-foundry`, owned by
-`front-desk/<user ID>` with `inference: { route: "foundry", foundry: "mc-foundry-dev", deployment: "grok-4.7" }`.
+`front-desk/<user ID>` with `inference: { route: "foundry", foundry: "my-foundry", deployment: "grok-4.7" }`.
 
 ## Layout
 

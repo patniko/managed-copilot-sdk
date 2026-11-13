@@ -1,7 +1,6 @@
 // Direct and mixed orchestrators (spec section 17, design note "direct execution"): the coordinator and its sub-agents
 // act in workspace-only hands sandboxes through the stock shell and file tools' names and shapes, run by the gateway.
 // The fake runtime plays the coordinator; the fake sandboxes run commands through a test hook.
-import { createHash } from "node:crypto";
 import { ManagedCopilotConfigSchema, type PlatformEvent, type WorkerInfo } from "@managed-copilot/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Principal } from "../src/http.js";

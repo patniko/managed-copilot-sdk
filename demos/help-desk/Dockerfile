@@ -28,12 +28,13 @@ RUN cpu="$(case "${TARGETARCH}" in amd64) echo x64;; *) echo "${TARGETARCH}";; e
  && printf '\nsupportedArchitectures:\n  os: [current, linux]\n  cpu: [current, %s]\n  libc: [current, glibc]\n' "${cpu}" >> pnpm-workspace.yaml \
  && pnpm fetch
 COPY libraries/protocol/ libraries/protocol/
+COPY libraries/demo-log/ libraries/demo-log/
 COPY libraries/sdk/ libraries/sdk/
 COPY libraries/github-theme/ libraries/github-theme/
 COPY demos/help-desk/ demos/help-desk/
 COPY deployments/azure/ deployments/azure/
-RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/protocol --filter @managed-copilot/sdk --filter @managed-copilot/github-theme --filter @managed-copilot/demo-help-desk --filter @managed-copilot/azure \
- && pnpm --filter @managed-copilot/protocol --filter @managed-copilot/sdk --filter @managed-copilot/demo-help-desk --filter @managed-copilot/azure run build
+RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/protocol --filter @managed-copilot/demo-log --filter @managed-copilot/sdk --filter @managed-copilot/github-theme --filter @managed-copilot/demo-help-desk --filter @managed-copilot/azure \
+ && pnpm --filter @managed-copilot/protocol --filter @managed-copilot/demo-log --filter @managed-copilot/sdk --filter @managed-copilot/demo-help-desk --filter @managed-copilot/azure run build
 # The single-writer lease supervisor (no dependencies): one replica at a time runs the app.
 RUN mkdir -p /out-azure \
  && cp deployments/azure/package.json /out-azure/ && cp -r deployments/azure/dist /out-azure/ \
@@ -44,15 +45,15 @@ RUN mkdir -p /out-azure \
 # The server locates its package root by apphost.mts and package.json, so both are kept, and the storefront codebase
 # next to them is what a software issue's work order sends to Software Factory.
 RUN cpu="$(case "${TARGETARCH}" in amd64) echo x64;; *) echo "${TARGETARCH}";; esac)" \
- && mkdir -p /out/libraries/protocol /out/libraries/sdk /out/demos/help-desk \
+ && mkdir -p /out/libraries/protocol /out/libraries/demo-log /out/libraries/sdk /out/demos/help-desk \
  && cp package.json pnpm-lock.yaml /out/ \
  && sed '/^supportedArchitectures:/,$d' pnpm-workspace.yaml > /out/pnpm-workspace.yaml \
  && printf 'supportedArchitectures:\n  os: [linux]\n  cpu: [%s]\n  libc: [glibc]\npublicHoistPattern:\n  - "@github/copilot-sdk"\n' "${cpu}" >> /out/pnpm-workspace.yaml \
- && for pkg in libraries/protocol libraries/sdk demos/help-desk; do cp "${pkg}/package.json" "/out/${pkg}/" && cp -r "${pkg}/dist" "/out/${pkg}/"; done \
+ && for pkg in libraries/protocol libraries/demo-log libraries/sdk demos/help-desk; do cp "${pkg}/package.json" "/out/${pkg}/" && cp -r "${pkg}/dist" "/out/${pkg}/"; done \
  && cp demos/help-desk/apphost.mts /out/demos/help-desk/ \
  && cp -r demos/help-desk/storefront /out/demos/help-desk/ \
  && cd /out \
- && pnpm install --prod --offline --frozen-lockfile --ignore-scripts --filter @managed-copilot/protocol --filter @managed-copilot/sdk --filter @managed-copilot/demo-help-desk \
+ && pnpm install --prod --offline --frozen-lockfile --ignore-scripts --filter @managed-copilot/protocol --filter @managed-copilot/demo-log --filter @managed-copilot/sdk --filter @managed-copilot/demo-help-desk \
  && find /out -name '*.map' -delete
 
 FROM ${NODE_IMAGE}

@@ -54,7 +54,7 @@ export function createStyle(options: StyleOptions): Style {
   };
 }
 
-// eslint-disable-next-line no-control-regex
+ 
 const ANSI = /\u001b\[[0-9;]*m/g;
 
 export function visibleLength(text: string): number {
