@@ -1,12 +1,14 @@
 /** Everything the gallery shows. Shared by the server (links, health checks) and the page (copy). */
 
 /**
- * Which gallery tab lists an app:
- * - `connected`: the Software Factory and the apps that send it work, and Downhill, whose support tickets go to Help Desk.
+ * Where the gallery shows an app:
+ * - `connected`: the Downhill Launch tab: the Software Factory and the apps that send it work, and Downhill, whose
+ *   support tickets go to Help Desk.
  * - `staff`: the staff assistant whose stages step through the architectures (Hack the Harness).
- * - `more`: everything else, the operator console included.
+ * - `more`: the More demos tab: everything else.
+ * - `console`: the operator console, opened from its own button in the page's hero rather than a card.
  */
-export type AppGroup = "connected" | "staff" | "more";
+export type AppGroup = "connected" | "staff" | "more" | "console";
 
 export interface AppEntry {
   readonly id: string;
@@ -46,7 +48,7 @@ export interface Walkthrough {
 export const GATEWAY_APP = "copilot";
 export const GATEWAY_PORT = 7400;
 export const GALLERY_PORT = 7460;
-/** The app whose shop the Connected demos map can roll out and take down. */
+/** The app whose shop the Downhill Launch map can roll out and take down. */
 export const SHOP_APP_ID = "downhill";
 
 /** Whether Downhill's shop is open on a target: the gallery's `GET /api/downhill/shop?target=`, as Downhill says it. */
@@ -63,7 +65,7 @@ export const CONSOLE: AppEntry = {
   tagline: "The platform as operators see it",
   description: "Infrastructure health, environments, every owner's sessions and sandboxes, and harness configuration. Metadata only, never conversation content.",
   tryIt: "Open Sessions while a demo runs and watch sandboxes appear.",
-  group: "more",
+  group: "console",
   app: GATEWAY_APP,
   port: GATEWAY_PORT,
   healthPath: "/healthz",

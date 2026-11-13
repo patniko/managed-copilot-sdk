@@ -140,7 +140,7 @@ opens every one.
 
 ### One day at Contoso Outdoors
 
-Five of the demos tell one story, in the order the gallery's **Connected demos** tab lists them:
+Five of the demos tell one story, in the order the gallery's **Downhill Launch** tab lists them:
 
 1. **Downhill:** ride a run, then buy a new look in the game's shop. The launch offer's code is rejected at checkout,
    which runs the store's own code, and **Contact support** opens a live chat.

@@ -178,20 +178,24 @@ describe("tabs", () => {
   });
 
   it("opens the tab holding the section a link names", () => {
-    expect(tabForHash("")).toBe("architectures");
+    expect(tabForHash("")).toBe("overview");
     for (const tab of TABS) expect(tabForHash(`#${tab}`)).toBe(tab);
-    expect(tabForHash("#patterns")).toBe("architectures");
-    expect(tabForHash("#pattern-mixed")).toBe("architectures");
-    expect(tabForHash("#walkthrough-03")).toBe("walkthroughs");
+    expect(tabForHash("#patterns")).toBe("overview");
+    expect(tabForHash("#pattern-mixed")).toBe("overview");
+    expect(tabForHash("#walkthrough-03")).toBe("overview");
     expect(tabForHash("#hack-the-harness")).toBe("staff-assistant");
     expect(tabForHash("#harness-workers")).toBe("staff-assistant");
-    expect(tabForHash("#nothing")).toBe("architectures");
+    expect(tabForHash("#nothing")).toBe("overview");
+    // The tabs' earlier addresses.
+    expect(tabForHash("#architectures")).toBe("overview");
+    expect(tabForHash("#walkthroughs")).toBe("overview");
+    expect(tabForHash("#connected")).toBe("downhill-launch");
   });
 
-  it("leaves local-only apps off a hosted gallery's tabs", () => {
+  it("leaves local-only apps off a hosted gallery's tabs, and the console off every tab", () => {
     expect(appsOnTab(APPS, "staff", false).map((app) => app.id)).toEqual([HARNESS_APP_ID]);
     expect(appsOnTab(APPS, "staff", true)).toEqual([]);
-    expect(appsOnTab(APPS, "more", false)).toContain(CONSOLE);
+    for (const group of ["connected", "staff", "more"] as const) expect(appsOnTab(APPS, group, false)).not.toContain(CONSOLE);
   });
 });
 

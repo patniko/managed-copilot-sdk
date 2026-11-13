@@ -405,7 +405,7 @@ Launch day lasts a day. When it's more than a day old, the server starts it over
 ### Rolling out the shop
 
 The shop is open as it ships. To roll it out during a talk, close it beforehand and open it on stage, with the
-**Downhill Shop** switch under Downhill on the [demo gallery](../gallery/README.md)'s Connected demos map, or with
+**Downhill Shop** switch under Downhill on the [demo gallery](../gallery/README.md)'s Downhill Launch map, or with
 `PUT /api/shop` and `{ "open": false }` or `{ "open": true }`. `GET /api/shop` answers `{ "open", "changedAt" }`.
 
 - **Closed:** the game hides every Shop button within a few seconds (it checks `GET /api/shop` every 3 seconds, and

@@ -13,27 +13,36 @@ It opens http://localhost:7460 in your browser.
 
 ## What's on it
 
-Below the header and a one-line hero, five tabs split the page. Each tab has its own address (`#architectures`,
-`#connected`, `#staff-assistant`, `#demos`, `#walkthroughs`), and a link to something inside a tab
-(`#pattern-mixed`, `#walkthrough-03`, `#harness-workers`) opens that tab and scrolls to it.
+Below the header and a hero with the **Operator console** button, four tabs split the page. Each tab has its own
+address (`#overview`, `#downhill-launch`, `#staff-assistant`, `#demos`), and a link to something inside a tab
+(`#pattern-mixed`, `#walkthrough-03`, `#harness-workers`) opens that tab and scrolls to it. The tabs' earlier addresses
+(`#architectures`, `#walkthroughs`, `#connected`) still open the tab that holds them now.
 
 - **Header**: a **Local** and an **Azure** control. The dot is green when that gateway answers, amber when it refuses
   this network, red when it doesn't answer, and grey when there's no deployment; a spinner means the gallery is still
   looking. Each opens the gateway's address, how the gallery found it, what to do next (`aspire run`, or naming a
   deployment with `--cloud`), and **Check now**.
-- **Architectures** tab, **Patterns**: the three building blocks (single container, virtualized multi-tenant, container orchestration), once,
+- **Operator console**, the hero's main button: it opens the console on the first gateway that answers (local first),
+  with a second button for the other gateway when both are known. It signs you in with your GitHub sign-in, like
+  `npx managed-copilot console`: the gallery asks the gateway for a one-time link and redirects to it. A deployment's
+  console stays off until it names operators; the gallery says so instead of opening a broken page.
+- **Overview** tab, **Patterns**: the three building blocks (single container, virtualized multi-tenant, container orchestration), once,
   each with a colored marker, and a card for each of the six patterns made from them: isolated, shared, promotable,
   direct, delegate, and mixed ([patterns](../../docs/concepts/patterns.md)). A card shows:
   - a diagram of where its **brain** (the model loop) runs, the shared runtime or a sandbox, and where its **hands**
     (the tools that act) run: your app, a sandbox, or worker sandboxes with an agent in each. Hover it for the same in
     words.
   - the `managed.client("<environment>")` call that picks it in this repository's AppHost (hover for its settings),
-    its building blocks as markers, its walkthrough (which opens it on the Walkthroughs tab), and the apps that show it (opened
+    its building blocks as markers, its walkthrough (which scrolls to it below), and the apps that show it (opened
     when they're up, their README otherwise; hover for where in the app).
 
   When the catalog lists Pattern Race (`pattern-race`), which runs one job through all six side by side, the section
   links it as **Compare all six**, and its app card says **All six patterns**; no pattern card lists it.
-- **Connected demos** tab: Contoso Outdoors' launch day as a map. Three zones run left to right: the storefront
+- **Overview** tab, **Walkthroughs**, below the patterns: the thirteen [samples](../../walkthroughs/README.md) as a
+  list, with their README. The copy button copies `pnpm walkthrough 01` after setting `MANAGED_COPILOT_URL` to a
+  gateway, in PowerShell on Windows and `sh` elsewhere. The variable stays set in that terminal, so each copy names its
+  target. With both gateways known, a **Local** | **Azure** switch picks which one.
+- **Downhill Launch** tab: Contoso Outdoors' launch day as a map. Three zones run left to right: the storefront
   (Downhill), support and operations (Help Desk, Data Desk, and Incident Commander), and engineering (the Software
   Factory), above the Managed Copilot platform their agents run on. Each app is a node with its screenshot, its
   Local/Azure buttons, and a small sketch of its agents (where their brains and hands run, in the pattern diagrams'
@@ -46,10 +55,11 @@ Below the header and a one-line hero, five tabs split the page. Each tab has its
     ([rolling out the shop](../downhill/README.md#rolling-out-the-shop)). It acts on the Downhill that answers, local
     first (a deployed gallery: Azure's), through the gallery server (`GET` and same-site `PUT /api/downhill/shop?target=`),
     and checks it every 5 seconds.
-- **Staff assistant** tab: Hack the Harness's six stages (shared, isolated, promotable, direct, workers, and mixed),
-  one row each with **Open**, which opens the local app at that stage (`?stage=<id>`). Every stage runs at once, so
-  you can flip between them during a talk. Local only, so a deployed gallery leaves the tab out.
-- **More demos** tab: every other demo app, and the operator console.
+- **Staff assistant** tab: Hack the Harness with its screenshot, description, and **Open the office**, then a card for
+  each of its six stages (shared, isolated, promotable, direct, workers, and mixed) with the pattern's brain/hands
+  diagram and **Open stage**, which opens the local app at that stage (`?stage=<id>`). Every stage runs at once, so you
+  can flip between them during a talk. Local only, so a deployed gallery leaves the tab out.
+- **More demos** tab: every other demo app.
 - **App cards**, on the More demos tab: a card per app, with its screenshot (or its initials until one is captured),
   tagline (hover for more), the patterns it shows, what to try first, a **Local** and an **Azure** button with a live
   status dot, and its README.
@@ -60,13 +70,6 @@ Below the header and a one-line hero, five tabs split the page. Each tab has its
     deployed gallery leaves its card out.
   - A **Public** label marks an app the root AppHost publishes with `publishApp({ public: true })`: it signs in its own
     users, so anyone can open its deployed copy, and the allowlist doesn't apply to it.
-  - The operator console buttons sign you in with your GitHub sign-in, like `npx managed-copilot console`: the gallery
-    asks the gateway for a one-time link and redirects to it. A deployment's console stays off until it names operators;
-    the gallery says so instead of opening a broken page.
-- **Walkthroughs** tab: the thirteen [samples](../../walkthroughs/README.md) as a list, with their README. The copy button
-  copies `pnpm walkthrough 01` after setting `MANAGED_COPILOT_URL` to a gateway, in PowerShell on Windows and `sh`
-  elsewhere. The variable stays set in that terminal, so each copy names its target. With both gateways known, a
-  **Local** | **Azure** switch picks which one.
 
 The page checks every link every 15 seconds. When the local platform isn't running, one line says so, with
 `aspire run` to copy.
@@ -94,7 +97,7 @@ a link you can share. The deployed copy shows that deployment only:
 
 - **Azure links only.** There are no Local controls: it can't see visitors' machines.
 - **No console sign-in.** Locally, the console button signs you in with your GitHub sign-in. Deployed, that would sign
-  every visitor in as one account, so the console card copies `npx managed-copilot console --url <gateway>` instead,
+  every visitor in as one account, so the **Operator console** button copies `npx managed-copilot console --url <gateway>` instead,
   which each operator runs with their own sign-in. The gallery holds no GitHub token (`publishApp`'s
   `githubToken: false`).
 - **Same audience as the demos.** It opens only from `Parameters:app-allowed-ips` (`npx managed-copilot access ips`).
