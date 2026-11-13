@@ -162,7 +162,7 @@ export class UI implements SessionUI {
       this.on.click();
       this.on.ride();
     };
-    const shop = h('button', 'btn lime small', 'Shop');
+    const shop = h('button', 'btn lime small shop-entry', 'Shop');
     shop.onclick = () => {
       this.on.click();
       this.on.shop();
@@ -441,7 +441,7 @@ export class UI implements SessionUI {
     mk('Shop', () => {
       this.togglePause(false, true);
       this.on.shop();
-    }, 'btn ghost');
+    }, 'btn ghost shop-entry');
     // Support opens over the pause menu: the run stays paused until the player resumes it.
     mk(`${CHAT_ICON}Support`, () => this.on.support(), 'btn ghost');
     mk('Settings', () => this.openSettings(), 'btn ghost');
@@ -503,7 +503,7 @@ export class UI implements SessionUI {
       this.show(this.results, false);
       this.on.restart();
     };
-    const shop = h('button', 'btn ghost', 'Shop');
+    const shop = h('button', 'btn ghost shop-entry', 'Shop');
     shop.onclick = () => {
       this.on.click();
       this.show(this.results, false);

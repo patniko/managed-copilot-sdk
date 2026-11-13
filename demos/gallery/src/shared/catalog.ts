@@ -46,6 +46,15 @@ export interface Walkthrough {
 export const GATEWAY_APP = "copilot";
 export const GATEWAY_PORT = 7400;
 export const GALLERY_PORT = 7460;
+/** The app whose shop the Connected demos map can roll out and take down. */
+export const SHOP_APP_ID = "downhill";
+
+/** Whether Downhill's shop is open on a target: the gallery's `GET /api/downhill/shop?target=`, as Downhill says it. */
+export interface ShopAvailability {
+  readonly open: boolean;
+  readonly changedAt?: string;
+  readonly message?: string;
+}
 
 /** The operator console, served by the gateway at /console and opened with a one-time sign-in ticket. */
 export const CONSOLE: AppEntry = {

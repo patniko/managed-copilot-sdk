@@ -1,10 +1,12 @@
 // Downhill's shop on the server: the launch-day timeline, the sales ledger, the storefront versions checkout runs, and
 // the alert. The HTTP layer (http.ts) calls these operations.
-import type { SalesRow, StorefrontInfo } from "../shared/shop.js";
+import { join } from "node:path";
+import type { SalesRow, ShopAvailability, StorefrontInfo } from "../shared/shop.js";
 import { ALERTS_OFF, ShopAlerts, type AlertStatus } from "./alerts.js";
 import type { DownhillConfig } from "./config.js";
 import { parseDeploy, verifySignature } from "./deploys.js";
 import { DownhillError } from "./errors.js";
+import { readJsonFile, writeJsonFile } from "./files.js";
 import { parseGameEvents, shopRecord } from "./game-events.js";
 import { Ledger, toCsv, type LedgerEvent } from "./ledger.js";
 import { log } from "./log.js";
@@ -28,7 +30,10 @@ export interface ShopStatus {
   readonly storefront: StorefrontInfo;
   readonly timeline: { readonly startedAt: string; readonly launchAt: string; readonly bannerAt: string };
   readonly liveEvents: number;
+  readonly shop: ShopAvailability;
 }
+
+export const SHOP_CLOSED = "The Downhill Shop is closed: open it with PUT /api/shop (the demo gallery's Shop switch) to roll it out.";
 
 type ShopConfig = Pick<DownhillConfig, "dataDir" | "storefrontDir" | "version" | "incidentUrl" | "incidentAlertSecret" | "deploySecret">;
 
@@ -42,10 +47,14 @@ export class DownhillShop {
   readonly telemetry: Telemetry;
   readonly #config: ShopConfig;
   readonly #now: () => number;
+  /** Open as it shipped; a presenter closes it, then rolls it out live (shop.json in the data directory). */
+  #availability: { open: boolean; changedAt?: string };
 
   constructor(config: ShopConfig, options: { now?: () => number; fetcher?: typeof fetch; telemetry?: Telemetry } = {}) {
     this.#config = config;
     this.#now = options.now ?? Date.now;
+    const saved = readJsonFile<{ open?: unknown; changedAt?: unknown }>(join(config.dataDir, "shop.json"));
+    this.#availability = { open: saved?.open !== false, ...(typeof saved?.changedAt === "string" ? { changedAt: saved.changedAt } : {}) };
     this.telemetry = options.telemetry ?? NO_TELEMETRY;
     this.storefront = new Storefront(config.storefrontDir, config.dataDir);
     this.ledger = new Ledger(config.dataDir, loadTimeline(config.dataDir, this.#now()), () => this.storefront.fixedAt());
@@ -73,6 +82,7 @@ export class DownhillShop {
 
   /** Records a checkout outcome from a player's browser; a rejected code may fire the alert (in the background). */
   record(body: unknown): LedgerEvent {
+    if (!this.#availability.open) throw new DownhillError("shop_closed", SHOP_CLOSED, 409);
     const now = this.#now();
     this.#launchDay(now);
     const event = parseShopEvent(body, now);
@@ -89,7 +99,9 @@ export class DownhillShop {
     return records.length;
   }
 
+  /** No sales while the shop is closed: it hasn't launched yet. */
   sales(): SalesRow[] {
+    if (!this.#availability.open) return [];
     const now = this.#now();
     this.#launchDay(now);
     return this.ledger.rows(now);
@@ -99,10 +111,36 @@ export class DownhillShop {
     return toCsv(this.sales());
   }
 
+  /** While the shop is closed, Incident Commander sees its code and history but an empty log. */
   service(): IncidentService {
     const now = this.#now();
     this.#launchDay(now);
-    return incidentService(this.ledger, this.storefront, this.#config.version, now);
+    const service = incidentService(this.ledger, this.storefront, this.#config.version, now);
+    if (this.#availability.open) return service;
+    return { ...service, files: service.files.map((file) => (file.path === "logs/shop.log" ? { ...file, content: "" } : file)) };
+  }
+
+  availability(): ShopAvailability {
+    return { ...this.#availability };
+  }
+
+  /**
+   * Rolls the shop out or takes it down. Opening starts launch day over (launch three hours ago, with fresh sales, no
+   * deployed fixes, and no alert), so the story plays from the start; closing resolves a firing alert.
+   */
+  async setOpen(open: boolean): Promise<ShopAvailability> {
+    if (open === this.#availability.open) return { ...this.availability(), message: open ? "The Downhill Shop is already open." : "The Downhill Shop is already closed." };
+    const now = this.#now();
+    if (open) await this.reset({ restartTimeline: true });
+    else await this.alerts.resolve(now, "The Downhill Shop was taken down: no checkouts run until it opens again.");
+    this.#availability = { open, changedAt: new Date(now).toISOString() };
+    try {
+      writeJsonFile(join(this.#config.dataDir, "shop.json"), this.#availability);
+    } catch (error) {
+      log.warn(`Couldn't save whether the shop is open, so a restart may undo it: ${(error as Error).message}`);
+    }
+    log.info(open ? "Rolled out the Downhill Shop: launch day starts now" : "Took the Downhill Shop down", { event: open ? "shop.opened" : "shop.closed" });
+    return { ...this.availability(), message: open ? "The Downhill Shop is open: launch day starts over, with launch three hours ago." : "The Downhill Shop is closed: no sales, checkouts, or alerts until it opens." };
   }
 
   /** Incident Commander's approved deploy: signed, for downhill-shop, and new (a repeat gets the first answer). */
@@ -157,6 +195,7 @@ export class DownhillShop {
       storefront: this.storefront.info(),
       timeline: { startedAt: iso(startedAt), launchAt: iso(launchAt), bannerAt: iso(bannerAt) },
       liveEvents: this.ledger.liveCount,
+      shop: this.availability(),
     };
   }
 

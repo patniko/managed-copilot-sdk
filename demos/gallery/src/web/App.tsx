@@ -1,6 +1,7 @@
 import {
   AlertIcon,
   AppsIcon,
+  ArrowRightIcon,
   BookIcon,
   CloudIcon,
   ColumnsIcon,
@@ -25,6 +26,7 @@ import {
   HARNESS_STAGES,
   harnessStageUrl,
   PATTERNS,
+  SHOP_APP_ID,
   shotFile,
   WALKTHROUGHS,
   type AppEntry,
@@ -37,8 +39,10 @@ import {
   type TargetState,
   type Walkthrough,
 } from "../shared/catalog.js";
-import { appHref, appsOnTab, COMPARE_APP_ID, compareApp, patternsOf, tabForHash, walkthroughCommand, type Shell, type Tab } from "./model.js";
-import { PatternDiagram } from "./PatternDiagram.js";
+import { AGENT_SKETCHES, appHref, appsOnTab, COMPARE_APP_ID, compareApp, patternsOf, tabForHash, walkthroughCommand, type Shell, type Tab } from "./model.js";
+import { ConnectedMap, type NodeLayout, type Send } from "./ConnectedMap.js";
+import { AgentSketchView, PatternDiagram } from "./PatternDiagram.js";
+import { ShopSwitch } from "./ShopSwitch.js";
 import { CopyButton, cx, Spinner, Tooltip, useDismiss } from "./ui.js";
 
 const POLL_MS = 15_000;
@@ -404,13 +408,35 @@ function PatternMarkers({ app, patterns }: { readonly app: AppEntry; readonly pa
   );
 }
 
-function AppCard({ app, patterns, state }: { readonly app: AppEntry; readonly patterns: readonly Pattern[]; readonly state?: GalleryState }) {
+/** An app's Local and Azure buttons, with live status, and its README. */
+function AppActions({ app, state }: { readonly app: AppEntry; readonly state?: GalleryState }) {
   const hosted = state?.hosted === true;
   const local = state?.local?.links[app.id];
   const cloud = state?.cloud.links[app.id];
-  const best = [local, cloud].find((link) => link?.health === "online");
   // Without a deployment, the header's Azure control says why; the cards leave Azure out.
   const noCloud = app.localOnly === true || (state !== undefined && !state.cloud.searching && !state.cloud.gatewayUrl);
+  return (
+    <div className="flex items-center gap-2">
+      {hosted ? null : <OpenButton app={app} target="local" link={local} state={state?.local} hosted={hosted} />}
+      {hosted && app.id === CONSOLE.id ? (
+        // The console signs each operator in with their own GitHub account, from their terminal.
+        state?.cloud.gatewayUrl ? (
+          <CopyButton text={`npx managed-copilot console --url ${state.cloud.gatewayUrl}`} label="Copy the command that opens the console">
+            Copy command
+          </CopyButton>
+        ) : null
+      ) : noCloud ? null : (
+        <OpenButton app={app} target="cloud" link={cloud} state={state?.cloud} hosted={hosted} />
+      )}
+      <span className="ml-auto">
+        <ReadmeLink href={`${state?.repoUrl ?? ""}${app.readme}`} name={app.title} />
+      </span>
+    </div>
+  );
+}
+
+function AppCard({ app, patterns, state }: { readonly app: AppEntry; readonly patterns: readonly Pattern[]; readonly state?: GalleryState }) {
+  const best = [state?.local?.links[app.id], state?.cloud.links[app.id]].find((link) => link?.health === "online");
   return (
     <article className="app-card Box flex flex-col overflow-hidden">
       <Shot app={app} href={best?.url} />
@@ -428,24 +454,67 @@ function AppCard({ app, patterns, state }: { readonly app: AppEntry; readonly pa
           <span className="font-semibold text-fg">Try</span> {app.tryIt}
         </p>
       </div>
-      <div className="flex items-center gap-2 px-4 pb-4">
-        {hosted ? null : <OpenButton app={app} target="local" link={local} state={state?.local} hosted={hosted} />}
-        {hosted && app.id === CONSOLE.id ? (
-          // The console signs each operator in with their own GitHub account, from their terminal.
-          state?.cloud.gatewayUrl ? (
-            <CopyButton text={`npx managed-copilot console --url ${state.cloud.gatewayUrl}`} label="Copy the command that opens the console">
-              Copy command
-            </CopyButton>
-          ) : null
-        ) : noCloud ? null : (
-          <OpenButton app={app} target="cloud" link={cloud} state={state?.cloud} hosted={hosted} />
-        )}
-        <span className="ml-auto">
-          <ReadmeLink href={`${state?.repoUrl ?? ""}${app.readme}`} name={app.title} />
-        </span>
+      <div className="px-4 pb-4">
+        <AppActions app={app} state={state} />
       </div>
     </article>
   );
+}
+
+/**
+ * One app on the Connected demos map. `tall` (the storefront and the factory, which span the map's height) stacks its
+ * screenshot over its text; `wide` (the apps between them) puts its screenshot beside it. Downhill's has the shop switch.
+ */
+function FlowNode({ app, layout, sends, patterns, state }: { readonly app: AppEntry; readonly layout: NodeLayout; readonly sends: readonly Send[]; readonly patterns: readonly Pattern[]; readonly state?: GalleryState }) {
+  const best = [state?.local?.links[app.id], state?.cloud.links[app.id]].find((link) => link?.health === "online");
+  return (
+    <article className={cx("flow-node app-card Box", `flow-node-${layout}`)} aria-label={app.title}>
+      <Shot app={app} href={best?.url} />
+      <div className="flow-node-body">
+        <Tooltip block content={app.description}>
+          <h4 className="flex min-w-0 items-center gap-2 text-base font-semibold leading-snug">
+            <span className="truncate">{app.title}</span>
+            {app.public ? <span className="Label Label--success shrink-0">Public</span> : null}
+          </h4>
+          <p className={cx("text-sm text-fg-muted", layout === "wide" && "truncate")}>{app.tagline}</p>
+        </Tooltip>
+        <AgentSketchView sketch={AGENT_SKETCHES[app.id]} />
+        {/* The factory alone keeps its patterns and what to try: it shows several patterns, and the others say one in their sketch. */}
+        {layout === "tall" && AGENT_SKETCHES[app.id] ? (
+          <>
+            <PatternMarkers app={app} patterns={patterns} />
+            <p className="text-xs text-fg-muted">
+              <span className="font-semibold text-fg">Try</span> {app.tryIt}
+            </p>
+          </>
+        ) : null}
+        {sends.length ? (
+          <ul className="flow-sends" aria-label={`What ${app.title} sends`}>
+            {sends.map(({ flow, to }) => (
+              <li key={to.id}>
+                <ArrowRightIcon size={12} className="mt-1 shrink-0 text-fg-muted" />
+                <span>
+                  <span className="font-semibold">{to.title}</span>
+                  <span className="text-fg-muted">: {flow.detail}</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <div className="mt-auto flex flex-col gap-2 pt-1">
+          {app.id === SHOP_APP_ID ? <ShopSwitch {...shopTarget(app, state)} /> : null}
+          <AppActions app={app} state={state} />
+        </div>
+      </div>
+    </article>
+  );
+}
+
+/** Where the map's shop switch acts: the deployed Downhill on a hosted gallery, otherwise the first that answers (local first). */
+function shopTarget(app: AppEntry, state?: GalleryState): { readonly target?: Target; readonly targetName?: string } {
+  const targets: readonly Target[] = state?.hosted ? ["cloud"] : ["local", "cloud"];
+  const target = targets.find((entry) => (entry === "local" ? state?.local : state?.cloud)?.links[app.id]?.health === "online");
+  return target ? { target, targetName: TARGET_NAME[target] } : {};
 }
 
 // ------------------------------------------------------------------------------------------------ Walkthroughs
@@ -836,14 +905,19 @@ export function Gallery(props: GalleryProps) {
 
         {tab === "connected" ? (
           <div role="tabpanel" id="panel-connected" aria-labelledby="tab-connected">
-            <AppGrid
-              id="connected"
-              title="Connected demos"
-              intro="Contoso Outdoors' launch day, end to end. A Downhill player's launch code fails at checkout and Contact support opens a Help Desk ticket; Help Desk, Data Desk, and Incident Commander each send work to the Software Factory as a work order: a storefront bug its customers and players report, something you find in your data, or an incident's fix. The factory shows where each one came from."
-              apps={connected}
-              patterns={patterns}
-              state={state}
-            />
+            <section id="connected-apps" aria-labelledby="connected-heading">
+              <div className="Subhead">
+                <h2 id="connected-heading" className="Subhead-heading inline-flex items-center gap-2">
+                  Connected demos <span className="Counter">{connected.length}</span>
+                </h2>
+              </div>
+              <p className="mb-6 text-sm text-fg-muted">
+                Contoso Outdoors' launch day, end to end. A Downhill player's launch code fails at checkout: support opens a Help Desk ticket, Data Desk sees the sales drop, and
+                Incident Commander gets the alert. Each sends its work order to the Software Factory, and once you approve the fix, Incident Commander deploys it back to the shop.
+                Hover an app to follow its connections.
+              </p>
+              <ConnectedMap apps={connected} renderNode={(app, layout, sends) => <FlowNode app={app} layout={layout} sends={sends} patterns={patterns} state={state} />} />
+            </section>
           </div>
         ) : null}
 

@@ -68,6 +68,52 @@ export interface PatternShape {
   readonly handsCaption: string;
 }
 
+/** One connection on the Connected demos map: what one app sends another. */
+export interface Flow {
+  readonly from: string;
+  readonly to: string;
+  /** A few words, drawn on the connector. */
+  readonly label: string;
+  /** The same in a sentence, on hover and in the narrow list. */
+  readonly detail: string;
+  /** Runs right to left, back to the storefront, drawn dashed. */
+  readonly back?: true;
+}
+
+/** Contoso Outdoors' launch day, as connections between the connected apps; the tests check each against apphost.mts. */
+export const FLOWS: readonly Flow[] = [
+  { from: "downhill", to: "help-desk", label: "Support ticket", detail: "Contact support opens a live Help Desk chat with the checkout attached" },
+  { from: "downhill", to: "data-desk", label: "Shop sales", detail: "Data Desk reads the shop's live sales" },
+  { from: "downhill", to: "incident-commander", label: "Alert + logs", detail: "The rejected launch code alerts Incident Commander, and the game streams its logs there" },
+  { from: "incident-commander", to: "downhill", label: "Deploys the fix", detail: "Once you approve the fix, Incident Commander deploys it to the running shop", back: true },
+  { from: "help-desk", to: "software-factory", label: "Bug report", detail: "A storefront bug customers report becomes a work order" },
+  { from: "data-desk", to: "software-factory", label: "Finding", detail: "Something you find in your data becomes a work order" },
+  { from: "incident-commander", to: "software-factory", label: "Fix", detail: "The incident's fix becomes a work order with a Deploy gate" },
+];
+
+/** The map's three columns, left to right. A connected app the map doesn't place joins the middle one. */
+export const CONNECTED_COLUMNS = { storefront: ["downhill"], responders: ["help-desk", "data-desk", "incident-commander"], engineering: ["software-factory"] } as const;
+
+/** A connected app's agents, drawn small on its map node: where their brains run, and their hands. */
+export interface AgentSketch {
+  readonly brain: readonly Place[];
+  readonly hands: readonly Hand[];
+  readonly caption: string;
+  /** Many sessions side by side, such as one per customer. */
+  readonly count?: string;
+}
+
+export const AGENT_SKETCHES: Readonly<Record<string, AgentSketch>> = {
+  "help-desk": { brain: ["runtime"], hands: [{ place: "app" }], count: "×25", caption: "A private session per customer, all on one shared runtime" },
+  "data-desk": { brain: ["runtime", "sandbox"], hands: [{ place: "app" }, { place: "sandbox", later: true }], caption: "Starts shared, then moves into a Python sandbox to chart" },
+  "incident-commander": {
+    brain: ["runtime"],
+    hands: [{ place: "sandbox" }, { place: "worker" }, { place: "worker" }],
+    caption: "A coordinator triages in its sandbox; workers repro and fix",
+  },
+  "software-factory": { brain: ["runtime"], hands: [{ place: "worker" }, { place: "worker" }, { place: "worker" }], caption: "A coordinator plans; builders work in parallel sandboxes" },
+};
+
 /** Every pattern's diagram, keyed by pattern id. The catalog's `brain` and `hands` sentences say the same in words. */
 export const SHAPES: Readonly<Record<string, PatternShape>> = {
   isolated: { brain: ["sandbox"], hands: [{ place: "sandbox" }], together: true, brainCaption: "Its own sandbox", handsCaption: "The same sandbox" },

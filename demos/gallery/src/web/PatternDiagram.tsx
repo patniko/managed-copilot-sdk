@@ -1,7 +1,7 @@
 import { ContainerIcon, CopilotIcon, CpuIcon, PlugIcon, type Icon } from "@primer/octicons-react";
 import { Fragment } from "react";
 import type { Pattern } from "../shared/catalog.js";
-import { SHAPES, type Place } from "./model.js";
+import { SHAPES, type AgentSketch, type Place } from "./model.js";
 import { cx, Tooltip } from "./ui.js";
 
 const PLACE: Readonly<Record<Place, { readonly icon: Icon; readonly tone: string }>> = {
@@ -12,10 +12,10 @@ const PLACE: Readonly<Record<Place, { readonly icon: Icon; readonly tone: string
 };
 
 /** One place: an icon tile. `agent` marks where an agent's model loop runs (the brain, or a worker). */
-function Tile({ place, agent, later }: { readonly place: Place; readonly agent?: boolean; readonly later?: boolean }) {
+export function Tile({ place, agent, later, many }: { readonly place: Place; readonly agent?: boolean; readonly later?: boolean; readonly many?: boolean }) {
   const { icon: Glyph, tone } = PLACE[place];
   return (
-    <span className={cx("tile", tone, later && "tile-later")}>
+    <span className={cx("tile", tone, later && "tile-later", many && "tile-many")}>
       <Glyph size={16} />
       {agent ? (
         <span className="tile-agent">
@@ -23,6 +23,35 @@ function Tile({ place, agent, later }: { readonly place: Place; readonly agent?:
         </span>
       ) : null}
     </span>
+  );
+}
+
+/** A connected app's agents in one small row: brain tiles, an arrow, hand tiles. No sketch: an app with no agents. */
+export function AgentSketchView({ sketch }: { readonly sketch?: AgentSketch }) {
+  if (!sketch) {
+    return (
+      <div className="sketch">
+        <span className="sketch-caption">No agents: a stock web game that calls the other apps</span>
+      </div>
+    );
+  }
+  return (
+    <div className="sketch">
+      <span className="sketch-tiles" aria-hidden>
+        {sketch.brain.map((place, index) => (
+          <Fragment key={index}>
+            {index > 0 ? <span className="diagram-move" /> : null}
+            <Tile place={place} agent later={index > 0} many={index === 0 && sketch.count !== undefined} />
+          </Fragment>
+        ))}
+        {sketch.count ? <span className="sketch-count">{sketch.count}</span> : null}
+        <span className="sketch-link" />
+        {sketch.hands.map((hand, index) => (
+          <Tile key={index} place={hand.place} agent={hand.place === "worker"} later={hand.later} />
+        ))}
+      </span>
+      <span className="sketch-caption">{sketch.caption}</span>
+    </div>
   );
 }
 

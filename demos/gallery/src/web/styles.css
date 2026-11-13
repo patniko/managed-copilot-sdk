@@ -166,6 +166,337 @@
     border-radius: var(--borderRadius-full);
   }
 
+  /* ----------------------------------------------------------------------------------- Agent sketch */
+  .sketch {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.375rem 0.75rem;
+    padding: 0.375rem 0.625rem;
+    border-radius: var(--borderRadius-medium);
+    background-color: var(--bgColor-muted);
+  }
+  .sketch .tile {
+    width: 1.75rem;
+    height: 1.75rem;
+  }
+  .sketch-tiles {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 0.375rem;
+    /* Room for the agent badges. */
+    padding-top: 0.25rem;
+  }
+  .sketch-link {
+    position: relative;
+    width: 1rem;
+    height: 1px;
+    background-color: var(--borderColor-emphasis);
+  }
+  .sketch-link::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    right: 0;
+    width: 0.375rem;
+    height: 0.375rem;
+    border-top: 1px solid var(--borderColor-emphasis);
+    border-right: 1px solid var(--borderColor-emphasis);
+    transform: translateY(-50%) rotate(45deg);
+  }
+  .sketch-count {
+    margin-left: 0.25rem;
+    font-size: 0.6875rem;
+    font-weight: var(--base-text-weight-semibold);
+    color: var(--fgColor-success);
+  }
+  .sketch-caption {
+    flex: 1 1 10rem;
+    min-width: 0;
+    font-size: 0.75rem;
+    line-height: 1.3;
+  }
+  /* Many sessions: a stack of tiles. */
+  .tile-many {
+    box-shadow:
+      3px 3px 0 -1px var(--bgColor-default),
+      3px 3px 0 0 var(--borderColor-success-muted),
+      6px 6px 0 -1px var(--bgColor-default),
+      6px 6px 0 0 var(--borderColor-success-muted);
+  }
+
+  /* ----------------------------------------------------------------------------------- Shop switch */
+  .shop-switch {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--borderColor-default);
+    border-radius: var(--borderRadius-medium);
+    background-color: var(--bgColor-muted);
+  }
+
+  /* ------------------------------------------------------------------------------- Connected map */
+  /* Narrow: a list in story order. Wide (70rem, ConnectedMap's WIDE): zones, a grid, and connectors. */
+  .flow-map {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+  .flow-zone,
+  .flow-wires,
+  .flow-label-anchor {
+    display: none;
+  }
+  .flow-zone-title {
+    display: flex;
+    flex-direction: column;
+    gap: 0.125rem;
+    margin-top: 0.75rem;
+  }
+  .flow-zone-title:first-of-type {
+    margin-top: 0;
+  }
+  .flow-zone-name {
+    font-size: 0.6875rem;
+    font-weight: var(--base-text-weight-semibold);
+    line-height: 1.2;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--fgColor-muted);
+  }
+  .flow-cell {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    min-width: 0;
+    transition: opacity 150ms ease;
+  }
+  .flow-node {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+  }
+  .flow-node-body {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 0.5rem;
+    min-width: 0;
+    padding: 0.75rem 1rem;
+  }
+  .flow-sends {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.75rem;
+    line-height: 1.4;
+  }
+  .flow-sends li {
+    display: flex;
+    gap: 0.375rem;
+  }
+  .flow-platform {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    border: 1px dashed var(--borderColor-success-muted);
+    border-radius: var(--borderRadius-large);
+    background-color: color-mix(in srgb, var(--bgColor-success-muted) 35%, transparent);
+  }
+  .flow-platform .flow-zone-title {
+    margin-top: 0;
+  }
+  .flow-platform-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+    gap: 0.75rem;
+  }
+  .flow-platform-tile {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    padding-top: 0.25rem;
+  }
+  .flow-legend {
+    order: 1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem 1rem;
+    font-size: 0.75rem;
+    color: var(--fgColor-muted);
+  }
+  .flow-legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .flow-legend-line {
+    stroke: var(--borderColor-emphasis);
+    stroke-width: 1.5;
+  }
+  .flow-legend-back {
+    stroke-dasharray: 6 4;
+  }
+  .flow-legend-session {
+    stroke: var(--borderColor-success-emphasis);
+    stroke-dasharray: 2 4;
+  }
+
+  @media (min-width: 40rem) {
+    .flow-node {
+      flex-direction: row;
+    }
+    .flow-node > .shot {
+      flex: none;
+      width: 13rem;
+      aspect-ratio: auto;
+      min-height: 8rem;
+      border-right: 1px solid var(--borderColor-default);
+      border-bottom: 0;
+    }
+  }
+
+  @media (min-width: 70rem) {
+    .flow-map {
+      display: grid;
+      grid-template-columns: 15rem 8rem minmax(0, 1fr) 8rem 15rem;
+      grid-template-rows: auto repeat(var(--flow-rows), auto) 2.75rem auto;
+      row-gap: 1rem;
+      padding: 0.75rem 0.625rem 0;
+    }
+    .flow-zone {
+      display: block;
+      margin: -0.75rem -0.625rem;
+      border: 1px dashed var(--borderColor-default);
+      border-radius: var(--borderRadius-large);
+    }
+    .flow-zone-storefront {
+      border-color: var(--borderColor-attention-muted);
+      background-color: color-mix(in srgb, var(--bgColor-attention-muted) 25%, transparent);
+    }
+    .flow-zone-responders {
+      border-color: var(--borderColor-accent-muted);
+      background-color: color-mix(in srgb, var(--bgColor-accent-muted) 25%, transparent);
+    }
+    .flow-zone-engineering {
+      border-color: var(--borderColor-done-muted);
+      background-color: color-mix(in srgb, var(--bgColor-done-muted) 25%, transparent);
+    }
+    .flow-zone-title {
+      position: relative;
+      z-index: 1;
+      margin: 0;
+    }
+    .flow-wires {
+      position: absolute;
+      inset: 0;
+      display: block;
+      overflow: visible;
+      pointer-events: none;
+    }
+    .flow-label-anchor {
+      position: absolute;
+      z-index: 3;
+      display: block;
+      transform: translate(-50%, -50%);
+      transition: opacity 150ms ease;
+    }
+    .flow-cell-tall {
+      align-self: stretch;
+    }
+    .flow-node-tall {
+      flex-direction: column;
+    }
+    .flow-node-tall > .shot {
+      width: auto;
+      min-height: 0;
+      aspect-ratio: 16 / 10;
+      border-right: 0;
+      border-bottom: 1px solid var(--borderColor-default);
+    }
+    .flow-node-wide > .shot {
+      width: 8.5rem;
+    }
+    .flow-sends {
+      display: none;
+    }
+    .flow-legend {
+      order: 0;
+      flex-direction: column;
+      align-self: center;
+      grid-column: 1;
+    }
+    .flow-platform {
+      position: relative;
+      z-index: 1;
+      grid-column: 3 / 6;
+    }
+    .flow-platform-tiles {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+  }
+  .flow-wire {
+    fill: none;
+    stroke: var(--borderColor-emphasis);
+    stroke-width: 1.5;
+    transition:
+      stroke 150ms ease,
+      opacity 150ms ease;
+  }
+  .flow-wire-back {
+    stroke-dasharray: 6 4;
+  }
+  .flow-wire-session {
+    stroke: var(--borderColor-success-emphasis);
+    stroke-dasharray: 2 4;
+  }
+  .flow-wire-active {
+    stroke: var(--fgColor-accent);
+    stroke-width: 2;
+  }
+  .flow-arrowhead {
+    fill: var(--borderColor-emphasis);
+  }
+  .flow-arrowhead-active {
+    fill: var(--fgColor-accent);
+  }
+  .flow-arrowhead-session {
+    fill: var(--borderColor-success-emphasis);
+  }
+  .flow-dim {
+    opacity: 0.35;
+  }
+  .flow-label {
+    display: inline-block;
+    padding: 0.125rem 0.5rem;
+    font: var(--base-text-weight-medium) 0.6875rem / 1.4 var(--fontStack-monospace);
+    color: var(--fgColor-muted);
+    white-space: nowrap;
+    background-color: var(--bgColor-default);
+    border: 1px solid var(--borderColor-default);
+    border-radius: var(--borderRadius-medium);
+    transition:
+      color 150ms ease,
+      border-color 150ms ease;
+  }
+  .flow-label-session {
+    position: absolute;
+    z-index: 3;
+    color: var(--fgColor-success);
+    border-color: var(--borderColor-success-muted);
+    transform: translate(-50%, -50%);
+  }
+  .flow-label-active {
+    color: var(--fgColor-accent);
+    border-color: var(--borderColor-accent-emphasis);
+  }
+
   /* ----------------------------------------------------------------------------------------- Cards */
   .pattern-card,
   .app-card {

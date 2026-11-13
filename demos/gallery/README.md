@@ -33,15 +33,24 @@ Below the header and a one-line hero, five tabs split the page. Each tab has its
 
   When the catalog lists Pattern Race (`pattern-race`), which runs one job through all six side by side, the section
   links it as **Compare all six**, and its app card says **All six patterns**; no pattern card lists it.
-- **Connected demos** tab: Contoso Outdoors' launch day in story order. Downhill, whose shop sends players' support
-  tickets to Help Desk (the tests check this against the apps the root AppHost gives `HELP_DESK_URL`), then the Software
-  Factory and the apps that send it work orders: Help Desk, Data Desk, and Incident Commander (checked against the apps
-  the root AppHost gives `SOFTWARE_FACTORY_URL`).
+- **Connected demos** tab: Contoso Outdoors' launch day as a map. Three zones run left to right: the storefront
+  (Downhill), support and operations (Help Desk, Data Desk, and Incident Commander), and engineering (the Software
+  Factory), above the Managed Copilot platform their agents run on. Each app is a node with its screenshot, its
+  Local/Azure buttons, and a small sketch of its agents (where their brains and hands run, in the pattern diagrams'
+  tiles). Labeled connectors say what each app sends: Downhill's support tickets, sales, and alert; the work orders the
+  three send the factory; and the fix Incident Commander deploys back (dashed). Hovering an app highlights its
+  connections. Below 70rem the map becomes a list in story order, each node saying what it sends where. The
+  connections are `FLOWS` in `src/web/model.ts`, and the tests check them against the URLs the root AppHost gives each
+  app (`HELP_DESK_URL`, `SOFTWARE_FACTORY_URL`, `INCIDENT_URL`, `DOWNHILL_URL`, `INCIDENT_DEPLOY_URL`).
+  - **The Downhill Shop** switch, under Downhill, rolls the shop out or takes it down for a talk
+    ([rolling out the shop](../downhill/README.md#rolling-out-the-shop)). It acts on the Downhill that answers, local
+    first (a deployed gallery: Azure's), through the gallery server (`GET` and same-site `PUT /api/downhill/shop?target=`),
+    and checks it every 5 seconds.
 - **Staff assistant** tab: Hack the Harness's six stages (shared, isolated, promotable, direct, workers, and mixed),
   one row each with **Open**, which opens the local app at that stage (`?stage=<id>`). Every stage runs at once, so
   you can flip between them during a talk. Local only, so a deployed gallery leaves the tab out.
 - **More demos** tab: every other demo app, and the operator console.
-- **App cards**, on the demo tabs: a card per app, with its screenshot (or its initials until one is captured),
+- **App cards**, on the More demos tab: a card per app, with its screenshot (or its initials until one is captured),
   tagline (hover for more), the patterns it shows, what to try first, a **Local** and an **Azure** button with a live
   status dot, and its README.
   - Green: it answered. Amber: **IP-restricted**: the deployed app refused this network, because its ingress allows

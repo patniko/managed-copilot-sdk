@@ -1,6 +1,7 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
+import type { ShopAvailability } from "../shared/shop.js";
 import type { ApiErrorBody, SupportStatus, SupportTicketResponse } from "../shared/support.js";
 import type { DownhillConfig } from "./config.js";
 import { MAX_DEPLOY_BYTES, SIGNATURE_HEADER } from "./deploys.js";
@@ -137,6 +138,15 @@ function buildRoutes(ctx: ApiContext): Record<string, Partial<Record<string, Han
     "/api/status": { GET: (_req, res) => sendJson(res, 200, { support: { connected: support.connected }, ...shop.status() }) },
     // The storefront code checkout runs now, and where the browser imports it from.
     "/api/storefront": { GET: (_req, res) => sendJson(res, 200, shop.storefront.info()) },
+    // Whether the shop is open; a presenter rolls it out (or takes it down) with PUT { open }.
+    "/api/shop": {
+      GET: (_req, res) => sendJson(res, 200, shop.availability() satisfies ShopAvailability),
+      PUT: async (req, res) => {
+        const body = (await readJson(req, 1024)) as { open?: unknown } | null;
+        if (typeof body?.open !== "boolean") throw new DownhillError("invalid_request", 'Send { "open": true } to open the shop, or { "open": false } to close it.');
+        sendJson(res, 200, (await shop.setOpen(body.open)) satisfies ShopAvailability);
+      },
+    },
     // Checkout outcomes, from the shop in players' browsers.
     "/api/shop/events": {
       POST: async (req, res) => {
