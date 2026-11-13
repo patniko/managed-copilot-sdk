@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { APPS, BUILDING_BLOCKS, CONSOLE, HARNESS_APP_ID, HARNESS_STAGES, harnessStageUrl, PATTERNS, WALKTHROUGHS, type BuildingBlock, type GalleryState } from "../src/shared/catalog.js";
 import { createGallery, type CloudLookup, type GalleryOptions } from "../src/server/gallery.js";
 import { capture, checkTarget, cloudUrls, isLocalUrl, localUrls, normalizeGatewayUrl, probe } from "../src/server/targets.js";
-import { appHref, appsOnTab, COMPARE_APP_ID, compareApp, patternsOf, SHAPES, TABS, tabForHash, walkthroughCommand } from "../src/web/model.js";
+import { AGENT_SKETCHES, appHref, appsOnTab, COMPARE_APP_ID, compareApp, CONNECTED_COLUMNS, FLOWS, patternsOf, SHAPES, TABS, tabForHash, walkthroughCommand } from "../src/web/model.js";
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -150,6 +150,31 @@ describe("tabs", () => {
     expect(routedBy("HELP_DESK_URL")).toEqual(["downhill"]);
     expect(APPS.filter((app) => app.group === "connected").map((app) => app.id).sort()).toEqual(["software-factory", ...routed].sort());
     expect(APPS.filter((app) => app.group === "staff").map((app) => app.id)).toEqual([HARNESS_APP_ID]);
+  });
+
+  it("draws exactly the connections the root AppHost wires between connected apps, each app placed and sketched", () => {
+    // Each variable names the app it points at; the demo it's set on is the nearest addDemo Dockerfile above it.
+    const targets: Record<string, string> = {
+      SOFTWARE_FACTORY_URL: "software-factory",
+      HELP_DESK_URL: "help-desk",
+      INCIDENT_URL: "incident-commander",
+      DOWNHILL_URL: "downhill",
+      INCIDENT_DEPLOY_URL: "downhill",
+    };
+    const pair = (a: string, b: string) => [a, b].sort().join(" ↔ ");
+    const wired = new Set(
+      Object.entries(targets).flatMap(([variable, target]) =>
+        [...apphost.matchAll(new RegExp(`\\.withEnvironment\\("${variable}"`, "g"))].map((match) => {
+          const owner = [...apphost.slice(0, match.index).matchAll(/dockerfile: "demos\/([\w-]+)\/Dockerfile"/g)].at(-1)![1]!;
+          return pair(owner, target);
+        }),
+      ),
+    );
+    expect(new Set(FLOWS.map((flow) => pair(flow.from, flow.to)))).toEqual(wired);
+    const connected = APPS.filter((app) => app.group === "connected").map((app) => app.id);
+    expect(Object.values(CONNECTED_COLUMNS).flat().sort()).toEqual([...connected].sort());
+    // Downhill runs no agents; every other connected app has a sketch of its own.
+    expect(Object.keys(AGENT_SKETCHES).sort()).toEqual(connected.filter((id) => id !== "downhill").sort());
   });
 
   it("opens the tab holding the section a link names", () => {
