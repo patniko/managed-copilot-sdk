@@ -88,6 +88,7 @@ pnpm walkthrough 01                 # your first agent, in about a minute
 npx managed-copilot new chat        # a new session, opened in Copilot CLI
 npx managed-copilot console         # the operator console
 pnpm gallery                        # every demo and walkthrough on one page
+pnpm reset                          # stop aspire run and delete local state: sessions, sandboxes, demo data
 ```
 
 <details>
