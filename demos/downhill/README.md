@@ -4,18 +4,19 @@ Launch day for Contoso Outdoors' new game: a painterly 3D mountain-biking game f
 courses, and a few upgrades in the **Downhill Shop**. Ride a run, then pause and open the shop to buy a new look for
 Mona, Copilot, or the painting's Rider, or a paint job for the bike. The shop's launch-week banner offers 15% off with
 code `trail15`, and checkout rejects it. That one failure shows up everywhere:
-- The shop's alert opens an incident in [Incident Commander](../incident-commander/README.md).
 - The player tells the game's **Support** agent, Contoso Outdoors' AI agent in [Help Desk](../help-desk/README.md). The
   ticket appears live on Help Desk's wall.
 - The failed sales reach [Data Desk](../data-desk/README.md), where a chart of promo sales shows the drop starting when
   the banner went live.
+- The shop's alert opens an incident in [Incident Commander](../incident-commander/README.md), whose Copilot triages it
+  and sends the fix to [Software Factory](../software-factory/README.md) on its own.
 
 Everything the player does streams into Incident Commander as it happens: the server's logs, every checkout, and each
 drop-in, trick, crash, and finish go out as OpenTelemetry logs, so the rejected code shows up in Incident Commander's
 **Live telemetry** moments before the incident it causes.
 
-When a person approves Incident Commander's fix, it deploys to Downhill, and the same code works in the shop without
-reloading the game. The game itself runs no agents: it's a stock Vite and Three.js app with a small Node server.
+When a person approves the fix on the work order's **Deploy** gate in Software Factory, Incident Commander deploys it to
+Downhill, and the same code works in the shop without reloading the game. The game itself runs no agents: it's a stock Vite and Three.js app with a small Node server.
 
 ![The Downhill Shop: Neon Mona on her bike in the live 3D preview, the launch-week banner offering code trail15, and checkout saying "Invalid code." with "Code not working? Contact support" under it](docs/screenshots/promo-error.png)
 
@@ -23,16 +24,16 @@ reloading the game. The game itself runs no agents: it's a stock Vite and Three.
 
 ## What it shows
 
-- **One bug, seen from every side.** The player sees "Invalid code." in the shop. Incident Commander gets an alert,
-  plus the shop's code, logs, and deploy history. Help Desk gets the player's complaint with the checkout attached.
-  Data Desk gets the sales. Each demo answers its own question about the same failure.
+- **One bug, seen from every side.** The player sees "Invalid code." in the shop. Help Desk gets the player's complaint
+  with the checkout attached. Data Desk gets the sales. Incident Commander gets an alert, plus the shop's code, logs,
+  and deploy history. Each demo answers its own question about the same failure.
 - **The customer's side of support.** You're the player: a game you just bought into lets you down at checkout, and
   help is one click away inside the game. The agent greets you and you say what's wrong in your own words; the ticket
   already carries what happened at checkout.
 - **A real bug in shipped code, fixed in production.** Checkout runs Contoso Outdoors' storefront code
   ([`demos/help-desk/storefront`](../help-desk/storefront/src/promotions.js)) as it shipped. It matches codes exactly,
-  so the banner's own lowercase `trail15` fails while `TRAIL15` works. A deploy approved in Incident Commander replaces
-  that code in the running game, and the shop's footer says which version checkout runs and where it came from.
+  so the banner's own lowercase `trail15` fails while `TRAIL15` works. A deploy approved in Software Factory and sent by
+  Incident Commander replaces that code in the running game, and the shop's footer says which version checkout runs and where it came from.
 - **A launch day with history.** The server simulates the hours since launch, so the alert, the logs, and the charts
   have a real shape before you click anything:
   - Before the banner, players type the newsletter's `TRAIL15` and get their discount.
@@ -73,7 +74,10 @@ Downhill opens at <http://localhost:7455>. To demo launch day:
    - The ticket appears on Help Desk's wall with the code, checkout's message, and the cart.
 6. **Chart it.** In Data Desk, chart promo sales from Downhill's sales: promo purchases collapse and rejections climb
    from the moment the banner went live.
-7. **Ship the fix.** In Incident Commander, approve the fix.
+7. **Check on call.** In Incident Commander, the alert's incident is already open: Copilot has triaged the shop, a
+   worker has written the repro, and the fix is a work order in Software Factory. Click **Open in Software Factory**.
+8. **Ship the fix.** In Software Factory, watch the work order build, then click **Deploy** on its gate. Incident
+   Commander sends the deploy.
    - With the shop still open, its footer changes to *Checkout: storefront v2.3.1 · deployed from INC-1004*.
    - **Apply code** now takes 15% off.
 

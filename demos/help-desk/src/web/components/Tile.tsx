@@ -1,7 +1,7 @@
-import { BugIcon, CopilotIcon, FlameIcon, LightBulbIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
-import { BUG_AREA_INFO, PRODUCT_NAME, type ApprovalRequest, type BugReport, type CustomerCard, type PlayerTicket, type Ticket, type ToolItem } from "../../shared/types.js";
+import { AlertIcon, BugIcon, CopilotIcon, FlameIcon, LightBulbIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
+import { BUG_AREA_INFO, PRODUCT_NAME, type ApprovalRequest, type BugReport, type CustomerCard, type PlayerTicket, type Ticket, type TicketKnownIssue, type ToolItem } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
-import { checkoutLine, latestMessage, money, openerText, plainText, playerLabel, WORK_ORDER_STATUS, workOrderLine } from "../lib/format.js";
+import { checkoutLine, KNOWN_ISSUE_STATE, latestMessage, money, openerText, plainText, playerLabel, WORK_ORDER_STATUS, workOrderLine } from "../lib/format.js";
 import { customerHref, playerHref } from "../lib/router.js";
 import { answer, answerPlayer, decide, useStore } from "../lib/store.js";
 import { CustomerAvatar, LiveBadge, ProductChip, StatusLabel, TONE_TEXT } from "./ui/Status.js";
@@ -19,6 +19,8 @@ export function Tile({ customer, ticket }: { readonly customer: CustomerCard; re
     <ApprovalBar approval={approval} onAnswer={(approve) => void answer(customer.id, approval.id, approve)} />
   ) : ticket.memory ? (
     <MemoryBar customerId={customer.id} ticket={ticket} />
+  ) : ticket.knownIssue ? (
+    <KnownIssueBar known={ticket.knownIssue} />
   ) : ticket.blocked > 0 ? (
     <Blocked ticket={ticket} />
   ) : bug ? (
@@ -44,7 +46,8 @@ export function Tile({ customer, ticket }: { readonly customer: CustomerCard; re
             <FlameIcon size={14} className="text-fg-severe" aria-label="Urgent" />
           </Tooltip>
         ) : null}
-        {bug && (approval || ticket.memory || ticket.blocked > 0) ? <BugMark bug={bug} /> : null}
+        {ticket.knownIssue && (approval || ticket.memory) ? <KnownIssueMark known={ticket.knownIssue} /> : null}
+        {bug && (approval || ticket.memory || ticket.knownIssue || ticket.blocked > 0) ? <BugMark bug={bug} /> : null}
         <StatusLabel status={ticket.status} />
       </div>
       <p className={cx("mt-2 text-sm", bar ? "line-clamp-1" : "line-clamp-2", latest?.from === "agent" ? "text-fg" : "text-fg-muted")} title={latest ? plainText(latest.text) : customer.opening}>
@@ -67,6 +70,8 @@ export function PlayerTile({ ticket }: { readonly ticket: PlayerTicket }) {
   const name = ticket.player.name;
   const bar = approval ? (
     <ApprovalBar approval={approval} to={name} onAnswer={(approve) => void answerPlayer(ticket.ticketId, approval.id, approve)} />
+  ) : ticket.knownIssue ? (
+    <KnownIssueBar known={ticket.knownIssue} />
   ) : bug ? (
     <IssueMarker bug={bug} />
   ) : (
@@ -92,6 +97,7 @@ export function PlayerTile({ ticket }: { readonly ticket: PlayerTicket }) {
           {name}
           <span className="text-xs font-normal text-fg-muted"> · {PRODUCT_NAME}</span>
         </a>
+        {ticket.knownIssue && approval ? <KnownIssueMark known={ticket.knownIssue} /> : null}
         <StatusLabel status={ticket.status} />
       </div>
       <p className={cx("mt-2 text-sm", bar ? "line-clamp-1" : "line-clamp-2", latest?.from === "agent" ? "text-fg" : "text-fg-muted")} title={latest ? plainText(latest.text) : preview}>
@@ -138,27 +144,62 @@ function ApprovalBar({ approval, to, onAnswer }: { readonly approval: ApprovalRe
   );
 }
 
-/** The agent proposed a fact for the team knowledge base: the operator adds it or not. */
+/** The agent proposed a fact for the team knowledge base, or a known issue: the operator adds (records) it or not. */
 function MemoryBar({ customerId, ticket }: { readonly customerId: string; readonly ticket: Ticket }) {
   const memory = ticket.memory!;
   const busy = useStore((state) => Boolean(state.answering[memory.id]));
+  const issue = memory.kind === "known-issue";
+  const Icon = issue ? AlertIcon : LightBulbIcon;
   return (
     <>
-      <LightBulbIcon size={14} className="shrink-0 text-fg-attention" />
-      <span className="min-w-0 truncate font-semibold" title={`Proposed for team knowledge: ${memory.subject}: ${memory.fact}`}>
+      <Icon size={14} className="shrink-0 text-fg-attention" />
+      <span className="min-w-0 truncate font-semibold" title={issue ? `Proposed known issue: ${memory.subject}. Customers are told: ${memory.fact}` : `Proposed for team knowledge: ${memory.subject}: ${memory.fact}`}>
         {memory.subject}
       </span>
       <span className="relative z-10 ml-auto flex shrink-0 items-center gap-1">
         <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void decide(memory.id, true)}>
-          Add
+          {issue ? "Record" : "Add"}
         </button>
-        <Tooltip content="Don't add">
-          <button type="button" className="btn btn-sm btn-icon" aria-label={`Don't add "${memory.subject}" to team knowledge`} disabled={busy} onClick={() => void decide(memory.id, false)}>
+        <Tooltip content={issue ? "Don't record" : "Don't add"}>
+          <button
+            type="button"
+            className="btn btn-sm btn-icon"
+            aria-label={issue ? `Don't record "${memory.subject}" as a known issue` : `Don't add "${memory.subject}" to team knowledge`}
+            disabled={busy}
+            onClick={() => void decide(memory.id, false)}
+          >
             <XIcon size={16} />
           </button>
         </Tooltip>
       </span>
     </>
+  );
+}
+
+/** A known issue's answer reached this ticket: whether its update was sent. */
+function KnownIssueBar({ known }: { readonly known: TicketKnownIssue }) {
+  const state = KNOWN_ISSUE_STATE[known.state];
+  return (
+    <>
+      <Tooltip content={`Known issue: ${known.title}`} className="relative z-10 min-w-0">
+        <span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-fg-attention">
+          <AlertIcon size={14} className="shrink-0" />
+          <span className="truncate">Known issue</span>
+        </span>
+      </Tooltip>
+      <span className={cx("ml-auto min-w-0 truncate", TONE_TEXT[state.tone])} title={known.message}>
+        {state.label}
+      </span>
+    </>
+  );
+}
+
+/** The bar below is taken: the known issue shows as an icon. */
+function KnownIssueMark({ known }: { readonly known: TicketKnownIssue }) {
+  return (
+    <Tooltip content={`Known issue: ${known.title} · ${KNOWN_ISSUE_STATE[known.state].label}`} className="relative z-10 shrink-0">
+      <AlertIcon size={14} className="text-fg-attention" aria-label="Known issue" />
+    </Tooltip>
   );
 }
 

@@ -1,7 +1,9 @@
 # AI software factory
 
 A work order goes in; a tested, reviewed, and documented release comes out. It runs down an assembly line: **Plan →
-Build → Review → Release**, and the product is the release. In **Agent-led** mode (the default), a coordinator agent
+Build → Review → Release**, and the product is the release. Work another app routes here can add a **Deploy** gate
+after Release, where a person approves the routing app's deploy (see [Deploy gates](#deploy-gates)). In **Agent-led**
+mode (the default), a coordinator agent
 decides when to create builder sandboxes, when to reuse them for fixes, and when to create the release sandbox. The
 floor shows those workers and the coordinator's decisions live. The factory still validates the plan, checks real test
 reports, reviews on a second model, and accepts the deliverable.
@@ -213,6 +215,32 @@ await fetch(`${process.env.SOFTWARE_FACTORY_URL}/api/work-orders`, {
 
 The root AppHost gives those apps `SOFTWARE_FACTORY_URL` (the API address their servers call; inside the Azure
 environment it is `http://software-factory`) and `SOFTWARE_FACTORY_PUBLIC_URL` (the address people open).
+
+### Deploy gates
+
+A routed work order can declare a **deploy gate** (`gates: [{ kind: "deploy", target: "downhill-shop" }]`): a
+**Deploy** stage after Release where a person here decides whether the routing app ships the release. The factory never
+deploys and never holds the routing app's deploy credentials: the routing app opens the gate with its request, polls the
+work order for the decision, does the deploy itself, and reports how it went. Incident Commander declares one for every
+fix it routes here, so its deploy approval happens on the work order.
+
+The floor shows the gate under Release from the start, in these states: **Waiting** for the routing app's request,
+**Needs you** with the request (what it changes, the target and version such as `downhill-shop v2.3.1`, its tests, and
+a link back) and **Deploy** and **Decline** buttons, **Deploying** once approved (with who approved it, as the
+factory's signed-in account), then **Deployed** or the failure the routing app reported; **Declined** with the reason,
+or **Answered elsewhere** when the routing app closed the request. An open gate also shows **Needs you** in the work
+order list and a pointer in the header. The work order's `status` stays `completed` throughout, so routing apps that
+follow `status` keep working; `gates` carries each gate's state, in `GET /api/work-orders/:id` and (summarized) in the
+list.
+
+| Call | Who | Body |
+| --- | --- | --- |
+| `POST /api/work-orders/:id/gates/deploy/request` | the routing app, after the release | `{ requestId, title, summary, target?, version?, previousVersion?, tests?, files?, url? }`. The same `requestId` again changes nothing; a new one replaces a request that was declined or closed. `409` until the work order is `completed`. |
+| `POST /api/work-orders/:id/gates/deploy/decision` | a person on the floor | `{ approve, reason?, requestId? }`. `409` unless the gate is open (or when `requestId` names an older request). |
+| `POST /api/work-orders/:id/gates/deploy/outcome` | the routing app | `{ requestId, outcome: "deployed" \| "failed" \| "closed", message?, version? }`. `deployed` and `failed` follow an approval; `closed` withdraws a request that was answered elsewhere or ended, even one a person decided here at the same moment (the routing app's word is final, so the gate never waits for a deploy that isn't coming). |
+
+These calls take the same access as `POST /api/work-orders`: the factory is a local server that only loopback (or
+`FACTORY_ALLOWED_HOSTS`) names can address, and it refuses cross-site browser requests.
 
 ## How it works
 

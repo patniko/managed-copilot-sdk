@@ -36,7 +36,9 @@ request now waits on the platform, and the app holds no connection to the sessio
   then sends the fix to [Software Factory](../software-factory/README.md) as a work order (the service's code as the
   project, the incident as its context) while a worker writes the repro. The factory plans, builds, reviews, and
   releases the fix; Incident Commander follows the work order and hands the release back to Copilot, which verifies it
-  and asks you to deploy. Software Factory shows where the work order came from, with a link back to the incident.
+  and asks to deploy. That deploy request is decided on the work order, in Software Factory: its **Deploy** gate shows
+  the request with **Deploy** and **Decline**, and Incident Commander still does the signed deploy. Software Factory
+  shows where the work order came from, with a link back to the incident.
 
 ## Try it
 
@@ -50,8 +52,9 @@ request now waits on the platform, and the app holds no connection to the sessio
    Software Factory, a **Software Factory** node takes the fix worker's place: `WO-0012`, its status, and **Open in
    Software Factory**.
 5. When **Deploy the fix to production?** appears, close the tab. Wait as long as you like (or restart the app with
-   `aspire resource incident-commander restart --apphost apphost.mts`). Reopen the incident and click **Deploy**. A fix
-   from the factory says so on the request: **Built by Software Factory · WO-0012**.
+   `aspire resource incident-commander restart --apphost apphost.mts`). Reopen the incident and click **Deploy**. With
+   Software Factory, the card says **Waiting for approval in Software Factory** instead, with a link to the work order:
+   click **Deploy** on its Deploy gate there, and the card shows who approved it, and where.
 6. Copilot deploys v1.4.3, the alert resolves, and the postmortem appears.
 
 With Copilot's workers, the whole run takes about two minutes plus however long you wait; through Software Factory it
@@ -64,8 +67,9 @@ pnpm --filter @managed-copilot/demo-incident-commander happy-path --factory   # 
 
 It simulates an incident, approves the parked deploy, waits for Resolved, prints a summary, and deletes the incident
 with its sandboxes. It asks for Copilot's workers whatever the app's setting; `--factory` routes the fix through
-Software Factory instead (it must be running), prints the work order's number and link, waits longer, and fails if the
-deploy request isn't the factory's fix.
+Software Factory instead (it must be running), prints the work order's number and link, approves the deploy on the
+work order's Deploy gate in Software Factory (`--factory-url`, by default the address the app links to), waits longer,
+and fails if the deploy request isn't the factory's fix.
 
 | Triage in its own sandbox | Repro and fix in workers |
 | --- | --- |
@@ -122,7 +126,15 @@ sequenceDiagram
   A->>C: re-attach, once: "Software Factory released the fix as WO-0012"
   C->>A: apply_factory_fix: the changed files, into its own sandbox
   Note over C: runs the whole suite (repro's test included)
-  C->>A: deploy_fix: "Built by Software Factory · WO-0012", and a person approves
+  C->>A: deploy_fix asks permission ("Built by Software Factory · WO-0012")
+  A->>F: POST /api/work-orders/:id/gates/deploy/request
+  Note over F: the Deploy gate: Needs you
+  loop about every 2 s while the gate is open
+    A->>F: GET /api/work-orders/:id
+  end
+  F-->>A: approved by @mona
+  A->>C: re-attach: the waiting request is approved, and deploy_fix runs (the signed deploy)
+  A->>F: POST /api/work-orders/:id/gates/deploy/outcome: deployed v1.4.3
 ```
 
 - **The work order.** Its title is `Fix <service>: <summary>`, in the factory's app-driven (`classic`) mode with two
@@ -139,6 +151,18 @@ sequenceDiagram
   message behind a running turn). A release that changes none of the service's code counts as a failure.
 - **When the factory can't.** If Software Factory refuses the work order, isn't reachable, or fails or cancels it,
   Copilot falls back to a `fix` worker, as in the standard runbook, and the timeline says so.
+- **The approval, in Software Factory.** Every work order declares a deploy gate for the service
+  (`gates: [{ kind: "deploy", target: "<service>" }]`). When Copilot asks to deploy the factory's fix, the request
+  still waits on the platform as always; Incident Commander also puts it on the gate (the summary, the service and its
+  next version, the tests, the files, a link back), keeps following the work order, and answers the waiting request with
+  the decision made there, recording who decided and where. Incident Commander then deploys exactly as it does for a
+  decision made here (the factory never gets the deploy secret), and reports the outcome to the gate. The approval card
+  says **Waiting for approval in Software Factory** with a link to the work order, and hides its own buttons. Everything
+  is in the app's records, so a restart keeps following the gate.
+- **When the gate can't take it.** If the fix isn't the one the work order released, Software Factory isn't connected,
+  the work order has no gate (an older factory), or the factory refuses the request, the card keeps **Deploy** and
+  **Decline** and says why. While the factory can't be reached, the card says so and shows them too; the app keeps
+  trying, and a decision made here closes the request on the gate.
 
 ## How it works
 
@@ -327,8 +351,9 @@ secret.
    the lookup. With **Software Factory**, the work order's project is the shop's code (without its log and deploy
    history), and `INCIDENT.md` carries the deploy history and the rejected requests from the log. Either way, Copilot
    runs the whole suite in its own sandbox, then asks to deploy.
-4. **The deploy.** The approval card says **Goes to your deploy pipeline as downhill-shop v2.3.1**. Approve it, and
-   Incident Commander posts the files the fix changed to Downhill's `/api/deploys`, signed. Downhill checks the
+4. **The deploy.** The approval card says **Goes to your deploy pipeline as downhill-shop v2.3.1**. Approve it (with
+   Software Factory, on the work order's Deploy gate there), and Incident Commander posts the files the fix changed to
+   Downhill's `/api/deploys`, signed. Downhill checks the
    signature, takes the fix, and answers with the version it runs now; the incident resolves, and `trail15` works in
    the game. Downhill then sends the alert again with `"status": "resolved"`, which marks the alert resolved on the
    same incident.

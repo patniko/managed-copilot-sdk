@@ -1,4 +1,4 @@
-import { CheckCircleFillIcon, FileDiffIcon, InfoIcon, RocketIcon, ServerIcon, ShieldIcon, WorkflowIcon, XCircleFillIcon } from "@primer/octicons-react";
+import { CheckCircleFillIcon, FileDiffIcon, InfoIcon, LinkExternalIcon, RocketIcon, ServerIcon, ShieldIcon, WorkflowIcon, XCircleFillIcon } from "@primer/octicons-react";
 import { useState } from "react";
 import type { ApprovalView, FileChange, IncidentView } from "../../shared/types.js";
 import { api, errorMessage } from "../lib/api.js";
@@ -67,6 +67,36 @@ function Destination({ incident }: { readonly incident: IncidentView }) {
   );
 }
 
+/** Where the request is decided when Software Factory built the fix: on its work order, or here and why. */
+function GateNote({ approval }: { readonly approval: ApprovalView }) {
+  const gate = approval.gate;
+  if (!gate) return null;
+  const label = gate.number !== undefined ? workOrderLabel(gate.number) : undefined;
+  const link =
+    gate.url && label ? (
+      <a href={gate.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-semibold">
+        Open {label} in Software Factory
+        <LinkExternalIcon size={12} />
+      </a>
+    ) : null;
+  if (gate.problem) return <div className="flash flash-warn flash-sm">{gate.problem}</div>;
+  if (gate.state === "unavailable") return gate.reason ? <div className="flash flash-warn flash-sm">{gate.reason}</div> : null;
+  if (gate.state !== "opening" && gate.state !== "open") return null;
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-line-attention-muted bg-attention-muted px-3 py-2 sm:flex-row sm:items-center">
+      <span className="inline-flex min-w-0 flex-1 items-center gap-2">
+        {gate.state === "opening" ? <Spinner size={16} className="shrink-0 text-fg-attention" /> : <WorkflowIcon size={16} className="shrink-0 text-display-indigo" />}
+        <span>
+          {gate.state === "opening"
+            ? `Putting the request on ${label ?? "the work order"} in Software Factory…`
+            : `Deploy or Decline on ${label ?? "the work order"}'s deploy gate. Incident Commander deploys as soon as it's approved there.`}
+        </span>
+      </span>
+      {link}
+    </div>
+  );
+}
+
 /** What waits for a person: deploy the verified fix, or decline it with a reason. */
 function Waiting({ incident, approval }: { readonly incident: IncidentView; readonly approval: ApprovalView }) {
   const now = useNow();
@@ -77,6 +107,8 @@ function Waiting({ incident, approval }: { readonly incident: IncidentView; read
   const [error, setError] = useState<string>();
   const added = approval.files.reduce((sum, file) => sum + file.added, 0);
   const removed = approval.files.reduce((sum, file) => sum + file.removed, 0);
+  // Decided on the work order's deploy gate, unless Software Factory can't take it (or can't be reached right now).
+  const inFactory = (approval.gate?.state === "opening" || approval.gate?.state === "open") && !approval.gate.problem;
   const decide = async (approve: boolean) => {
     setBusy(approve ? "approve" : "decline");
     setError(undefined);
@@ -91,7 +123,7 @@ function Waiting({ incident, approval }: { readonly incident: IncidentView; read
     <section id="approval" aria-label="Deploy approval" className="Box needs-you scroll-mt-4 overflow-hidden">
       <div className="flex items-center gap-3 border-b border-line-attention-muted bg-attention-muted px-4 py-3">
         <ShieldIcon size={20} className="shrink-0 text-fg-attention" />
-        <h2 className="min-w-0 flex-1 text-base font-semibold">Deploy the fix to production?</h2>
+        <h2 className="min-w-0 flex-1 text-base font-semibold">{inFactory ? "Waiting for approval in Software Factory" : "Deploy the fix to production?"}</h2>
         <span className="shrink-0 font-mono text-xs text-fg-muted tabular-nums">Waiting {duration(between(approval.requestedAt, now))}</span>
       </div>
       <div className="flex flex-col gap-3 p-4">
@@ -123,6 +155,7 @@ function Waiting({ incident, approval }: { readonly incident: IncidentView; read
           ) : null}
         </div>
         {approval.problem ? <div className="flash flash-warn flash-sm">{approval.problem}</div> : null}
+        <GateNote approval={approval} />
         {!incident.demo && pipeline === false ? (
           <div className="flash flash-warn flash-sm">No deploy pipeline is configured, so this deploy can't go out. Set INCIDENT_DEPLOY_URL to send approved fixes to yours.</div>
         ) : null}
@@ -137,7 +170,7 @@ function Waiting({ incident, approval }: { readonly incident: IncidentView; read
           </details>
         ) : null}
         {error ? <div className="flash flash-error flash-sm">{error}</div> : null}
-        {declining ? (
+        {inFactory ? null : declining ? (
           <form
             className="flex flex-col gap-2 sm:flex-row"
             onSubmit={(event) => {
@@ -176,7 +209,7 @@ function Waiting({ incident, approval }: { readonly incident: IncidentView; read
           </div>
         )}
         <Tooltip
-          content={`The app let go of Copilot's session. The platform holds this request for up to 24 hours${approval.announcedAt ? ` and told the app through its webhook at ${clock(approval.announcedAt)}` : ""}. Approving here delivers it.`}
+          content={`The app let go of Copilot's session. The platform holds this request for up to 24 hours${approval.announcedAt ? ` and told the app through its webhook at ${clock(approval.announcedAt)}` : ""}. ${inFactory ? "A decision in Software Factory delivers it: Incident Commander follows the work order and deploys." : "Approving here delivers it."}`}
         >
           <span className="inline-flex items-center gap-1.5 text-xs text-fg-muted">
             <InfoIcon size={12} />
@@ -188,28 +221,39 @@ function Waiting({ incident, approval }: { readonly incident: IncidentView; read
   );
 }
 
-/** The request after a decision: compact, one line. */
+/** The request after a decision: compact, one line, with where it was decided. */
 function Decided({ approval }: { readonly approval: ApprovalView }) {
   const who = approval.decidedBy ? `@${approval.decidedBy}` : "You";
   const waited = approval.decidedAt ? ` after ${duration(between(approval.requestedAt, approval.decidedAt))}` : "";
+  const inFactory = approval.decidedIn === "software-factory";
+  const where = inFactory ? " in Software Factory" : "";
   const line =
     approval.state === "approved"
-      ? { icon: <Spinner size={16} className="text-fg-accent" />, text: `${who} approved the deploy${waited}. Deploying…` }
-      : approval.state === "declined"
-        ? { icon: <XCircleFillIcon size={16} className="text-fg-danger" />, text: `${who} declined the deploy${waited}${approval.reason ? `: ${approval.reason}` : "."}` }
-        : approval.state === "failed"
-          ? { icon: <XCircleFillIcon size={16} className="text-fg-danger" />, text: "The deploy failed. The timeline has the details." }
-          : { icon: <InfoIcon size={16} className="text-fg-muted" />, text: "The deploy request ended before anyone answered it." };
+      ? { icon: <Spinner size={16} className="text-fg-accent" />, text: `${who} approved the deploy${where}${waited}. Deploying…` }
+      : approval.state === "deployed"
+        ? { icon: <CheckCircleFillIcon size={16} className="text-fg-success" />, text: `${who} approved the deploy${where}${waited}. Deployed.` }
+        : approval.state === "declined"
+          ? { icon: <XCircleFillIcon size={16} className="text-fg-danger" />, text: `${who} declined the deploy${where}${waited}${approval.reason ? `: ${approval.reason}` : "."}` }
+          : approval.state === "failed"
+            ? { icon: <XCircleFillIcon size={16} className="text-fg-danger" />, text: "The deploy failed. The timeline has the details." }
+            : { icon: <InfoIcon size={16} className="text-fg-muted" />, text: "The deploy request ended before anyone answered it." };
   return (
-    <div className="Box flex items-center gap-2 px-4 py-3 text-sm">
+    <div className="Box flex flex-wrap items-center gap-2 px-4 py-3 text-sm">
       {line.icon}
-      <span className="min-w-0">{line.text}</span>
+      <span className="min-w-0 flex-1">{line.text}</span>
+      {inFactory && approval.gate?.url && approval.gate.number !== undefined ? (
+        <a href={approval.gate.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-xs font-semibold">
+          {workOrderLabel(approval.gate.number)}
+          <LinkExternalIcon size={12} />
+        </a>
+      ) : null}
     </div>
   );
 }
 
 export function Approval({ incident }: { readonly incident: IncidentView }) {
   const approval = incident.approval;
-  if (!approval || approval.state === "deployed") return null;
+  // A deployed fix shows in the deploy card; one decided in Software Factory also says who approved it there.
+  if (!approval || (approval.state === "deployed" && approval.decidedIn !== "software-factory")) return null;
   return approval.state === "waiting" ? <Waiting incident={incident} approval={approval} /> : <Decided approval={approval} />;
 }

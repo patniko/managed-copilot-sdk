@@ -5,6 +5,8 @@ import {
   PRODUCT_NAME,
   type ApprovalRequest,
   type BugArea,
+  type KnownIssueAnswer,
+  type KnownIssueTicketState,
   type MessageItem,
   type Opener,
   type RoutedWorkOrder,
@@ -63,6 +65,11 @@ export function approvalTitle(approval: ApprovalRequest, to?: string): string {
   return to ? `${what} ${money(approval.amount)} of ${approval.orderId} to ${to}` : `${what} ${money(approval.amount)} · ${approval.orderId}`;
 }
 
+/** What the agent waits on, in a sentence: "refund", "cancellation". */
+export function approvalNoun(approval: ApprovalRequest): string {
+  return approval.action === "refund" ? "refund" : "cancellation";
+}
+
 /** A premium request count as the counters show it: whole numbers plainly, fractions with up to two decimals. */
 export function premium(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0$/, "");
@@ -109,12 +116,12 @@ export function areaLabel(area: unknown): string {
   return BUG_AREA_INFO[(BUG_AREAS as readonly unknown[]).includes(area) ? (area as BugArea) : "other"].label;
 }
 
-/** The latest message of a conversation, by either side. */
+/** The latest message of a conversation, by either side (the team's notes to the agent aren't part of it). */
 export function latestMessage(ticket: { readonly items: readonly TranscriptItem[] } | undefined): MessageItem | undefined {
   if (!ticket) return undefined;
   for (let index = ticket.items.length - 1; index >= 0; index--) {
     const item = ticket.items[index]!;
-    if (item.kind === "message" && item.text.trim()) return item;
+    if (item.kind === "message" && item.from !== "team" && item.text.trim()) return item;
   }
   return undefined;
 }
@@ -215,7 +222,8 @@ export function operatorOutcome(item: ToolItem): { readonly text: string; readon
     case "resolve_conversation":
       return { text: typeof item.args["summary"] === "string" ? item.args["summary"] : "Resolved", tone: "success" };
     case "store_memory":
-      // The call only proposes the fact: the operator adds it or not later, in the team knowledge base.
+    case "report_known_issue":
+      // The call only proposes the fact or known issue: the operator adds it or not later, in the team knowledge panel.
       return { text: "Proposed to the team", tone: "muted" };
     default:
       return { text: "Done", tone: "success" };
@@ -226,9 +234,49 @@ export function operatorOutcome(item: ToolItem): { readonly text: string; readon
 export function toolArgs(item: ToolItem): string {
   const parts: string[] = [];
   if (item.name === "store_memory" && typeof item.args["subject"] === "string") parts.push(item.args["subject"]);
+  if (item.name === "report_known_issue" && typeof item.args["title"] === "string") parts.push(item.args["title"]);
   if (typeof item.args["orderId"] === "string") parts.push(item.args["orderId"].toUpperCase());
   if (typeof item.args["amount"] === "number") parts.push(money(item.args["amount"]));
   return parts.join(" · ");
+}
+
+/** What a known issue's answer did with one ticket, for its tile and the known issues strip. */
+export const KNOWN_ISSUE_STATE: Readonly<Record<KnownIssueTicketState, { readonly label: string; readonly tone: Tone }>> = {
+  classifying: { label: "Checking", tone: "accent" },
+  "no-match": { label: "Not about it", tone: "muted" },
+  replying: { label: "Sending the update", tone: "accent" },
+  replied: { label: "Update sent", tone: "success" },
+  failed: { label: "Failed", tone: "danger" },
+};
+
+/** A known issue's answer in numbers: tickets checked, matched, sent the update, and failed. */
+export function answerProgress(answer: KnownIssueAnswer): {
+  readonly total: number;
+  readonly classified: number;
+  readonly matched: number;
+  readonly replied: number;
+  readonly failed: number;
+  readonly finished: boolean;
+} {
+  const count = (...states: KnownIssueTicketState[]) => answer.tickets.filter((ticket) => states.includes(ticket.state)).length;
+  const failed = count("failed");
+  return {
+    total: answer.tickets.length,
+    classified: answer.tickets.length - count("classifying"),
+    matched: answer.tickets.filter((ticket) => ticket.matched).length,
+    replied: count("replied"),
+    failed,
+    finished: answer.finishedAt !== undefined,
+  };
+}
+
+/** `Classifying 12 open tickets… 5 done`, then `12 tickets classified · 3 match · 3 updates sent`. */
+export function answerLine(answer: KnownIssueAnswer): string {
+  const progress = answerProgress(answer);
+  const failed = progress.failed > 0 ? ` · ${progress.failed} failed` : "";
+  if (progress.classified < progress.total) return `Classifying ${plural(progress.total, "open ticket")}… ${progress.classified} done`;
+  const replies = `${plural(progress.replied, "update")} sent`;
+  return `${plural(progress.total, "ticket")} classified · ${progress.matched} ${progress.matched === 1 ? "matches" : "match"} · ${progress.finished ? replies : `sending, ${replies}`}${failed}`;
 }
 
 export interface Span {

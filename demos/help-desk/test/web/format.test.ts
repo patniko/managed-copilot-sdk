@@ -1,10 +1,11 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { PlayerTicket, SoftwareIssue, Ticket, ToolItem } from "../../src/shared/types.js";
+import type { KnownIssueTicketState, PlayerTicket, SoftwareIssue, Ticket, ToolItem } from "../../src/shared/types.js";
 import { PlayerConversation } from "../../src/web/components/PlayerChat.js";
 import { reduceChat, type ChatState } from "../../src/web/lib/chat.js";
 import {
+  answerLine,
   approvalTitle,
   checkoutLine,
   customerLine,
@@ -48,6 +49,16 @@ describe("words on the wall", () => {
       tool({}),
     ];
     expect(latestMessage(ticket({ items }))?.text).toBe("Hello!");
+    // A team member's note to the agent isn't part of the conversation the tile previews.
+    expect(latestMessage(ticket({ items: [...items, { kind: "message", id: "n", from: "team", text: "Known issue: …", at: "", author: "octocat" }] }))?.text).toBe("Hello!");
+  });
+
+  it("counts a known issue's answer as it goes: classifying, then matched, updates sent, and failures", () => {
+    const entry = (name: string, state: KnownIssueTicketState, matched = false) => ({ sessionId: name, name, state, ...(matched ? { matched } : {}) });
+    const running = { startedAt: "", startedBy: "octocat", tickets: [entry("a", "classifying"), entry("b", "replying", true), entry("c", "no-match")] };
+    expect(answerLine(running)).toBe("Classifying 3 open tickets… 2 done");
+    const finished = { ...running, finishedAt: "now", tickets: [entry("a", "replied", true), entry("b", "replied", true), entry("c", "no-match"), entry("d", "failed", true)] };
+    expect(answerLine(finished)).toBe("4 tickets classified · 3 match · 2 updates sent · 1 failed");
   });
 
   it("tells the customer what the agent did, without the operator's details", () => {
@@ -138,6 +149,8 @@ describe("store", () => {
     knowledge: [],
     proposals: [],
     forgetting: {},
+    knownIssues: [],
+    issueWork: {},
     size: 25,
     answering: {},
     routing: {},
@@ -248,6 +261,9 @@ describe("a player's chat page", () => {
     expect(words.indexOf(PLAYER_GREETING)).toBeLessThan(words.indexOf(first.text));
     expect(starting).toContain('aria-label="Typing"');
     expect(box(starting)).toContain('placeholder="Write a message…"');
+    // The team's notes to the agent never show in the chat.
+    const note = { kind: "message" as const, id: "n1", from: "team" as const, text: "Known issue: tell her to type TRAIL15", author: "Help Desk", at: "" };
+    expect(textOf(page(player({ status: "answering", items: [first, note] })))).not.toContain(note.text);
 
     expect(box(page(player({ status: "opened" }), { ...online, platform: { state: "reconnecting" } }))).toContain("disabled");
   });

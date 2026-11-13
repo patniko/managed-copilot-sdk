@@ -1,10 +1,10 @@
-import { ArrowLeftIcon, BugIcon, CheckIcon, ContainerIcon, CpuIcon, LightBulbIcon, LockIcon, PlugIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
+import { AlertIcon, ArrowLeftIcon, BugIcon, CheckIcon, ClockIcon, CommentIcon, ContainerIcon, CpuIcon, LightBulbIcon, LockIcon, PlugIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
 import type { ReactNode } from "react";
-import { BUG_AREA_INFO, type ApprovalRequest, type BugReport, type CustomerCard, type Ticket, type ToolInfo, type ToolItem, type TranscriptItem } from "../../shared/types.js";
+import { BUG_AREA_INFO, type ApprovalRequest, type BugReport, type CustomerCard, type MessageItem, type Ticket, type TicketKnownIssue, type ToolInfo, type ToolItem, type TranscriptItem } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
-import { approvalTitle, operatorOutcome, playerLabel, plural, premium, toolArgs } from "../lib/format.js";
+import { approvalNoun, approvalTitle, KNOWN_ISSUE_STATE, operatorOutcome, playerLabel, plural, premium, toolArgs } from "../lib/format.js";
 import { wallHref } from "../lib/router.js";
-import { answer, decide, sendAsCustomer, useStore } from "../lib/store.js";
+import { answer, decide, sendAsCustomer, sendNote, useStore } from "../lib/store.js";
 import { ChatWidget, Composer } from "./Chat.js";
 import { IssueAction } from "./Issues.js";
 import { CustomerAvatar, StatusLabel, TONE_TEXT } from "./ui/Status.js";
@@ -105,6 +105,15 @@ function BehindTheScenes({ customer, ticket }: { readonly customer: CustomerCard
 
       {ticket.memory ? <MemoryProposalBox customerId={customer.id} ticket={ticket} /> : null}
 
+      <TeamNotes
+        items={ticket.items}
+        knownIssue={ticket.knownIssue}
+        disabled={ticket.sessionId === undefined || ticket.status === "failed"}
+        onSend={(text) => sendNote({ customerId: customer.id }, text)}
+        name={firstName(customer)}
+        waitingOn={ticket.approval ? approvalNoun(ticket.approval) : undefined}
+      />
+
       {ticket.bug ? <ReportedIssue bug={ticket.bug} /> : null}
 
       <SeesOnly>
@@ -182,6 +191,8 @@ export function ToolCalls({ items }: { readonly items: readonly TranscriptItem[]
                   <BugIcon size={16} className="shrink-0 text-fg-done" />
                 ) : item.name === "store_memory" ? (
                   <LightBulbIcon size={16} className="shrink-0 text-fg-attention" />
+                ) : item.name === "report_known_issue" ? (
+                  <AlertIcon size={16} className="shrink-0 text-fg-attention" />
                 ) : (
                   <PlugIcon size={16} className="shrink-0 text-fg-muted" />
                 )}
@@ -261,31 +272,116 @@ export function Approval({
   );
 }
 
-/** A fact the agent proposed for the team knowledge base: every later conversation is told it once it's added. */
+/**
+ * A fact the agent proposed for the team knowledge base, or a known issue: every later conversation is told it once
+ * it's added (recorded).
+ */
 function MemoryProposalBox({ customerId, ticket }: { readonly customerId: string; readonly ticket: Ticket }) {
   const memory = ticket.memory!;
   const busy = useStore((state) => Boolean(state.answering[memory.id]));
+  const issue = memory.kind === "known-issue";
+  const Icon = issue ? AlertIcon : LightBulbIcon;
   return (
-    <section aria-label="Proposed team knowledge" className="Box Box--attention animate-fade-in">
+    <section aria-label={issue ? "Proposed known issue" : "Proposed team knowledge"} className="Box Box--attention animate-fade-in">
       <div className="flex flex-wrap items-start gap-3 px-4 py-3">
-        <LightBulbIcon size={20} className="mt-0.5 shrink-0 text-fg-attention" />
+        <Icon size={20} className="mt-0.5 shrink-0 text-fg-attention" />
         <div className="min-w-0 flex-1 basis-60">
-          <div className="text-xs text-fg-muted">Proposed for the team knowledge base</div>
+          <div className="text-xs text-fg-muted">{issue ? "Proposed as a known issue for the whole desk" : "Proposed for the team knowledge base"}</div>
           <div className="font-semibold">{memory.subject}</div>
-          <p className="mt-1 text-sm">{memory.fact}</p>
+          {issue ? (
+            <dl className="mt-1 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
+              <dt className="text-fg-muted">Customers say</dt>
+              <dd>{memory.symptoms ?? memory.subject}</dd>
+              <dt className="text-fg-muted">They're told</dt>
+              <dd>{memory.fact}</dd>
+            </dl>
+          ) : (
+            <p className="mt-1 text-sm">{memory.fact}</p>
+          )}
           {memory.citations ? <p className="mt-1 text-xs text-fg-muted">Source: {memory.citations}</p> : null}
         </div>
         <div className="flex shrink-0 gap-2">
           <button type="button" className="btn" disabled={busy} onClick={() => void decide(memory.id, false)}>
             <XIcon size={16} />
-            Don't add
+            {issue ? "Don't record" : "Don't add"}
           </button>
           <button type="button" className="btn" disabled={busy} onClick={() => void decide(memory.id, true)}>
             <CheckIcon size={16} className="text-fg-success!" />
-            Add to knowledge
+            {issue ? "Record known issue" : "Add to knowledge"}
           </button>
         </div>
       </div>
+    </section>
+  );
+}
+
+const NOTE_TIME = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+
+/**
+ * The team's side of a conversation: notes team members wrote to the agent (the customer never sees them), the known
+ * issue updates Help Desk sent, and a box to write a note.
+ */
+export function TeamNotes({
+  items,
+  knownIssue,
+  disabled,
+  onSend,
+  name,
+  waitingOn,
+}: {
+  readonly items: readonly TranscriptItem[];
+  readonly knownIssue: TicketKnownIssue | undefined;
+  readonly disabled: boolean;
+  readonly onSend: (text: string) => Promise<boolean>;
+  /** Whose agent: "Maya", "Mona". */
+  readonly name: string;
+  /** What the agent waits on before it reads a note, such as the refund above: notes queue until it's answered. */
+  readonly waitingOn?: string | undefined;
+}) {
+  const notes = items.filter((item): item is MessageItem => item.kind === "message" && item.from === "team");
+  const connected = useStore((state) => state.platform?.state === "connected");
+  const state = knownIssue ? KNOWN_ISSUE_STATE[knownIssue.state] : undefined;
+  return (
+    <section aria-label="Team notes" className="Box">
+      <div className="Box-header py-2">
+        <CommentIcon size={16} className="shrink-0 text-fg-muted" />
+        <h2 className="Box-title">Team notes</h2>
+        <span className="Counter">{notes.length}</span>
+        {knownIssue && state ? (
+          <span className={cx("ml-auto inline-flex min-w-0 items-center gap-1 text-xs", TONE_TEXT[state.tone])} title={knownIssue.message ?? `Known issue: ${knownIssue.title}`}>
+            <AlertIcon size={12} className="shrink-0 text-fg-attention" />
+            <span className="truncate">Known issue · {state.label}</span>
+          </span>
+        ) : (
+          <span className="ml-auto min-w-0 truncate text-xs text-fg-muted">Only the agent sees these</span>
+        )}
+      </div>
+      {notes.length === 0 ? (
+        <p className="px-4 py-3 text-sm text-fg-muted">Write to {name}'s agent: tell it what the team knows, such as an ongoing problem. {name} won't see your note, only the agent's reply.</p>
+      ) : (
+        <ul>
+          {notes.map((note) => (
+            <li key={note.id} className="Box-row py-2 text-sm">
+              <div className="flex items-center gap-1.5 text-xs text-fg-muted">
+                {note.knownIssueId ? <AlertIcon size={12} className="shrink-0 text-fg-attention" /> : <CommentIcon size={12} className="shrink-0" />}
+                <span className="font-semibold text-fg">{note.knownIssueId ? "Known issue update" : note.author}</span>
+                {note.knownIssueId ? <span>sent by {note.author}</span> : null}
+                <span>· {NOTE_TIME.format(new Date(note.at))}</span>
+              </div>
+              <p className="mt-0.5 whitespace-pre-wrap">{note.text}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+      {waitingOn ? (
+        <p className="flex items-start gap-1.5 border-t border-line-muted px-4 py-2 text-xs text-fg-attention">
+          <ClockIcon size={12} className="mt-0.5 shrink-0" />
+          <span>
+            {name}'s agent is waiting on the {waitingOn} above. It reads your notes once you answer it.
+          </span>
+        </p>
+      ) : null}
+      <Composer placeholder={`Write to ${name}'s agent…`} label={`Note to ${name}'s agent`} disabled={disabled || !connected} onSend={onSend} />
     </section>
   );
 }

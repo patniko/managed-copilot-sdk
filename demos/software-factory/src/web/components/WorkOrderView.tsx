@@ -43,6 +43,7 @@ import { useNow } from "../lib/time.js";
 import { toast } from "../lib/toast.js";
 import { ArtifactsView } from "./ArtifactsView.js";
 import { DeliverableView } from "./Deliverable.js";
+import { GateLabel, OpenGateCallout } from "./DeployGate.js";
 import { Floor } from "./Floor.js";
 import { PlanView } from "./PlanView.js";
 import { PullRequestDeliverable } from "./PullRequestDeliverable.js";
@@ -239,6 +240,14 @@ function Header({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly ta
           </span>
           {workOrder.github ? <RepositoryLabel workOrder={workOrder} /> : <ModeLabel mode={workOrder.mode} />}
           {workOrder.origin ? <OriginLabel origin={workOrder.origin} /> : null}
+          {(workOrder.gates ?? [])
+            .filter((gate) => gate.state !== "pending")
+            .map((gate) => (
+              <span key={gate.id} className="inline-flex shrink-0 items-center gap-1 text-xs text-fg-muted">
+                {gate.label}
+                <GateLabel gate={gate} />
+              </span>
+            ))}
           {elapsed !== undefined ? (
             <Stat icon={ClockIcon} label={active ? "Elapsed" : "Took"} title={`${active ? "Elapsed" : `Took ${formatDuration(elapsed)}`} · ${startedText}`}>
               {active ? formatClock(elapsed) : formatDuration(elapsed)}
@@ -267,6 +276,7 @@ function Header({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly ta
             <span>{workOrder.error.message}</span> <code className="inline-code">{workOrder.error.code}</code>
           </Callout>
         ) : null}
+        <OpenGateCallout workOrder={workOrder} href={tab === "floor" ? undefined : workOrderHref(workOrder.id, "floor")} />
       </div>
 
       <nav aria-label="Work order sections" className="UnderlineNav mt-2 px-4 md:px-6">

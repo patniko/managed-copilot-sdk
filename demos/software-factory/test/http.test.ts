@@ -209,6 +209,77 @@ describe("factory HTTP API", () => {
     expect(unsafe.body).toEqual({ error: { code: "invalid_request", message: 'context[0].path "../../etc/passwd" isn\'t a safe relative path.' } });
   });
 
+  it("shows a routed work order's deploy gate: the routing app opens it, a person decides, the app reports the outcome", async () => {
+    const origin = { app: "incident-commander", name: "Incident Commander", label: "INC-1002 · tiny", key: "INC-1002" };
+    const brief = "The answer is off by one in production. Fix it in the attached project, with a regression test.";
+    const noOrigin = await post("/api/work-orders", { title: "Fix tiny", brief, mode: "classic", gates: [{ kind: "deploy", target: "tiny" }] });
+    expect(noOrigin.status).toBe(400);
+    expect(noOrigin.body).toEqual({ error: { code: "invalid_request", message: expect.stringContaining("Gates need an origin") } });
+    expect((await post("/api/work-orders", { title: "Fix tiny", brief, mode: "classic", origin, gates: [{ kind: "rollback", target: "tiny" }] })).status).toBe(400);
+
+    const created = await post("/api/work-orders", {
+      title: "Fix tiny: the wrong answer",
+      brief,
+      mode: "classic",
+      origin,
+      project: { name: "tiny", files: [{ path: "src/core.js", content: "export const answer = 41;\n" }] },
+      gates: [{ kind: "deploy", target: "tiny" }],
+    });
+    expect(created.status).toBe(201);
+    const id = (created.body as WorkOrder).id;
+    expect((created.body as WorkOrder).gates).toEqual([{ id: "deploy", kind: "deploy", target: "tiny", label: "Deploy tiny", state: "pending", updatedAt: expect.any(String) }]);
+    const wo = await waitFor(id);
+    // The release finished: the work order is completed, and its gate waits for the routing app's request.
+    expect(wo).toMatchObject({ status: "completed", gates: [{ state: "pending" }] });
+    expect((await post(`/api/work-orders/${id}/gates/deploy/decision`, { approve: true })).status).toBe(409);
+    expect((await post(`/api/work-orders/${id}/gates/rollback/request`, {})).status).toBe(404);
+
+    const request = { requestId: "deploy-call-1", title: "Deploy the fix for INC-1002", summary: "The answer is 42 again.", version: "1.0.1", previousVersion: "1.0.0", tests: "3 tests passed", files: ["src/core.js"], url: "http://localhost:7445/#/incidents/INC-1002" };
+    const opened = await post(`/api/work-orders/${id}/gates/deploy/request`, request);
+    expect(opened.status).toBe(200);
+    expect((opened.body as WorkOrder).gates?.[0]).toMatchObject({ state: "open", request: { ...request, target: "tiny", requestedAt: expect.any(String) } });
+    // The routing app retries after a restart: the same request changes nothing.
+    expect((await post(`/api/work-orders/${id}/gates/deploy/request`, request)).body).toEqual(opened.body);
+    const list = await json<{ id: string; gates?: unknown[] }[]>("/api/work-orders");
+    expect(list.body.find((summary) => summary.id === id)?.gates).toEqual([{ id: "deploy", kind: "deploy", target: "tiny", label: "Deploy tiny", state: "open" }]);
+    expect((await post(`/api/work-orders/${id}/gates/deploy/outcome`, { requestId: "deploy-call-1", outcome: "deployed" })).status).toBe(409);
+    expect((await post(`/api/work-orders/${id}/gates/deploy/decision`, { approve: true, requestId: "an-older-request" })).status).toBe(409);
+
+    const approved = await post(`/api/work-orders/${id}/gates/deploy/decision`, { approve: true, requestId: "deploy-call-1" });
+    expect(approved.status).toBe(200);
+    expect((await json<WorkOrder>(`/api/work-orders/${id}`)).body).toMatchObject({
+      status: "completed",
+      gates: [{ state: "approved", decision: { requestId: "deploy-call-1", approve: true, by: "octocat" } }],
+    });
+    expect((await post(`/api/work-orders/${id}/gates/deploy/decision`, { approve: false })).status).toBe(409);
+    const deployed = await post(`/api/work-orders/${id}/gates/deploy/outcome`, { requestId: "deploy-call-1", outcome: "deployed", version: "1.0.1", message: "Your deploy pipeline accepted tiny v1.0.1." });
+    expect((deployed.body as WorkOrder).gates?.[0]).toMatchObject({ state: "deployed", outcome: { outcome: "deployed", version: "1.0.1", message: "Your deploy pipeline accepted tiny v1.0.1." } });
+    const activity = await json<{ text?: string }[]>(`/api/work-orders/${id}/activity?stationId=release`);
+    expect(activity.body.map((item) => item.text)).toEqual(
+      expect.arrayContaining(["Incident Commander asks to deploy tiny v1.0.1: Deploy the fix for INC-1002", "@octocat approved deploying tiny v1.0.1; Incident Commander deploys it", "Incident Commander deployed tiny v1.0.1"]),
+    );
+
+    // A new request: declined here, with a reason; the routing app can't close what was already answered.
+    await post(`/api/work-orders/${id}/gates/deploy/request`, { ...request, requestId: "deploy-call-2" });
+    const declined = await post(`/api/work-orders/${id}/gates/deploy/decision`, { approve: false, reason: "Not during the launch.", requestId: "deploy-call-2" });
+    expect((declined.body as WorkOrder).gates?.[0]).toMatchObject({ state: "declined", decision: { approve: false, reason: "Not during the launch.", by: "octocat" } });
+    // Someone approved it in the routing app at the same moment: its word is final, and the gate says what happened.
+    const overruled = await post(`/api/work-orders/${id}/gates/deploy/outcome`, { requestId: "deploy-call-2", outcome: "closed", message: "Approved in Incident Commander by @hubot." });
+    expect((overruled.body as WorkOrder).gates?.[0]).toMatchObject({ state: "closed", outcome: { message: "Approved in Incident Commander by @hubot." } });
+    expect((await post(`/api/work-orders/${id}/gates/deploy/outcome`, { requestId: "deploy-call-2", outcome: "deployed" })).status).toBe(409);
+
+    // An approved gate the routing app answered differently is closed too, so a new request can open it again.
+    await post(`/api/work-orders/${id}/gates/deploy/request`, { ...request, requestId: "deploy-call-2b" });
+    await post(`/api/work-orders/${id}/gates/deploy/decision`, { approve: true, requestId: "deploy-call-2b" });
+    expect((await post(`/api/work-orders/${id}/gates/deploy/outcome`, { requestId: "deploy-call-2b", outcome: "closed", message: "Declined in Incident Commander by @hubot." })).status).toBe(200);
+
+    // A request answered in the routing app instead closes the gate.
+    await post(`/api/work-orders/${id}/gates/deploy/request`, { ...request, requestId: "deploy-call-3" });
+    const closed = await post(`/api/work-orders/${id}/gates/deploy/outcome`, { requestId: "deploy-call-3", outcome: "closed", message: "Approved in Incident Commander by @octocat." });
+    expect((closed.body as WorkOrder).gates?.[0]).toMatchObject({ state: "closed", outcome: { message: "Approved in Incident Commander by @octocat." } });
+    expect((await post(`/api/work-orders/${id}/gates/deploy/decision`, { approve: true })).status).toBe(409);
+  });
+
   it("guards against rebinding, cross-site requests, and bad input", async () => {
     // fetch() can't override Host, so these use node:http directly.
     const withHost = (host: string) =>

@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { PermissionRequestResult } from "@github/copilot-sdk";
 import type { AlertInfo, FixRoute } from "../src/shared/types.js";
 import { Commander } from "../src/server/commander.js";
 import { loadConfig } from "../src/server/config.js";
@@ -491,6 +492,159 @@ describe("apply_factory_fix", () => {
     await h.run.checkFactory();
     h.platform.workerList = [];
     expect(await h.call("apply_factory_fix", {})).toMatchObject({ resultType: "failure", textResultForLlm: expect.stringContaining("Your own sandbox isn't running") });
+  });
+});
+
+describe("the deploy gate in Software Factory", () => {
+  const DEPLOY = { summary: "Treat expired coupons as no discount", files: ["src/discounts.js", "test/discounts.test.js"], tests: "11 passed" };
+
+  /** The factory released the fix, Copilot applied it, and asked to deploy it. */
+  async function deployRequested(h: Harness): Promise<void> {
+    await h.call("route_fix_to_factory", ROUTE);
+    h.factory.releases.set("wo_12", release());
+    h.factory.set("wo_12", { status: "completed" });
+    await h.run.checkFactory();
+    await h.call("apply_factory_fix", {});
+    expect(await h.platform.session.permission(deployRequest(DEPLOY))).toEqual({ kind: "no-result" });
+    await h.run.checkFactory();
+  }
+
+  it("declares the gate, puts the deploy request on it, and answers the waiting request with the decision made there", async () => {
+    const h = await harness();
+    await deployRequested(h);
+    expect(h.factory.created[0]).toMatchObject({ gates: [{ kind: "deploy", target: "checkout" }] });
+    expect(h.incident().factory?.deployGate).toBe(true);
+    const id = h.incident().id;
+    expect(h.factory.gateRequests).toEqual([
+      {
+        requestId: "deploy-call",
+        title: `Deploy the fix for ${id}`,
+        summary: DEPLOY.summary,
+        target: "checkout",
+        version: "1.4.3",
+        previousVersion: "1.4.2",
+        tests: "11 passed",
+        files: ["src/discounts.js", "test/discounts.test.js"],
+        url: `http://localhost:7445/#/incidents/${id}`,
+      },
+    ]);
+    expect(h.run.view().approval).toMatchObject({ state: "waiting", gate: { state: "open", number: 12, url: "http://factory.test/#/wo/wo_12" } });
+    expect(texts(h.incident(), "approval")).toContain("The deploy request waits in Software Factory, on WO-0012");
+
+    // Nobody decided yet: Incident Commander keeps following, and doesn't ask twice.
+    await h.run.checkFactory();
+    expect(h.factory.gateRequests).toHaveLength(1);
+    expect(h.incident().approval?.state).toBe("waiting");
+
+    h.factory.decide("wo_12", true, "mona");
+    const answers: PermissionRequestResult[] = [];
+    h.platform.onResume = async (session) => void answers.push(await session.permission(deployRequest(DEPLOY)));
+    await h.run.checkFactory();
+    expect(answers).toEqual([{ kind: "approve-once", approvedInteractively: true }]);
+    expect(h.incident().approval).toMatchObject({ state: "approved", decidedBy: "mona", decidedIn: "software-factory", gate: { state: "answered" } });
+    expect(texts(h.incident(), "person")).toContain("@mona approved the deploy in Software Factory");
+
+    const result = await h.call("deploy_fix", DEPLOY, "deploy-call");
+    expect(result).toContain("v1.4.3");
+    await h.run.checkFactory();
+    expect(h.factory.gateReports).toEqual([{ requestId: "deploy-call", outcome: "deployed", message: expect.stringContaining("v1.4.3"), version: "1.4.3" }]);
+    expect(h.factory.orders.get("wo_12")?.gates?.[0]?.state).toBe("deployed");
+    expect(h.incident().approval?.gate?.reportedAt).toBeDefined();
+    await h.run.checkFactory();
+    expect(h.factory.gateReports).toHaveLength(1);
+  });
+
+  it("passes on a decline made there, with its reason", async () => {
+    const h = await harness();
+    await deployRequested(h);
+    h.factory.decide("wo_12", false, "mona", "Not during the launch");
+    const answers: PermissionRequestResult[] = [];
+    h.platform.onResume = async (session) => void answers.push(await session.permission(deployRequest(DEPLOY)));
+    await h.run.checkFactory();
+    expect(answers).toEqual([{ kind: "reject", feedback: expect.stringContaining("declined the deploy: Not during the launch") }]);
+    expect(h.incident().approval).toMatchObject({ state: "declined", decidedBy: "mona", decidedIn: "software-factory", reason: "Not during the launch" });
+    await h.run.checkFactory();
+    expect(h.factory.gateReports).toEqual([]);
+  });
+
+  it("closes the gate when the request is answered here instead", async () => {
+    const h = await harness();
+    await deployRequested(h);
+    await h.run.decide(true, undefined, "octocat");
+    await h.run.checkFactory();
+    expect(h.factory.gateReports).toEqual([{ requestId: "deploy-call", outcome: "closed", message: "Approved in Incident Commander by @octocat." }]);
+    expect(h.incident().approval).toMatchObject({ state: "approved", decidedIn: "incident-commander", gate: { state: "closed" } });
+  });
+
+  it("closes a gate approved there when it was declined here first, so the factory doesn't wait for a deploy", async () => {
+    const h = await harness();
+    await deployRequested(h);
+    h.factory.decide("wo_12", true, "mona");
+    await h.run.decide(false, "Not now", "octocat");
+    await h.run.checkFactory();
+    expect(h.factory.gateReports).toEqual([{ requestId: "deploy-call", outcome: "closed", message: "Declined in Incident Commander by @octocat." }]);
+    expect(h.factory.orders.get("wo_12")?.gates?.[0]).toMatchObject({ state: "closed", outcome: { message: "Declined in Incident Commander by @octocat." } });
+    expect(h.incident().approval).toMatchObject({ state: "declined", decidedBy: "octocat", decidedIn: "incident-commander", gate: { state: "closed" } });
+  });
+
+  it("keeps following the gate after a restart, and takes the decision made meanwhile", async () => {
+    const h = await harness();
+    await deployRequested(h);
+    const id = h.incident().id;
+    await h.run.close();
+    h.store.flush();
+    h.factory.decide("wo_12", true, "mona");
+
+    const platform = new FakePlatform();
+    const store = new Store(h.dataDir);
+    const hub = new EventHub();
+    const config = testConfig({ factory: h.factory.target, factoryPollMs: 20 });
+    const commander = new Commander(config, platform, store, new ServiceCatalog(config.demoServicesDir), hub);
+    closers.push(async () => {
+      await commander.close();
+      hub.close();
+    });
+    commander.start();
+    await vi.waitFor(() => expect(store.get(id)?.approval).toMatchObject({ state: "approved", decidedBy: "mona", decidedIn: "software-factory" }), { timeout: 5_000, interval: 20 });
+  });
+
+  it("is decided here, and says why, when the factory can't take the request", async () => {
+    // A factory from before gates: the work order has none.
+    const old = await harness();
+    old.factory.gatesSupported = false;
+    await deployRequested(old);
+    expect(old.factory.gateRequests).toEqual([]);
+    expect(old.run.view().approval?.gate).toMatchObject({ state: "unavailable", reason: "WO-0012 has no deploy gate in Software Factory (it doesn't take deploy requests), so approve or decline it here." });
+    expect(texts(old.incident(), "approval")).toContain("The deploy request is decided here, not in Software Factory");
+
+    // The factory refuses the request.
+    const refused = await harness();
+    refused.factory.refuseGates = { status: 409, code: "conflict", message: "WO-0012 hasn't released yet." };
+    await deployRequested(refused);
+    expect(refused.incident().approval?.gate).toMatchObject({ state: "unavailable", reason: "Software Factory couldn't take the deploy request on WO-0012: WO-0012 hasn't released yet. Approve or decline it here." });
+
+    // Unreachable for now: decided here meanwhile, and put on the gate once it answers.
+    const down = await harness();
+    down.factory.refuseGates = { status: 503, code: "unavailable", message: "Software Factory is restarting." };
+    await deployRequested(down);
+    expect(down.incident().approval?.gate).toMatchObject({ state: "opening", problem: expect.stringContaining("Can't reach Software Factory to put the deploy request on WO-0012") });
+    down.factory.refuseGates = undefined;
+    await down.run.checkFactory();
+    expect(down.incident().approval?.gate).toMatchObject({ state: "open" });
+    expect(down.incident().approval?.gate?.problem).toBeUndefined();
+
+    // Software Factory isn't configured anymore.
+    const gone = await harness();
+    await gone.call("route_fix_to_factory", ROUTE);
+    gone.factory.releases.set("wo_12", release());
+    gone.factory.set("wo_12", { status: "completed" });
+    await gone.run.checkFactory();
+    await gone.call("apply_factory_fix", {});
+    const unconfigured = new IncidentRun({ ...gone.host, factory: undefined }, gone.incident().id);
+    closers.push(() => unconfigured.close());
+    await unconfigured.attach();
+    await gone.platform.session.permission(deployRequest(DEPLOY));
+    expect(gone.incident().approval?.gate).toMatchObject({ state: "unavailable", reason: expect.stringContaining("SOFTWARE_FACTORY_URL isn't set") });
   });
 });
 

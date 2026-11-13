@@ -1,9 +1,10 @@
 // Contoso Outdoors, the demo store: 25 customers, their orders, and the first thing each one asks support. Dates are
 // days relative to the start of a simulation, so every run looks current. Scenarios are ordered so that the first 5
 // and the first 10 customers already include a refund, a cancellation, and an attempt to read someone else's order.
-// Five customers ran into bugs of the store's website, whose code is in this demo's `storefront` folder: a promotion
-// code pasted with a space or typed in lowercase is rejected (Aisha, Ben), changing a quantity in the cart adds to it
-// (Lucas), and My orders shows "Out for delivery" as Delivered (Hannah, Arjun). Their agents report them.
+// Six customers ran into bugs of the store's website, whose code is in this demo's `storefront` folder: a promotion
+// code pasted with a space or typed in lowercase is rejected (Aisha, Mateo, Ben: the small pocket of discount-code
+// complaints a known issue's answer matches), changing a quantity in the cart adds to it (Lucas), and My orders shows
+// "Out for delivery" as Delivered (Hannah, Arjun). Their agents report them.
 
 export interface OrderLine {
   readonly product: string;
@@ -94,7 +95,7 @@ export const CUSTOMERS: readonly CustomerSeed[] = [
   { id: "c09", name: "Emma Johansson", memberSince: 2024, opening: "Has my order shipped yet? And I want to order the Ridgeline Hiking Boots next. I'm usually a size 8: which size should I get?" },
   { id: "c10", name: "Omar Haddad", memberSince: 2019, opening: "Can you change the shipping address on my rain shell order to 12 Pine St?" },
   { id: "c11", name: "Chloe Dubois", memberSince: 2022, opening: "Please cancel order CO-48201, I don't need it anymore." },
-  { id: "c12", name: "Mateo Rossi", memberSince: 2023, opening: "Do I have any orders that haven't arrived yet?" },
+  { id: "c12", name: "Mateo Rossi", memberSince: 2023, opening: "Your homepage banner says to use trail15 for 15% off, but checkout keeps saying 'Invalid code.' I want to order a tent today. What am I doing wrong?" },
   { id: "c13", name: "Hannah Schmidt", memberSince: 2017, opening: "Your site says my trekking poles were delivered, but they aren't here." },
   { id: "c14", name: "Daniel Kim", memberSince: 2021, opening: "I'm Maya Chen's husband. Where's her tent? It's order CO-48213." },
   { id: "c15", name: "Grace Lee", memberSince: 2020, opening: "The down jacket is too small. Can I return it for a refund?" },

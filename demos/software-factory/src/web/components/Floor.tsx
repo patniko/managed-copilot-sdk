@@ -16,15 +16,16 @@ import {
   RepoIcon,
   XCircleFillIcon,
 } from "@primer/octicons-react";
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { FACTORY_ENVIRONMENTS, ROLE_AGENTS } from "../../shared/environments.js";
-import type { EnvironmentView, Station, StationKind, StationRole, WorkOrder } from "../../shared/types.js";
+import type { EnvironmentView, Station, StationKind, StationRole, WorkOrder, WorkOrderGate } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
 import { formatBytes, pluralize } from "../lib/format.js";
 import { originIcon, originText } from "../lib/origin.js";
 import { workOrderHref } from "../lib/router.js";
 import { edgeState, isStationActive, KIND_LABELS, taskRows, taskTitle, type EdgeState, type TaskRow } from "../lib/stations.js";
 import { useStore } from "../lib/store.js";
+import { GateNode } from "./DeployGate.js";
 import { StationCard, stationCardClass } from "./StationCard.js";
 
 const ROLES: Readonly<Record<StationKind, StationRole>> = {
@@ -65,7 +66,8 @@ export interface FloorProps {
 
 /**
  * The assembly line, top to bottom: Plan (and, agent-led, the coordinator), one lane per task (Build → Review), then
- * Release → the deliverable. Connectors show flow: dashed while idle, moving while the next station works.
+ * Release → the deliverable, and the gates a routed work order declared (Deploy). Connectors show flow: dashed while
+ * idle, moving while the next station works.
  */
 export function Floor({ workOrder, selectedId, onSelect }: FloorProps) {
   const environments = useStore((state) => state.platform?.environments);
@@ -178,9 +180,34 @@ export function Floor({ workOrder, selectedId, onSelect }: FloorProps) {
           )}
         </div>
         <Pair left={card(release, "release")} right={<DeliverableNode workOrder={workOrder} releaseStatus={releaseStatus} />} state={delivered} />
+        {(workOrder.gates ?? []).map((gate) => (
+          <Fragment key={gate.id}>
+            <div className="relative h-4" aria-hidden>
+              <span className={cx("pipe pipe-y absolute top-0 bottom-0 left-[19px]", `pipe-${gateEdge(gate.state, releaseStatus === "done")}`)} />
+            </div>
+            <GateNode workOrder={workOrder} gate={gate} />
+          </Fragment>
+        ))}
       </div>
     </section>
   );
+}
+
+/** The connector from the release into a gate. */
+function gateEdge(state: WorkOrderGate["state"], released: boolean): EdgeState {
+  switch (state) {
+    case "pending":
+      return released ? "ready" : "idle";
+    case "open":
+      return "warning";
+    case "approved":
+      return "active";
+    case "declined":
+    case "failed":
+      return "failed";
+    default:
+      return "done";
+  }
 }
 
 /** Two nodes joined by a connector: side by side when the floor is wide enough, stacked on phones. */

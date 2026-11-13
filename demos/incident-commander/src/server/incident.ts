@@ -4,16 +4,19 @@
 // and no app memory involved. A person's decision re-attaches; the platform delivers the request again, and the decision
 // answers it. Without the app attached, the platform's webhook keeps it informed and answers what needs no person.
 // An incident whose fix goes through Software Factory has a work order there: the app follows it (from the store, so
-// across restarts) and, once it ends, re-attaches to tell the agent, exactly once.
+// across restarts) and, once it ends, re-attaches to tell the agent, exactly once. When the factory built the fix and
+// its work order declared a deploy gate, the deploy request is decided there: the app puts the request on the gate,
+// follows the work order for the decision, answers the platform-held request with it, and reports how the deploy went.
 import type { PermissionRequest, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
 import type { VerifiedWebhookEvent } from "@managed-copilot/sdk";
-import type { CoordinatorState, FactoryWorkView, FileChange, FixRoute, IncidentSummary, IncidentView, SandboxView } from "../shared/types.js";
+import type { ApprovalGateView, CoordinatorState, FactoryWorkView, FileChange, FixRoute, IncidentSummary, IncidentView, SandboxView } from "../shared/types.js";
 import type { AppConfig } from "./config.js";
-import { deployDemo, deployWebhook, type DeployOutcome, type DeployRequest } from "./deploy.js";
+import { deployDemo, deployWebhook, nextVersion, type DeployOutcome, type DeployRequest } from "./deploy.js";
 import { diffFile } from "./diff.js";
 import { AppError, errorText, isMissingSession } from "./errors.js";
 import {
   ACTIVE_FACTORY_STATUSES,
+  DEPLOY_GATE,
   describeTests,
   FactoryError,
   fixWorkOrder,
@@ -23,6 +26,7 @@ import {
   workOrderLabel,
   type FactoryClient,
   type FixFile,
+  type GateRequest,
   type ReleaseFiles,
   type WorkOrderInfo,
 } from "./factory.js";
@@ -380,8 +384,11 @@ export class IncidentRun implements ToolHost {
 
   // ─── The person ────────────────────────────────────────────────────────────────────────────────────────────
 
-  /** Approves or declines the waiting deploy. The decision is recorded first, then delivered by re-attaching. */
-  async decide(approve: boolean, reason: string | undefined, login: string | undefined): Promise<void> {
+  /**
+   * Approves or declines the waiting deploy. The decision is recorded first, then delivered by re-attaching. `where`: the
+   * person decided here, or on the work order's deploy gate in Software Factory.
+   */
+  async decide(approve: boolean, reason: string | undefined, login: string | undefined, where: "incident-commander" | "software-factory" = "incident-commander"): Promise<void> {
     const approval = this.#incident.approval;
     if (!approval || approval.state !== "waiting") throw new AppError("not_actionable", "This deploy request was already answered.", 409);
     const now = new Date().toISOString();
@@ -389,12 +396,17 @@ export class IncidentRun implements ToolHost {
       const stored = incident.approval!;
       stored.state = approve ? "approved" : "declined";
       stored.decidedAt = now;
+      stored.decidedIn = where;
       if (login) stored.decidedBy = login;
       if (reason) stored.reason = reason;
+      if (where === "software-factory" && stored.gate) stored.gate = { ...stored.gate, state: "answered" };
     });
     const who = login ? `@${login}` : "You";
-    this.#note("person", approve ? `${who} approved the deploy` : `${who} declined the deploy${reason ? `: ${reason}` : ""}`);
-    log.info(approve ? "Deploy approved" : "Deploy declined", { incident: this.id, waitedSeconds: Math.round((Date.parse(now) - Date.parse(approval.requestedAt)) / 1000) });
+    const place = where === "software-factory" ? " in Software Factory" : "";
+    this.#note("person", approve ? `${who} approved the deploy${place}` : `${who} declined the deploy${place}${reason ? `: ${reason}` : ""}`);
+    log.info(approve ? "Deploy approved" : "Deploy declined", { incident: this.id, where, waitedSeconds: Math.round((Date.parse(now) - Date.parse(approval.requestedAt)) / 1000) });
+    // Answered here while it waited on the work order's gate too: close it there.
+    if (where === "incident-commander" && (approval.gate?.state === "opening" || approval.gate?.state === "open")) void this.checkFactory();
     // The request waits on the platform: attaching delivers it again, and the recorded decision answers it.
     if (this.#session) await this.detach();
     await this.attach();
@@ -496,6 +508,7 @@ export class IncidentRun implements ToolHost {
     // The fix Software Factory released, copied into Copilot's sandbox: the person sees where it came from.
     const work = incident.factory;
     const factory = work?.appliedAt && work.files?.length ? { number: work.number, url: work.url } : undefined;
+    const gate = this.#approvalGate(incident, factory !== undefined);
     const approval: StoredApproval = {
       id,
       state: "waiting",
@@ -505,6 +518,7 @@ export class IncidentRun implements ToolHost {
       snapshot,
       ...(problem ? { problem } : {}),
       ...(factory ? { factory } : {}),
+      ...(gate ? { gate } : {}),
       requestedAt: new Date().toISOString(),
     };
     this.#update((stored) => {
@@ -514,8 +528,30 @@ export class IncidentRun implements ToolHost {
     });
     const detail = [input.tests ? `Tests: ${input.tests}` : "", factory ? `Built by Software Factory as ${workOrderLabel(factory.number)}` : ""].filter(Boolean).join("\n");
     this.#note("approval", `Copilot asked to deploy: ${input.summary}`, detail || undefined);
-    log.info("Deploy requested; waiting for a person", { incident: this.id, files: snapshot.length });
+    log.info("Deploy requested; waiting for a person", { incident: this.id, files: snapshot.length, decidedIn: gate?.state === "opening" ? "software-factory" : "incident-commander" });
+    if (gate?.state === "unavailable" && gate.reason) this.#note("approval", "The deploy request is decided here, not in Software Factory", gate.reason);
+    // Decided on the work order's gate: put the request there now, and follow the work order for the decision.
+    if (gate?.state === "opening") {
+      void this.checkFactory();
+      this.followFactory();
+    }
     return undefined;
+  }
+
+  /** Where the deploy request is decided: on the work order's deploy gate in Software Factory, or here, and why. */
+  #approvalGate(incident: StoredIncident, builtByFactory: boolean): ApprovalGateView | undefined {
+    const work = incident.factory;
+    if (!work) {
+      return incident.fixRoute === "factory"
+        ? { state: "unavailable", reason: "The fix didn't go through Software Factory, so there's no work order to approve it on. Approve or decline it here." }
+        : undefined;
+    }
+    const label = workOrderLabel(work.number);
+    const where = { workOrderId: work.workOrderId, number: work.number, url: work.url };
+    if (!builtByFactory) return { state: "unavailable", ...where, reason: `The fix Copilot asks to deploy isn't the one ${label} released, so approve or decline it here.` };
+    if (!this.#host.factory) return { state: "unavailable", ...where, reason: "Software Factory isn't connected anymore (SOFTWARE_FACTORY_URL isn't set), so approve or decline it here." };
+    if (!work.deployGate) return { state: "unavailable", ...where, reason: `${label} has no deploy gate in Software Factory (it doesn't take deploy requests), so approve or decline it here.` };
+    return { state: "opening", ...where };
   }
 
   // ─── Session events ────────────────────────────────────────────────────────────────────────────────────────
@@ -835,6 +871,7 @@ export class IncidentRun implements ToolHost {
       status: created.status,
       routedAt: now,
       updatedAt: now,
+      ...(created.gates?.some((gate) => gate.id === DEPLOY_GATE) ? { deployGate: true } : {}),
     };
     this.#update((stored) => {
       stored.factory = work;
@@ -958,6 +995,8 @@ export class IncidentRun implements ToolHost {
     this.#note("deploy", outcome.ok ? `Deployed ${service}${outcome.version ? ` v${outcome.version}` : ""}` : "The deploy failed", outcome.message, now);
     if (outcome.ok && incident.demo) this.#note("resolved", `${incident.alert.name} resolved: the 5xx rate is back to 0%`);
     log.info(outcome.ok ? "Deployed a fix" : "A deploy failed", { incident: this.id, target: outcome.target, version: outcome.version });
+    // Decided on the work order's deploy gate: tell it how the deploy went.
+    if (this.#host.store.get(this.id)?.approval?.gate?.state === "answered") void this.checkFactory();
     return outcome.ok ? outcome.message : failure(outcome.message);
   }
 
@@ -972,19 +1011,32 @@ export class IncidentRun implements ToolHost {
 
   // ─── Software Factory ──────────────────────────────────────────────────────────────────────────────────────
 
-  /** The work order still needs following: the factory works on it, or Copilot hasn't heard how it ended. */
+  /** The work order still needs following: the factory works on it, Copilot hasn't heard how it ended, or its deploy gate has news. */
   #needsFollowing(incident: StoredIncident | undefined): boolean {
     const work = incident?.factory;
     if (!incident || !work) return false;
     if (ACTIVE_FACTORY_STATUSES.includes(work.status)) return true;
+    if (this.#gateNeedsFollowing(incident)) return true;
     // Nobody to tell: the incident was resolved some other way, or Copilot's session is gone.
     return !work.deliveredAt && incident.status !== "resolved" && incident.coordinator.state !== "failed";
   }
 
+  /** The deploy gate has something to do: the request goes on it, waits for a decision there, or the outcome is due. */
+  #gateNeedsFollowing(incident: StoredIncident): boolean {
+    const approval = incident.approval;
+    const gate = approval?.gate;
+    if (!approval || !gate) return false;
+    if (gate.state === "opening" || gate.state === "open") return true;
+    return gate.state === "answered" && (approval.state === "approved" || ((approval.state === "deployed" || approval.state === "failed") && !gate.reportedAt));
+  }
+
   /** Follows the work order until Copilot learned how it ended. Everything it needs is stored, so it resumes after a restart. */
   followFactory(): void {
-    if (this.#factoryTimer || this.#closed || !this.#host.factory || !this.#needsFollowing(this.#host.store.get(this.id))) return;
-    const every = this.#host.config.factoryPollMs;
+    const incident = this.#host.store.get(this.id);
+    if (this.#factoryTimer || this.#closed || !this.#host.factory || !this.#needsFollowing(incident)) return;
+    // A person may be deciding on the work order's gate right now: notice it sooner.
+    const gateOpen = incident?.approval?.gate?.state === "open";
+    const every = gateOpen ? Math.min(this.#host.config.factoryPollMs, 2_000) : this.#host.config.factoryPollMs;
     const delay = this.#factoryFailures ? Math.max(every, reconnectDelay(this.#factoryFailures)) : every;
     this.#factoryTimer = setTimeout(() => {
       this.#factoryTimer = undefined;
@@ -1042,6 +1094,150 @@ export class IncidentRun implements ToolHost {
     }
     const ended = Boolean(work.files?.length) || work.error !== undefined || work.status === "failed" || work.status === "cancelled";
     if (ended && !work.deliveredAt) await this.#deliverFactory();
+    await this.#followGate();
+  }
+
+  // ─── The deploy gate ───────────────────────────────────────────────────────────────────────────────────────
+
+  #setGate(change: Partial<ApprovalGateView>, remove: readonly (keyof ApprovalGateView)[] = []): void {
+    this.#update((stored) => {
+      const gate = stored.approval?.gate;
+      if (!stored.approval || !gate) return;
+      const next: Record<string, unknown> = { ...gate, ...change };
+      for (const key of remove) delete next[key];
+      stored.approval.gate = next as unknown as ApprovalGateView;
+    });
+  }
+
+  /** Software Factory can't be reached for the gate right now: say so on the approval (where its buttons come back). */
+  #gateTrouble(problem: string): void {
+    this.#factoryFailures++;
+    if (this.#host.store.get(this.id)?.approval?.gate?.problem === problem) return;
+    log.warn("Can't reach a work order's deploy gate", { incident: this.id, problem });
+    this.#setGate({ problem });
+  }
+
+  /** Software Factory can't take the request: it's decided here, and the approval says why. */
+  #gateUnavailable(reason: string): void {
+    this.#setGate({ state: "unavailable", reason }, ["problem"]);
+    this.#note("approval", "The deploy request is decided here, not in Software Factory", reason);
+    log.warn("A work order's deploy gate can't take the request", { incident: this.id, reason });
+  }
+
+  /** The deploy request on the work order's gate: put it there, read the decision, close it, or report how the deploy went. */
+  async #followGate(): Promise<void> {
+    const factory = this.#host.factory;
+    const incident = this.#host.store.get(this.id);
+    const approval = incident?.approval;
+    const gate = approval?.gate;
+    if (!factory || !incident || !approval || !gate?.workOrderId || this.#closed) return;
+    if (gate.state === "opening" || gate.state === "open") {
+      // Answered here, or the request ended: there's nothing left to decide there.
+      if (approval.state !== "waiting") return this.#closeGate(factory, gate.workOrderId);
+      if (gate.state === "opening") return this.#openGate(factory, gate.workOrderId);
+      return this.#readGate(factory, gate.workOrderId);
+    }
+    if (gate.state === "answered" && (approval.state === "deployed" || approval.state === "failed") && !gate.reportedAt) return this.#reportGate(factory, gate.workOrderId);
+  }
+
+  async #openGate(factory: FactoryClient, workOrderId: string): Promise<void> {
+    const incident = this.#incident;
+    const approval = incident.approval!;
+    const label = workOrderLabel(approval.gate?.number ?? incident.factory?.number ?? 0);
+    const service = incident.alert.service;
+    const version = nextVersion(incident.serviceVersion);
+    const request: GateRequest = {
+      requestId: approval.id,
+      title: `Deploy the fix for ${incident.id}`,
+      summary: approval.summary.slice(0, 2000),
+      target: service,
+      ...(version ? { version } : {}),
+      ...(incident.serviceVersion ? { previousVersion: incident.serviceVersion } : {}),
+      ...(approval.tests ? { tests: approval.tests.slice(0, 300) } : {}),
+      ...(approval.snapshot.length ? { files: approval.snapshot.slice(0, 100).map((file) => file.path) } : {}),
+      url: `${this.#host.config.publicUrl}/#/incidents/${encodeURIComponent(incident.id)}`,
+    };
+    try {
+      await factory.openGate(workOrderId, DEPLOY_GATE, request);
+    } catch (error) {
+      // A refusal won't change by asking again: it's decided here. Anything else may pass.
+      if (error instanceof FactoryError && error.status !== undefined && error.status < 500) {
+        return this.#gateUnavailable(`Software Factory couldn't take the deploy request on ${label}: ${sentence(errorText(error))} Approve or decline it here.`);
+      }
+      return this.#gateTrouble(`Can't reach Software Factory to put the deploy request on ${label}: ${sentence(errorText(error))} Approve or decline it here, or wait: Incident Commander keeps trying.`);
+    }
+    this.#factoryFailures = 0;
+    const now = new Date().toISOString();
+    this.#setGate({ state: "open", openedAt: now }, ["problem"]);
+    this.#note("approval", `The deploy request waits in Software Factory, on ${label}`, approval.gate?.url, now);
+    log.info("Put the deploy request on a work order's gate", { incident: this.id, workOrder: workOrderId });
+  }
+
+  async #readGate(factory: FactoryClient, workOrderId: string): Promise<void> {
+    const approval = this.#incident.approval!;
+    const label = workOrderLabel(approval.gate?.number ?? 0);
+    let order: WorkOrderInfo;
+    try {
+      order = await factory.get(workOrderId);
+    } catch (error) {
+      if (error instanceof FactoryError && error.status === 404) return this.#gateUnavailable(`${label} no longer exists in Software Factory, so approve or decline the deploy here.`);
+      return this.#gateTrouble(`Can't reach Software Factory to read the decision on ${label}: ${sentence(errorText(error))} Approve or decline it here, or wait: Incident Commander keeps trying.`);
+    }
+    this.#factoryFailures = 0;
+    if (approval.gate?.problem) this.#setGate({}, ["problem"]);
+    const gate = order.gates?.find((candidate) => candidate.id === DEPLOY_GATE);
+    // The gate shows another request, or none: put this one back.
+    if (!gate || gate.requestId !== approval.id) return this.#openGate(factory, workOrderId);
+    const decision = gate.decision;
+    if (decision?.requestId === approval.id && gate.state !== "open") {
+      if (this.#incident.approval?.state !== "waiting") return;
+      log.info("A person decided the deploy in Software Factory", { incident: this.id, workOrder: workOrderId, approve: decision.approve });
+      await this.decide(decision.approve, decision.reason, decision.by, "software-factory");
+      return;
+    }
+    if (gate.state === "closed") this.#gateUnavailable(`${label}'s deploy gate was closed in Software Factory without a decision, so approve or decline the deploy here.`);
+  }
+
+  /** The request was answered here, or ended, while it waited on the gate: close it there. */
+  async #closeGate(factory: FactoryClient, workOrderId: string): Promise<void> {
+    const approval = this.#incident.approval!;
+    const decided = approval.state !== "expired";
+    const who = approval.decidedBy ? ` by @${approval.decidedBy}` : "";
+    const message = decided ? `${approval.state === "declined" ? "Declined" : "Approved"} in Incident Commander${who}.` : "Copilot's deploy request ended before it was deployed.";
+    try {
+      await factory.reportGate(workOrderId, DEPLOY_GATE, { requestId: approval.id, outcome: "closed", message });
+    } catch (error) {
+      // 404 and 409: the gate never showed this request, or it already ran its course there. Nothing to close.
+      if (!(error instanceof FactoryError && error.status !== undefined && error.status < 500)) {
+        return this.#gateTrouble(`Can't reach Software Factory to close the deploy request on ${workOrderLabel(approval.gate?.number ?? 0)}: ${sentence(errorText(error))} Incident Commander keeps trying.`);
+      }
+      log.info("A work order's deploy gate had nothing to close", { incident: this.id, workOrder: workOrderId, error: errorText(error) });
+    }
+    this.#factoryFailures = 0;
+    this.#setGate({ state: "closed" }, ["problem"]);
+  }
+
+  /** The deploy ran: tell the gate how it went. */
+  async #reportGate(factory: FactoryClient, workOrderId: string): Promise<void> {
+    const incident = this.#incident;
+    const approval = incident.approval!;
+    const deploy = incident.deploy;
+    try {
+      await factory.reportGate(workOrderId, DEPLOY_GATE, {
+        requestId: approval.id,
+        outcome: approval.state === "deployed" ? "deployed" : "failed",
+        ...(deploy?.message ? { message: deploy.message.slice(0, 1000) } : {}),
+        ...(deploy?.ok && deploy.version ? { version: deploy.version } : {}),
+      });
+    } catch (error) {
+      if (!(error instanceof FactoryError && error.status !== undefined && error.status < 500)) {
+        return this.#gateTrouble(`Can't reach Software Factory to report the deploy on ${workOrderLabel(approval.gate?.number ?? 0)}: ${sentence(errorText(error))} Incident Commander keeps trying.`);
+      }
+      // A refusal won't change by sending it again.
+      log.warn("A work order's deploy gate refused the deploy's outcome", { incident: this.id, workOrder: workOrderId, error: errorText(error) });
+    }
+    this.#factoryFailures = 0;
+    this.#setGate({ reportedAt: new Date().toISOString() }, ["problem"]);
   }
 
   /** A status the factory reported; a timeline entry for each step it reaches. */

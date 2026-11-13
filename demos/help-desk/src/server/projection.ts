@@ -3,6 +3,7 @@
 // platform record). A problem with the store's website the agent reported is a completed `report_bug` call, so it comes
 // back after a restart like everything else. Pure: no I/O, so tests drive it with plain events.
 import { BUG_AREAS, type BugArea, type BugReport, type MessageItem, type ToolCallStatus, type ToolItem, type TranscriptItem } from "../shared/types.js";
+import { readTeamNote } from "./notes.js";
 
 /** The parts of a stock `SessionEvent` the projection reads. */
 export interface SessionEventLike {
@@ -26,6 +27,8 @@ const text = (value: unknown): string | undefined => (typeof value === "string" 
 /** Trimmed text of at most `max` characters, or nothing. */
 const clip = (value: unknown, max: number): string | undefined => text(value)?.trim().slice(0, max) || undefined;
 const AREAS: ReadonlySet<string> = new Set(BUG_AREAS);
+/** Tools whose calls are internal to the team: the customer never hears about them. */
+const INTERNAL_TOOLS: ReadonlySet<string> = new Set(["store_memory", "report_known_issue"]);
 
 /** The report a `report_bug` call made: what the agent wrote, and the order the tool checked was the customer's. */
 function bugReport(item: ToolItem): BugReport | undefined {
@@ -128,7 +131,12 @@ export class Transcript {
         this.#resolved = false;
         this.#problem = undefined;
         if (!content) return true;
-        this.#items.push({ kind: "message", id: `u:${eventId}`, from: "customer", text: content, at });
+        const note = readTeamNote(content);
+        this.#items.push(
+          note
+            ? { kind: "message", id: `u:${eventId}`, from: "team", text: note.text, at, author: note.author, ...(note.knownIssueId ? { knownIssueId: note.knownIssueId } : {}) }
+            : { kind: "message", id: `u:${eventId}`, from: "customer", text: content, at },
+        );
         return true;
       }
       case "assistant.turn_start":
@@ -149,9 +157,10 @@ export class Transcript {
         if (!id || data["parentToolCallId"]) return false;
         const content = text(data["content"])?.trim() ?? "";
         const existing = this.#messages.get(id);
-        // Proposing a fact is internal to the team, so the text the agent writes alongside a store_memory call ("…and
-        // I'll note that for the team") stays out of the customer's conversation; the agent replies after its tools.
-        const proposes = Array.isArray(data["toolRequests"]) && data["toolRequests"].some((request) => record(request)["name"] === "store_memory");
+        // Proposing a fact or a known issue is internal to the team, so the text the agent writes alongside a
+        // store_memory or report_known_issue call ("…and I'll note that for the team") stays out of the customer's
+        // conversation; the agent replies after its tools.
+        const proposes = Array.isArray(data["toolRequests"]) && data["toolRequests"].some((request) => INTERNAL_TOOLS.has(String(record(request)["name"])));
         if (!content || proposes) {
           // A message that only calls tools: drop the placeholder its deltas may have made.
           if (existing) this.#remove(existing);

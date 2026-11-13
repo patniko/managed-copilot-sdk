@@ -262,6 +262,16 @@ function buildRouter(ctx: ApiContext): Router {
   });
   router.add("POST", "/api/work-orders/:id/cancel", async (_req, res, params) => sendJson(res, 200, await factory.cancel(params.id!)));
   router.add("POST", "/api/work-orders/:id/retry", (_req, res, params) => sendJson(res, 200, factory.retry(params.id!)));
+  // Gates: the routing app opens one with its request and reports the outcome; a person on the floor decides.
+  router.add("POST", "/api/work-orders/:id/gates/:gateId/request", async (req, res, params) => {
+    sendJson(res, 200, factory.openGate(params.id!, params.gateId!, await readJson<unknown>(req)));
+  });
+  router.add("POST", "/api/work-orders/:id/gates/:gateId/decision", async (req, res, params) => {
+    sendJson(res, 200, factory.decideGate(params.id!, params.gateId!, await readJson<unknown>(req)));
+  });
+  router.add("POST", "/api/work-orders/:id/gates/:gateId/outcome", async (req, res, params) => {
+    sendJson(res, 200, factory.reportGate(params.id!, params.gateId!, await readJson<unknown>(req)));
+  });
   router.add("GET", "/api/work-orders/:id/activity", (_req, res, params, url) => {
     workOrder(params.id!);
     sendJson(res, 200, factory.activity(params.id!, url.searchParams.get("stationId") ?? undefined));

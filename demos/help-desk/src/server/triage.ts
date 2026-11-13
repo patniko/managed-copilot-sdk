@@ -4,6 +4,8 @@
 // Classification is fast and cheap, so it runs on every message before the support sessions answer.
 // The same classifier also runs on an ordinary LLM (`method: "llm"`: sessions in Help Desk's own environment, on the
 // support sessions' model), so Classify can show the two side by side: their time and tokens.
+// The decision model also answers other questions in batches of sessions of their own (`batch`): Answer matching
+// tickets asks it whether each open ticket is about a known issue.
 import type { MessageOptions, ResponseSchema, SessionConfig } from "@github/copilot-sdk";
 import type { SessionInfo } from "@managed-copilot/sdk";
 import { z } from "zod";
@@ -88,6 +90,8 @@ const TIMEOUT_MS = 60_000;
 
 interface Pooled {
   readonly session: ClassifierSession;
+  /** The pool it belongs to. */
+  readonly pool: Pool;
   uses: number;
   /** The session's usage metrics after its last classification. */
   metrics: SessionMetrics | undefined;
@@ -113,18 +117,32 @@ export function usageBetween(before: SessionMetrics | undefined, after: SessionM
   };
 }
 
+/** Sessions that share a system message: the classifier's, or a batch's of other questions. */
+interface Pool {
+  readonly system: string;
+  idle: Pooled[];
+  size: number;
+  readonly waiting: Array<() => void>;
+  /** Replaced (a new connection) or done (a batch): its sessions are deleted as they come back. */
+  closed: boolean;
+}
+
+/** Other questions for the same model, on sessions of their own until `close()` deletes them. */
+export interface DecisionBatch<T> {
+  /** Asks about one text. Throws, with a plain message, when it can't. */
+  ask(text: string): Promise<T>;
+  close(): void;
+}
+
 export class Triage {
   readonly #platform: TriagePlatform | undefined;
   readonly #environment: string | undefined;
   readonly #method: ClassificationMethod;
   readonly #prefix: string;
-  #idle: Pooled[] = [];
-  #size = 0;
+  #pool: Pool;
   /** Sessions this process created, which aren't leftovers. */
   readonly #mine = new Set<string>();
-  readonly #waiting: Array<() => void> = [];
   #failure: string | undefined;
-  #generation = 0;
   readonly #listeners = new Set<() => void>();
 
   /**
@@ -136,17 +154,20 @@ export class Triage {
     this.#environment = environment;
     this.#method = method;
     this.#prefix = method === "llm" ? LLM_TRIAGE_SESSION_PREFIX : TRIAGE_SESSION_PREFIX;
+    this.#pool = Triage.#newPool(method === "llm" ? LLM_TRIAGE_INSTRUCTIONS : JSON.stringify(TRIAGE_QUESTIONS));
     platform?.onStatus(() => this.#changed());
     platform?.onConnected(() => {
       // Sessions belong to the client that created them: start a new pool on the new one.
-      const stale = this.#idle;
-      this.#generation++;
-      this.#idle = [];
-      this.#size = 0;
-      for (const pooled of stale) this.#delete(pooled.session);
+      const stale = this.#pool;
+      this.#pool = Triage.#newPool(stale.system);
+      this.#close(stale);
       void this.#deleteLeftovers();
       this.#changed();
     });
+  }
+
+  static #newPool(system: string): Pool {
+    return { system, idle: [], size: 0, waiting: [], closed: false };
   }
 
   get method(): ClassificationMethod {
@@ -184,13 +205,31 @@ export class Triage {
 
   /** Classifies one customer message. Throws, with a plain message, when it can't. */
   async classify(text: string): Promise<Classification> {
+    const { result, usage } = await this.#ask(() => this.#pool, text, CLASSIFICATION, "Classification failed");
+    return { category: result.category, urgent: result.urgent, ...(usage ? { usage } : {}) };
+  }
+
+  /**
+   * Other questions for the decision model (the questions as JSON, the answers as `schema`), on up to `POOL_SIZE`
+   * sessions of their own, which `close()` deletes. Classification's own sessions carry on undisturbed.
+   */
+  batch<T>(questions: QuestionSpecs, schema: ResponseSchema<T>): DecisionBatch<T> {
+    if (this.#method !== "decision") throw new Error("Only the decision model takes questions as JSON.");
+    const pool = Triage.#newPool(JSON.stringify(questions));
+    return {
+      ask: async (text) => (await this.#ask(() => pool, text, schema, "The decision model couldn't answer")).result,
+      close: () => this.#close(pool),
+    };
+  }
+
+  /** `pool`: the pool to ask in, as it is when a session frees up (a new connection replaces classification's). */
+  async #ask<T>(pool: () => Pool, text: string, schema: ResponseSchema<T>, failed: string): Promise<{ result: T; usage?: ClassificationUsage }> {
     const platform = this.#platform;
     if (!platform) throw new Error("Ticket classification isn't set up.");
     if (platform.status.state !== "connected") throw new Error(platform.status.message ?? "The triage environment isn't connected yet.");
-    const pooled = await this.#acquire(platform);
-    const generation = this.#generation;
+    const pooled = await this.#acquire(platform, pool);
     try {
-      const result = await pooled.session.sendAndWait(text, CLASSIFICATION, TIMEOUT_MS);
+      const result = await pooled.session.sendAndWait(text, schema, TIMEOUT_MS);
       pooled.uses++;
       let usage: ClassificationUsage | undefined;
       try {
@@ -200,64 +239,74 @@ export class Triage {
       } catch (error) {
         log.debug("Couldn't read a classification session's usage", { session: pooled.session.sessionId, error: (error as Error)?.message });
       }
-      this.#release(pooled, generation);
+      this.#release(pooled);
       this.#setFailure(undefined);
-      return { category: result.category, urgent: result.urgent, ...(usage ? { usage } : {}) };
+      return { result, ...(usage ? { usage } : {}) };
     } catch (error) {
       // A session whose turn failed may be mid-turn: replace it rather than reuse it.
-      this.#discard(pooled, generation);
-      const message = `Classification failed: ${(error as Error)?.message ?? String(error)}`;
+      this.#discard(pooled);
+      const message = `${failed}: ${(error as Error)?.message ?? String(error)}`;
       this.#setFailure(message);
       throw new Error(message, { cause: error });
     }
   }
 
-  async #acquire(platform: TriagePlatform): Promise<Pooled> {
+  async #acquire(platform: TriagePlatform, current: () => Pool): Promise<Pooled> {
     for (;;) {
-      const idle = this.#idle.pop();
+      const pool = current();
+      if (pool.closed) throw new Error("This batch of questions is over.");
+      const idle = pool.idle.pop();
       if (idle) return idle;
-      if (this.#size < POOL_SIZE) {
-        this.#size++;
-        const generation = this.#generation;
-        const config = this.#sessionConfig(platform);
+      if (pool.size < POOL_SIZE) {
+        pool.size++;
+        const config = this.#sessionConfig(platform, pool.system);
         this.#mine.add(config.sessionId!);
         try {
-          return { session: await platform.createSession(config), uses: 0, metrics: undefined };
+          return { session: await platform.createSession(config), pool, uses: 0, metrics: undefined };
         } catch (error) {
-          if (generation === this.#generation) this.#size--;
+          if (!pool.closed) pool.size--;
           this.#mine.delete(config.sessionId!);
-          this.#wake();
+          pool.waiting.shift()?.();
           const message = `Couldn't start a classification session: ${(error as Error)?.message ?? String(error)}`;
           this.#setFailure(message);
           throw new Error(message, { cause: error });
         }
       }
-      await new Promise<void>((resolve) => this.#waiting.push(resolve));
+      await new Promise<void>((resolve) => pool.waiting.push(resolve));
     }
   }
 
-  #sessionConfig(platform: TriagePlatform): SessionConfig {
+  #sessionConfig(platform: TriagePlatform, system: string): SessionConfig {
     return {
       sessionId: `${this.#prefix}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       ...(platform.model ? { model: platform.model } : {}),
       streaming: false,
       availableTools: [],
-      systemMessage: { mode: "replace", content: this.#method === "llm" ? LLM_TRIAGE_INSTRUCTIONS : JSON.stringify(TRIAGE_QUESTIONS) },
+      systemMessage: { mode: "replace", content: system },
       onPermissionRequest: () => ({ kind: "reject", feedback: "Classification sessions don't use tools." }),
     };
   }
 
-  #release(pooled: Pooled, generation: number): void {
-    if (generation !== this.#generation) return this.#delete(pooled.session);
-    if (pooled.uses >= USES_PER_SESSION) return this.#discard(pooled, generation);
-    this.#idle.push(pooled);
-    this.#wake();
+  #release(pooled: Pooled): void {
+    const pool = pooled.pool;
+    if (pool.closed) return this.#delete(pooled.session);
+    if (pooled.uses >= USES_PER_SESSION) return this.#discard(pooled);
+    pool.idle.push(pooled);
+    pool.waiting.shift()?.();
   }
 
-  #discard(pooled: Pooled, generation: number): void {
-    if (generation === this.#generation) this.#size--;
-    this.#wake();
+  #discard(pooled: Pooled): void {
+    const pool = pooled.pool;
+    if (!pool.closed) pool.size--;
+    pool.waiting.shift()?.();
     this.#delete(pooled.session);
+  }
+
+  /** Deletes a pool's idle sessions; the busy ones are deleted when they come back. */
+  #close(pool: Pool): void {
+    pool.closed = true;
+    for (const pooled of pool.idle.splice(0)) this.#delete(pooled.session);
+    for (const wake of pool.waiting.splice(0)) wake();
   }
 
   #delete(session: ClassifierSession): void {
@@ -267,10 +316,6 @@ export class Triage {
       .then(() => this.#platform?.deleteSession(session.sessionId))
       .then(() => this.#mine.delete(session.sessionId))
       .catch((error: unknown) => log.warn("Couldn't delete a classification session", { session: session.sessionId, error: (error as Error).message }));
-  }
-
-  #wake(): void {
-    this.#waiting.shift()?.();
   }
 
   async #deleteLeftovers(): Promise<void> {

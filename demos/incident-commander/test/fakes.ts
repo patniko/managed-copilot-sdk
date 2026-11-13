@@ -274,6 +274,18 @@ export interface FakeWorkOrder {
   tests?: FactoryTests;
   error?: { code: string; message: string };
   origin?: { app: string; name: string; label?: string; url?: string; key?: string };
+  gates?: FakeGate[];
+}
+
+export interface FakeGate {
+  id: string;
+  kind: "deploy";
+  target: string;
+  label: string;
+  state: "pending" | "open" | "approved" | "declined" | "deployed" | "failed" | "closed";
+  request?: { requestId: string } & Record<string, unknown>;
+  decision?: { requestId: string; approve: boolean; reason?: string; by?: string; at: string };
+  outcome?: { outcome: string; message?: string; version?: string };
 }
 
 /** Software Factory's API (its routing contract) on a local port. Tests move its work orders along with `set`. */
@@ -287,6 +299,13 @@ export class FakeFactory {
   readonly releases = new Map<string, unknown>();
   /** While set, every request answers this error. */
   refuse: { readonly status: number; readonly code: string; readonly message: string } | undefined;
+  /** False: a factory from before gates, which ignores declared gates. */
+  gatesSupported = true;
+  /** While set, gate requests (and reports) answer this error; the rest works. */
+  refuseGates: { readonly status: number; readonly code: string; readonly message: string } | undefined;
+  /** The bodies of `POST …/gates/:gateId/request` and `…/outcome`. */
+  readonly gateRequests: Record<string, unknown>[] = [];
+  readonly gateReports: Record<string, unknown>[] = [];
   url = "";
   #server: Server | undefined;
   #next = 12;
@@ -329,6 +348,33 @@ export class FakeFactory {
     Object.assign(order, change, { updatedAt: new Date().toISOString() });
   }
 
+  /** A person decides the open deploy request on the floor. */
+  decide(id: string, approve: boolean, by = "mona", reason?: string): void {
+    const gate = this.orders.get(id)?.gates?.find((candidate) => candidate.id === "deploy");
+    if (!gate?.request || gate.state !== "open") throw new Error(`No open deploy gate on ${id}`);
+    gate.state = approve ? "approved" : "declined";
+    gate.decision = { requestId: gate.request.requestId, approve, by, at: new Date().toISOString(), ...(reason ? { reason } : {}) };
+  }
+
+  #gate(order: FakeWorkOrder, gateId: string, raw: string, kind: "request" | "outcome"): { status: number; body: unknown } {
+    const body = JSON.parse(raw) as Record<string, unknown> & { requestId: string };
+    (kind === "request" ? this.gateRequests : this.gateReports).push(body);
+    if (this.refuseGates) return { status: this.refuseGates.status, body: { error: { code: this.refuseGates.code, message: this.refuseGates.message } } };
+    const gate = order.gates?.find((candidate) => candidate.id === gateId);
+    if (!gate) return { status: 404, body: { error: { code: "not_found", message: `WO-${order.number} has no ${gateId} gate.` } } };
+    if (kind === "request") {
+      if (gate.request?.requestId !== body.requestId) Object.assign(gate, { state: "open", request: body, decision: undefined, outcome: undefined });
+    } else if (gate.request?.requestId !== body.requestId) {
+      return { status: 409, body: { error: { code: "conflict", message: "That isn't the deploy request this gate shows." } } };
+    } else if (body.outcome === "closed" && !["open", "approved", "declined"].includes(gate.state)) {
+      return { status: 409, body: { error: { code: "conflict", message: `This deploy request already ran its course here (${gate.state}).` } } };
+    } else {
+      gate.state = body.outcome as FakeGate["state"];
+      gate.outcome = { outcome: String(body.outcome), ...(typeof body.message === "string" ? { message: body.message } : {}), ...(typeof body.version === "string" ? { version: body.version } : {}) };
+    }
+    return { status: 200, body: order };
+  }
+
   async #handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const send = (status: number, body: unknown): void => void res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     const path = new URL(req.url ?? "/", "http://factory.test").pathname;
@@ -337,11 +383,21 @@ export class FakeFactory {
     this.requests.push(`${req.method} ${path}`);
     if (this.refuse) return send(this.refuse.status, { error: { code: this.refuse.code, message: this.refuse.message } });
     if (req.method === "POST" && path === "/api/work-orders") {
-      const body = JSON.parse(raw) as Record<string, unknown> & { title: string; origin?: FakeWorkOrder["origin"] };
+      const body = JSON.parse(raw) as Record<string, unknown> & { title: string; origin?: FakeWorkOrder["origin"]; gates?: { kind: "deploy"; target: string; label?: string }[] };
       this.created.push(body);
-      return send(201, this.add({ title: body.title, ...(body.origin ? { origin: body.origin } : {}) }));
+      const gates = this.gatesSupported
+        ? body.gates?.map((gate): FakeGate => ({ id: gate.kind, kind: gate.kind, target: gate.target, label: gate.label ?? `Deploy ${gate.target}`, state: "pending" }))
+        : undefined;
+      return send(201, this.add({ title: body.title, ...(body.origin ? { origin: body.origin } : {}), ...(gates?.length ? { gates } : {}) }));
     }
     if (req.method === "GET" && path === "/api/work-orders") return send(200, [...this.orders.values()].reverse());
+    const gateMatch = /^\/api\/work-orders\/([^/]+)\/gates\/([^/]+)\/(request|outcome)$/.exec(path);
+    if (req.method === "POST" && gateMatch) {
+      const order = this.orders.get(decodeURIComponent(gateMatch[1]!));
+      if (!order) return send(404, { error: { code: "not_found", message: "That work order doesn't exist." } });
+      const answer = this.#gate(order, decodeURIComponent(gateMatch[2]!), raw, gateMatch[3] as "request" | "outcome");
+      return send(answer.status, answer.body);
+    }
     const match = /^\/api\/work-orders\/([^/]+)(\/release)?$/.exec(path);
     const order = match ? this.orders.get(decodeURIComponent(match[1]!)) : undefined;
     if (req.method === "GET" && order && !match?.[2]) return send(200, order);

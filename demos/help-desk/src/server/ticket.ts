@@ -4,17 +4,19 @@
 // answers on the wall. Facts a customer's agent proposes for the team knowledge base don't: the runtime's memory
 // permission (`kind: "memory"`) is granted at once and `memory.storeMemory` keeps the fact as a proposal for a team
 // member to decide later, outside the agent's turn. Declining in the turn would reach the customer: the runtime fails
-// the other tool calls waiting in the same step and the agent answers the rejection.
+// the other tool calls waiting in the same step and the agent answers the rejection. A team member's note to the agent
+// (and a known issue's update) is a message in a `<team_note>` block: the agent reads it, the person never sees it.
 import type { PermissionRequest, PermissionRequestResult, SessionEvent, StoredMemory, Tool } from "@github/copilot-sdk";
 import type { ApprovalRequest, BugReport, MemoryProposal, PlayerContext, PlayerTicket, Ticket, TicketStatus, TranscriptItem } from "../shared/types.js";
 import { HelpDeskError, errorText, isMissingSession } from "./errors.js";
 import { log } from "./log.js";
+import { teamNotePrompt } from "./notes.js";
 import type { DeskPlatform, SupportSession } from "./platform.js";
 import { PLAYER_APPROVAL_TOOLS, PlayerAccount, playerCard, playerSessionId, playerSystemMessage, playerTools, promptFor, readPrompt, ticketOpenedAt, UNKNOWN_PLAYER } from "./player.js";
 import { Transcript, type Effect, type SessionEventLike } from "./projection.js";
 import type { CustomerSeed } from "./seed.js";
-import { normalizeOrderId, type Shop } from "./shop.js";
-import { APPROVAL_TOOLS, checkRequest, customerTools, systemMessage } from "./tools.js";
+import { normalizeOrderId, type Shop, type ToolResult } from "./shop.js";
+import { APPROVAL_TOOLS, checkRequest, customerTools, systemMessage, type KnownIssueReport } from "./tools.js";
 
 export interface TicketHost {
   readonly platform: DeskPlatform;
@@ -27,6 +29,10 @@ export interface TicketHost {
   remember(ticket: CustomerTicket, memory: StoredMemory): Promise<void>;
   /** The oldest fact this conversation's agent proposed that no one has decided yet. */
   proposal(ticket: CustomerTicket): MemoryProposal | undefined;
+  /** The known issues section of every session's instructions; empty while there are none. */
+  knownIssuesPrompt(person: "customer" | "player"): string;
+  /** Keeps a known issue a customer's agent proposed (`report_known_issue`) for a team member to record. */
+  proposeKnownIssue(ticket: CustomerTicket, report: KnownIssueReport): ToolResult;
 }
 
 /** What the agent is told when the operator declines a customer's request. */
@@ -287,10 +293,24 @@ export abstract class TicketSession {
 
   /** Sends a message as the person the session serves. After a first message that wasn't delivered, it tries again. */
   async send(text: string): Promise<void> {
+    await this.#sendPrompt(text);
+  }
+
+  /**
+   * Sends a team member's note to the agent (`author`: their login), or Help Desk's known issue update
+   * (`knownIssueId`). The person the session serves never sees it; the agent replies to them as the note asks.
+   */
+  async sendTeamNote(text: string, author: string, knownIssueId?: string): Promise<void> {
+    if (!this.#created) throw new HelpDeskError("unavailable", `This conversation has no session yet: the ${this.party.word} hasn't written.`, 409);
+    await this.#sendPrompt(teamNotePrompt(text, author, knownIssueId));
+    log.info(knownIssueId ? "Sent a known issue's update to an agent" : "A team member wrote to an agent", { ...this.party.fields, ...(knownIssueId ? { knownIssue: knownIssueId } : {}) });
+  }
+
+  async #sendPrompt(prompt: string): Promise<void> {
     const session = this.#session;
     if (!session || (this.#state !== "live" && this.#state !== "failed")) throw new HelpDeskError("unavailable", this.#problem ?? "This conversation isn't connected right now. Try again in a moment.", 503);
     try {
-      await session.send({ prompt: text });
+      await session.send({ prompt });
     } catch (error) {
       throw new HelpDeskError("send_failed", `The message wasn't delivered: ${errorText(error)}`, 502);
     }
@@ -413,11 +433,11 @@ export class CustomerTicket extends TicketSession {
   }
 
   protected override sessionTools(): Tool<any>[] {
-    return customerTools(this.host.shop, this.customer.id);
+    return customerTools(this.host.shop, this.customer.id, (report) => this.host.proposeKnownIssue(this, report));
   }
 
   protected override instructions(): string {
-    return `${systemMessage(this.customer, this.host.shop)}\n\n${this.host.knowledgePrompt()}`;
+    return [systemMessage(this.customer, this.host.shop), this.host.knowledgePrompt(), this.host.knownIssuesPrompt("customer")].filter(Boolean).join("\n\n");
   }
 
   /** Its agent proposes facts for the team knowledge base; Help Desk keeps them for a team member to decide. */
@@ -541,7 +561,7 @@ export class PlayerTicketSession extends TicketSession {
   }
 
   protected override instructions(): string {
-    return playerSystemMessage();
+    return [playerSystemMessage(), this.host.knownIssuesPrompt("player")].filter(Boolean).join("\n\n");
   }
 
   protected override get approvalTools(): ReadonlySet<string> {

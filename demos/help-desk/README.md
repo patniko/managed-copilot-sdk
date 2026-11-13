@@ -35,6 +35,10 @@ cancellations wait for the operator (yellow), and two customers asked about orde
 - **A team that learns.** Agents propose what they learn for the team knowledge base with the runtime's
   `store_memory` tool. You add each fact or not, and every later conversation starts with what was added
   ([below](#team-knowledge-agents-learn-you-decide)).
+- **One reply, every matching ticket.** Write a note to one customer's agent about an ongoing problem, and the agent
+  proposes it as a known issue. Record it, then **Answer matching tickets**: the decision model picks the open tickets
+  about it, and each one's own agent replies with the update, while a person still approves anything that costs money
+  ([below](#known-issues-one-note-every-matching-ticket)).
 - **Live players, next to the simulation.** Downhill's in-game shop, the Downhill Shop, sells rider outfits and bike
   paint, and its checkout runs on the store's own checkout code. When its launch offer's code fails there, the player
   opens **Support** and complains in their own words: Help Desk opens a live ticket on the same shared runtime, the
@@ -78,8 +82,13 @@ Help Desk opens at <http://localhost:7440>. To demo it:
 5. In **Software issues**, click **Send to Software Factory** on *Promo codes rejected at checkout* (the player is
    listed with the customers, as *Mona · Downhill*), then **Open in Software Factory** to follow the work order there
    (see [below](#software-issues-fixed-by-software-factory)).
-6. Type as a customer in their widget to keep a conversation going.
-7. End the simulation from **⋯**: its sessions are deleted. Simulating again replaces it the same way. Players' tickets
+6. **Scale your reply** (needs the decision model, [below](#ticket-classification-optional)). Open one of the customers
+   with a discount-code complaint, such as **Mateo Rossi**, and under **Team notes** write to his agent: *There's an
+   ongoing issue with the launch banner's trail15 code. Engineering is fixing it; meanwhile customers can type TRAIL15 in
+   capitals.* Click **Record known issue** on what the agent proposes, then **Answer matching tickets** in **Known
+   issues**. See [below](#known-issues-one-note-every-matching-ticket).
+7. Type as a customer in their widget to keep a conversation going.
+8. End the simulation from **⋯**: its sessions are deleted. Simulating again replaces it the same way. Players' tickets
    stay through both; end one with **End ticket** on its page.
 
 Measured on a local deployment: 25 sessions started in about 3 seconds, and every conversation finished within 35
@@ -103,10 +112,11 @@ pnpm --filter @managed-copilot/demo-help-desk happy-path --url https://help-desk
 
 ## Software issues, fixed by Software Factory
 
-Five of the customers don't just have a question: the store's website let them down. The code `TRAIL15` from the
-newsletter is rejected when Aisha pastes it and when Ben types it in lowercase; Lucas changed his water bottles from 1 to
-2 in his cart and paid for 3; and Hannah's and Arjun's **My orders** pages say Delivered while their packages are still
-out for delivery. Aisha is among the first 5 customers and Lucas among the first 10; simulate 25 to meet all five. The
+Six of the customers don't just have a question: the store's website let them down. The code `TRAIL15` from the
+newsletter is rejected when Aisha pastes it and when Ben types it in lowercase, and Mateo's `trail15` from the homepage
+banner is turned down too; Lucas changed his water bottles from 1 to 2 in his cart and paid for 3; and Hannah's and
+Arjun's **My orders** pages say Delivered while their packages are still out for delivery. Aisha is among the first 5
+customers and Lucas among the first 10; simulate 25 to meet all six. The
 website's code is in [`storefront`](storefront): a small Node codebase whose own tests pass, because they don't cover
 these cases.
 
@@ -118,19 +128,19 @@ these cases.
    own code), so the agent can see Hannah's and Arjun's pages disagree with the carrier. A product that arrived broken
    or leaks isn't a software issue, and isn't reported.
 2. **The wall groups the reports.** Their tiles show **Software issue**, and the **Software issues** panel has one row
-   per area, such as *Promo codes rejected at checkout · 2 tickets*. A customer's page shows what the agent reported.
+   per area, such as *Promo codes rejected at checkout · 3 tickets*. A customer's page shows what the agent reported.
 3. **Send to Software Factory.** One click sends the issue as a work order. Its brief quotes each customer, their order,
    and what their agent found, then asks for a fix in the storefront with regression tests that reproduce the reports,
    keeping the existing tests passing. The storefront codebase is the work order's project, and the reports
    (`BUG_REPORT.md`) and conversations (`transcripts.md`) are its context.
 4. **Follow it.** The row shows the work order, such as `WO-0012 · Building`, until Software Factory finishes, with
-   **Open in Software Factory**. The work order carries its origin: Help Desk, *Promo codes · 2 tickets*, and a link
+   **Open in Software Factory**. The work order carries its origin: Help Desk, *Promo codes · 3 tickets*, and a link
    back to the first reporting customer's conversation, so the factory's floor shows where it came from.
 
 **Players' reports join in.** The Downhill Shop's checkout calls the same `applyPromoCode`
 (`storefront/src/promotions.js`), and its launch banner applies the code in lowercase, `trail15`, which the same bug
 turns down. A player's agent reports it with area `promo-codes`, so it lands in *Promo codes rejected at checkout* with
-Aisha's and Ben's (listed as *Mona · Downhill*), and the issue shows whether or not a simulation is running. The brief
+Aisha's, Mateo's, and Ben's (listed as *Mona · Downhill*), and the issue shows whether or not a simulation is running. The brief
 and `BUG_REPORT.md` say which reports came from the Downhill Shop: the code exactly as its checkout got it, what
 checkout said, the cart, and the order the player paid in full, if any.
 
@@ -183,7 +193,54 @@ propose, so another customer's agent can occasionally propose something too: dec
 
 The knowledge base outlives simulations and restarts: it's kept in `knowledge.json` in Help Desk's data directory.
 Live players' sessions ([below](#live-players-from-downhill)) neither propose facts nor are told them: their agent has
-only its tools for the Downhill Shop.
+only its tools for the Downhill Shop. They are told the desk's known issues, though ([next](#known-issues-one-note-every-matching-ticket)).
+
+## Known issues: one note, every matching ticket
+
+When something is broken for many customers at once, you don't want to answer each of them by hand while you get it
+fixed. A known issue turns one conversation with one agent into an answer for every ticket about it.
+
+1. **You tell one agent.** Open a ticket about the problem (a customer's or a player's) and write in **Team notes**, on
+   the right of their page. A note goes to the agent, not the customer: it reaches the session as a message in a
+   `<team_note author="…">` block (Help Desk defuses the tag in what customers and players type, so only a team member
+   can write one), the customer's chat never shows it, and the agent replies to the customer only with what they need
+   to know. Your note is signed with the GitHub account Help Desk is signed in as. If the agent is waiting on a refund or
+   a cancellation you haven't answered, it reads your note once you do: the box says so.
+2. **The agent proposes a known issue.** When a note tells a customer's agent about an ongoing problem, it calls
+   `report_known_issue`, one of its own tools, with a title, how customers describe the problem, and the update
+   customers should get. Like a proposed fact, it doesn't hold up the conversation: it waits in the **Team knowledge**
+   panel and on the tile, marked as a known issue, with **Record** and **×**. (A player's agent follows notes too, but
+   doesn't propose known issues: it has only its Downhill Shop tools.)
+3. **You record it.** It moves to the **Known issues** strip above the wall: its update, who recorded it, and when.
+   Every session created or reopened from then on (players' too) has the desk's known issues in its instructions, so
+   the agents tell affected customers the same thing. **Resolve** takes it off: new conversations aren't told it.
+4. **Answer matching tickets.** One click classifies every open ticket (answering, waiting, or waiting for you; not
+   resolved or failed ones, and not the one the issue came from) with the decision model: *is this customer's message
+   about the known issue?* Each match's own agent is then sent the update in a team note from *Help Desk*, so the reply
+   appears in that customer's conversation, in the agent's words. The strip counts it as it goes (*Classifying 24 open
+   tickets… 9 done*, then *24 tickets classified · 3 match · 3 updates sent*) and names the tickets it reached; their
+   tiles show **Known issue** with **Update sent**. A ticket the decision model couldn't classify, or whose agent
+   couldn't be sent the update, shows **Failed** and why; the others carry on. Answering again checks the open tickets
+   again, without sending the update twice. A match whose agent is waiting on a request you haven't answered gets the
+   update queued, and its entry says so. Anything that costs money still waits for you: when an agent answers the
+   update by asking to refund what the code should have taken off, the refund waits on the wall like any other.
+
+It works while a simulation runs (that's the point: the rush is on) and with live players' tickets alone. It needs the
+decision model (it uses the same `help-desk-triage` environment and endpoint as [classification](#ticket-classification-optional),
+with a yes-or-no question of its own on a few `hdt-` sessions deleted afterwards); without it, **Answer matching
+tickets** says so. Known issues, and each one's latest answer, outlive simulations and restarts in `known-issues.json`
+in Help Desk's data directory; an answer a restart cut short marks its unfinished tickets **Failed**, and answering
+again picks them up.
+
+### Try it
+
+Three simulated customers ran into the launch code: Aisha (among the first 5), Mateo, and Ben. **Simulate 25**, open
+**Mateo Rossi**, and write in **Team notes**: *There's an ongoing issue with the launch banner's trail15 code.
+Engineering is fixing it; meanwhile customers can type TRAIL15 in capitals.* Mateo's agent tells him, and proposes the
+known issue. **Record known issue**, then click **Answer matching tickets** in **Known issues**: within seconds Aisha's
+and Ben's tickets (unless they're resolved already) and any open Downhill player's show **Update sent**, their agents
+reply, and the other customers' tickets stay as they were. The agents choose their words, so check what they proposed
+before you record it.
 
 ## Ticket classification (optional)
 
@@ -230,7 +287,8 @@ can compare them, for example:
 
 The time is from the click to the last answer. The tokens are what the classifier sessions report from
 `session.rpc.usage.getMetrics()`, the difference before and after each classification. Help Desk doesn't show a price
-for either option, since it can't read what Foundry charges for the decision model. Classify is disabled during a simulation, and while another Classify is running;
+for either option, since it can't read what Foundry charges for the decision model. Classify is disabled during a simulation (it reads first messages without sessions; **Answer matching tickets**, which
+reads the live tickets, isn't), and while another Classify is running;
 starting a simulation clears the results. Running the same option again replaces its line.
 
 Turn it on (local only, with `aspire run`):
@@ -339,6 +397,15 @@ Help Desk's memory, so a restart forgets it too, and the game's next **Support**
   would reply to the customer about it. With `storeMemory` set, the runtime recalls no memories itself, so Help Desk
   puts the knowledge base in each customer session's system message. The gateway allows memory in a shared environment
   only on these terms: the app stores it, and no session's memory is kept in the shared runtime.
+- **Team notes and known issues are messages and tools.** A team note is an ordinary `session.send` whose prompt is a
+  `<team_note author="…">` block ([`notes.ts`](src/server/notes.ts)), so the projection shows it to the team only and a
+  restart reads it back from history. `report_known_issue` is a `defineTool` tool with `skipPermission`, like
+  `report_bug`; its proposal waits with the proposed facts. **Answer matching tickets**
+  ([`known-issues.ts`](src/server/known-issues.ts), `HelpDesk.answerKnownIssue`) asks the decision model
+  `{ matches: boolean }` about each open ticket with `sendAndWait(text, schema)` on a small batch of sessions in
+  `help-desk-triage` whose system message is that one question (`Triage.batch`), deletes them afterwards, and sends
+  each match's session a team note naming the issue (`known_issue="…"`). The agent replies in its own turn, and its
+  refunds and cancellations go through the same permission handler as always.
 - **The wall is projected from the sessions' events.** Messages (streamed), tool calls, and approvals come from the
   stock session events; a call refused for an order of another customer is marked **Blocked**. The agent marks a
   conversation **Resolved** with a `resolve_conversation` tool, and a completed `report_bug` call is the ticket's
@@ -376,7 +443,7 @@ Help Desk's memory, so a restart forgets it too, and the game's next **Support**
 | `MANAGED_COPILOT_URL` | local discovery | Gateway URL (Aspire sets it) |
 | `HELP_DESK_ENVIRONMENT` | `help-desk` | The shared environment customers' sessions are created in |
 | `HELP_DESK_MODEL` | first available of Claude Haiku 4.5, Claude Haiku 5.5, GPT-5.6 Luna, Claude Sonnet 5 | The customers' agents' model |
-| `HELP_DESK_DATA_DIR` | `.data` (in `demos/help-desk`); `/data` in the container | Where the team knowledge base (`knowledge.json`) is kept |
+| `HELP_DESK_DATA_DIR` | `.data` (in `demos/help-desk`); `/data` in the container | Where the team knowledge base (`knowledge.json`) and the known issues (`known-issues.json`) are kept |
 | `HELP_DESK_ALLOWED_HOSTS` | none | Extra host names allowed to address the server (it accepts loopback names only by default) |
 | `SOFTWARE_FACTORY_URL` | none (the root AppHost sets it) | Software Factory's API, which Help Desk's server calls to send software issues. Unset: **Send to Software Factory** is unavailable and says why |
 | `SOFTWARE_FACTORY_PUBLIC_URL` | `SOFTWARE_FACTORY_URL` | Software Factory's address for people: the links to its work orders |
@@ -396,10 +463,10 @@ environment (`http://help-desk`), which `HELP_DESK_ALLOWED_HOSTS` already allows
 | Path | Contents |
 | --- | --- |
 | `apphost.mts` | AppHost fragment: the `help-desk` shared environment, the optional `help-desk-triage` environment and its endpoint, and the app resource |
-| `src/server` | Platform connection, the store and its tools, one ticket (session) per customer and per live player (`player.ts`: the Downhill contract and the player's tools), the event projection, the team knowledge base, software issues and the Software Factory client, REST and server-sent events |
+| `src/server` | Platform connection, the store and its tools, one ticket (session) per customer and per live player (`player.ts`: the Downhill contract and the player's tools), the event projection, the team knowledge base, team notes and known issues, software issues and the Software Factory client, REST and server-sent events |
 | `src/scripts` | The happy-path script |
 | `src/shared` | Types shared with the UI |
 | `src/web` | The UI: the wall, and a player's chat page at `/chat/<ticket>` (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS) |
 | `storefront` | The Contoso Outdoors website's code (Node, no dependencies, `node --test`), with the bugs customers report: the project a software issue's work order asks Software Factory to fix. The Downhill Shop's checkout uses it too |
-| `test` | Unit tests: the store, the tools, the projection, simulations, player tickets, approvals, and proposed memories against an in-memory platform, the knowledge base, software issues against an in-memory Software Factory, the factory client, the API and the chat page's route, the storefront, and the fragment |
+| `test` | Unit tests: the store, the tools, the projection, simulations, player tickets, approvals, proposed memories, team notes, and known issues (answered with a fake decision model) against an in-memory platform, the knowledge base and known issues on disk, software issues against an in-memory Software Factory, the factory client, the API and the chat page's route, the storefront, and the fragment |
 | `Dockerfile` | The container `aspire deploy` publishes |

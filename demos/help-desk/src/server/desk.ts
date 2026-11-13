@@ -6,7 +6,10 @@
 // issues, which the operator sends to Software Factory; each work order's origin carries the issue's scope and area, so
 // a restart finds them again. Facts the customers' agents propose wait in the team knowledge base until the operator
 // adds or declines them, outside the agents' turns; added facts outlive simulations and are part of every later
-// customer session's instructions.
+// customer session's instructions. A team member can also write to a ticket's agent (a team note): when it tells the
+// agent about an ongoing problem, the agent proposes a known issue, which a team member records for the whole desk;
+// Answer matching tickets then has the decision model pick the open tickets about it and sends each one's agent the
+// update to reply with.
 import type { StoredMemory } from "@github/copilot-sdk";
 import type { SessionInfo } from "@managed-copilot/sdk";
 import {
@@ -21,14 +24,19 @@ import {
   type DeskInfo,
   type HelpDeskState,
   type KnowledgeEntry,
+  type KnownIssue,
+  type KnownIssueAnswer,
+  type KnownIssueTicket,
   type MemoryProposal,
   type PlayerTicket,
   type PlayerTicketCreated,
   type RoutedWorkOrder,
   type RunInfo,
   type ServerEvent,
+  type ShopCheckout,
   type SoftwareIssue,
   type Ticket,
+  type TicketKnownIssue,
   type TicketTriage,
   type WorkOrderStatus,
 } from "../shared/types.js";
@@ -36,14 +44,16 @@ import type { HelpDeskConfig } from "./config.js";
 import { HelpDeskError, errorText, isMissingSession } from "./errors.js";
 import { FACTORY_NOT_CONNECTED, readProject, SoftwareFactory, workOrderName, workOrderUrl, type FactoryClient, type WorkOrderSummary } from "./factory.js";
 import { KnowledgeBase } from "./knowledge.js";
+import { KnownIssues, MATCH, matchQuestions, updateNote } from "./known-issues.js";
+import { defuseTeamNotes, HELP_DESK_AUTHOR } from "./notes.js";
 import { groupIssues, isBugArea, issueKey, issueWorkOrder, parseIssueKey, playerScope, type Reported, type ReportedConversation } from "./issues.js";
 import { log } from "./log.js";
 import type { DeskPlatform } from "./platform.js";
 import { chatPath, contextOf, newTicketId, parsePlayerSessionId, parsePlayerTicket, PLAYER_TOOLS, sameOpening } from "./player.js";
 import { CUSTOMERS } from "./seed.js";
-import { Shop } from "./shop.js";
+import { Shop, type ToolResult } from "./shop.js";
 import { CustomerTicket, parseSessionId, PlayerTicketSession, sessionIdFor, type TicketHost, type TicketSession } from "./ticket.js";
-import { TOOLS } from "./tools.js";
+import { TOOLS, type KnownIssueReport } from "./tools.js";
 import { Triage } from "./triage.js";
 
 const PUBLISH_MS = 150;
@@ -104,6 +114,13 @@ function customerText(ticket: CustomerTicket): string {
     .join("\n\n");
 }
 
+/** What a player's ticket says happened at checkout, in the player's terms, so it's classified with their words. */
+function checkoutContext(checkout: ShopCheckout | undefined): string {
+  if (!checkout?.code) return "";
+  const items = checkout.items.map((item) => item.name).join(", ");
+  return `At checkout${items ? ` for ${items}` : ""}, I entered the promo code ${checkout.code}${checkout.error ? ` and got "${checkout.error}"` : ""}${checkout.order ? ", so I paid full price" : ""}.`;
+}
+
 const gone = (session: SessionInfo) => session.state === "deleting" || session.state === "deleted";
 const firstOpened = (a: PlayerTicketSession, b: PlayerTicketSession) => a.openedAt.getTime() - b.openedAt.getTime() || a.ticketId.localeCompare(b.ticketId);
 
@@ -111,6 +128,7 @@ export class HelpDesk implements TicketHost {
   readonly platform: DeskPlatform;
   readonly shop = new Shop();
   readonly knowledge: KnowledgeBase;
+  readonly knownIssues: KnownIssues;
   readonly #config: HelpDeskConfig;
   readonly #publish: (event: ServerEvent) => void;
   readonly #factory: FactoryClient;
@@ -159,6 +177,8 @@ export class HelpDesk implements TicketHost {
   #classification: ClassificationRun | undefined;
   /** The latest Classify of each method, until a simulation starts. */
   #classifications: ClassificationRuns = {};
+  /** Known issues whose matching tickets are being answered right now. */
+  readonly #answering = new Set<string>();
 
   constructor(
     platform: DeskPlatform,
@@ -173,6 +193,7 @@ export class HelpDesk implements TicketHost {
     this.#publish = publish;
     this.#factory = factory;
     this.knowledge = new KnowledgeBase(config.dataDir);
+    this.knownIssues = new KnownIssues(config.dataDir);
     this.#triage = triage;
     this.#llmTriage = llmTriage;
   }
@@ -227,10 +248,26 @@ export class HelpDesk implements TicketHost {
     return [...this.#tickets.values()].map((ticket) => this.#view(ticket));
   }
 
-  /** A ticket as the wall shows it: its conversation, and its classification. */
+  /** A ticket as the wall shows it: its conversation, its classification, and the known issue that reached it. */
   #view(ticket: CustomerTicket): Ticket {
     const triage = this.#triaged.get(ticket.customer.id);
-    return { ...ticket.view(), ...(triage ? { triage } : {}) };
+    const knownIssue = this.#knownIssueOf(ticket.sessionId);
+    return { ...ticket.view(), ...(triage ? { triage } : {}), ...(knownIssue ? { knownIssue } : {}) };
+  }
+
+  /** A player's ticket as the wall shows it. */
+  #playerView(ticket: PlayerTicketSession): PlayerTicket {
+    const knownIssue = this.#knownIssueOf(ticket.sessionId);
+    return { ...ticket.view(), ...(knownIssue ? { knownIssue } : {}) };
+  }
+
+  /** The newest known issue whose answer reached this session as a match (or is still checking it), for its tile. */
+  #knownIssueOf(sessionId: string): TicketKnownIssue | undefined {
+    for (const issue of this.knownIssues.list()) {
+      const entry = issue.answer?.tickets.find((candidate) => candidate.sessionId === sessionId);
+      if (entry && entry.state !== "no-match") return { id: issue.id, title: issue.title, state: entry.state, ...(entry.message ? { message: entry.message } : {}) };
+    }
+    return undefined;
   }
 
   /** Classifies a customer's conversation (`text`: the customer's messages), when classification is set up. */
@@ -260,7 +297,7 @@ export class HelpDesk implements TicketHost {
   #playerViews(): PlayerTicket[] {
     return [...this.#players.values()]
       .sort((a, b) => firstOpened(b, a))
-      .map((ticket) => ticket.view());
+      .map((ticket) => this.#playerView(ticket));
   }
 
   /** The software issues: the simulation's customers' and the players' bug reports by area, and the work orders sent for them. */
@@ -298,6 +335,7 @@ export class HelpDesk implements TicketHost {
       counters: this.#counters,
       knowledge: this.knowledge.list(),
       proposals: this.knowledge.proposals(),
+      knownIssues: this.knownIssues.list(),
     };
   }
 
@@ -311,6 +349,7 @@ export class HelpDesk implements TicketHost {
       { type: "players", players: this.#playerViews() },
       { type: "counters", counters: this.#counters },
       this.#knowledgeEvent(),
+      this.#knownIssuesEvent(),
     ];
   }
 
@@ -322,7 +361,7 @@ export class HelpDesk implements TicketHost {
     const ticket = this.#players.get(ticketId);
     const platform: ServerEvent = { type: "platform", platform: this.platform.status, desk: this.desk() };
     if (!ticket && this.#unsure()) return [platform];
-    return [platform, { type: "players", players: ticket ? [ticket.view()] : [] }];
+    return [platform, { type: "players", players: ticket ? [this.#playerView(ticket)] : [] }];
   }
 
   /** Whether a ticket Help Desk doesn't know may still exist: it isn't connected, or hasn't picked up its tickets yet. */
@@ -516,8 +555,29 @@ export class HelpDesk implements TicketHost {
     const message = this.#message(text);
     const ticket = this.#require(customerId);
     const said = customerText(ticket);
-    await ticket.send(message);
+    await ticket.send(defuseTeamNotes(message));
     this.#classify(ticket, said ? `${said}\n\n${message}` : message);
+  }
+
+  /** The GitHub account Help Desk is signed in as: the team member who acts on the wall. */
+  #teamMember(): string {
+    return this.platform.status.account?.login ?? "a team member";
+  }
+
+  /** A team member's note to a customer's agent: the customer doesn't see it, and the agent replies as it asks. */
+  async note(customerId: string, text: unknown): Promise<void> {
+    this.#requireConnected();
+    const message = this.#message(text);
+    await this.#require(customerId).sendTeamNote(message, this.#teamMember());
+  }
+
+  /** A team member's note to a player's agent: the player doesn't see it. */
+  async notePlayer(ticketId: string, text: unknown): Promise<void> {
+    this.#requireConnected();
+    const message = this.#message(text);
+    const ticket = this.#requirePlayer(ticketId);
+    if (ticket.ending) throw new HelpDeskError("not_found", "This support chat has ended.", 404);
+    await ticket.sendTeamNote(message, this.#teamMember());
   }
 
   /** The operator's answer to a refund, a cancellation, or a fact the customer's agent proposed. */
@@ -528,9 +588,10 @@ export class HelpDesk implements TicketHost {
     else ticket.answer(approvalId, approve);
   }
 
-  /** Adds a proposed fact to the team knowledge base, or declines it. The agent that proposed it is never told. */
+  /** Adds a proposed fact to the team knowledge base, or declines it; a proposed known issue is recorded or declined. The agent that proposed it is never told. */
   decide(id: string, add: boolean): void {
     const proposal = this.knowledge.proposal(id);
+    if (proposal?.kind === "known-issue") return this.#decideKnownIssue(proposal, add);
     const entry = this.knowledge.decide(id, add);
     if (entry === undefined || !proposal) throw new HelpDeskError("not_actionable", "This fact was added or declined already.", 409);
     log.info(add ? "Added a fact to the team knowledge base" : "Declined a proposed fact", { customer: proposal.source.customerId, subject: proposal.subject });
@@ -552,6 +613,176 @@ export class HelpDesk implements TicketHost {
 
   #publishKnowledge(): void {
     this.#publish(this.#knowledgeEvent());
+  }
+
+  // ─── Known issues ──────────────────────────────────────────────────────────────────────────────────────────
+
+  #knownIssuesEvent(): ServerEvent {
+    return { type: "known-issues", knownIssues: this.knownIssues.list() };
+  }
+
+  #publishKnownIssues(): void {
+    this.#publish(this.#knownIssuesEvent());
+  }
+
+  /** Records a known issue an agent proposed (as the signed-in team member), or declines it. */
+  #decideKnownIssue(proposal: MemoryProposal, record: boolean): void {
+    this.knowledge.withdraw(proposal.id);
+    if (record) {
+      const issue = this.knownIssues.record(proposal, this.#teamMember());
+      log.info("Recorded a known issue", { title: issue.title, by: issue.recordedBy, customer: proposal.source.customerId });
+      this.#publishKnownIssues();
+    } else {
+      log.info("Declined a proposed known issue", { title: proposal.subject, customer: proposal.source.customerId });
+    }
+    this.#publishKnowledge();
+    const ticket = this.#tickets.get(proposal.source.customerId);
+    if (ticket?.sessionId === proposal.source.sessionId) this.changed(ticket);
+  }
+
+  /** Resolves a known issue: sessions created or reopened from now on aren't told it, and tiles lose its label. */
+  resolveKnownIssue(id: string): void {
+    const issue = this.knownIssues.get(id);
+    if (!issue) throw new HelpDeskError("not_found", "That known issue was resolved already.", 404);
+    if (this.#answering.has(id)) throw new HelpDeskError("busy", "Its matching tickets are being answered right now. Resolve it once that's done.", 409);
+    this.knownIssues.remove(id);
+    log.info("Resolved a known issue", { title: issue.title });
+    this.#publishKnownIssues();
+    for (const entry of issue.answer?.tickets ?? []) {
+      const ticket = this.#ticketBySession(entry.sessionId);
+      if (ticket) this.changed(ticket);
+    }
+  }
+
+  #ticketBySession(sessionId: string): TicketSession | undefined {
+    return this.#allTickets().find((ticket) => ticket.sessionId === sessionId);
+  }
+
+  /** Whether a ticket is still on the wall, and can still be written to. */
+  #onWall(ticket: TicketSession): boolean {
+    if (ticket instanceof PlayerTicketSession) return this.#players.get(ticket.ticketId) === ticket && !ticket.ending;
+    return ticket instanceof CustomerTicket && this.#tickets.get(ticket.customer.id) === ticket && !this.#run?.ending;
+  }
+
+  /**
+   * The open tickets a known issue's answer checks, players first as on the wall: those with a conversation that isn't
+   * resolved, failed, or ending, except the one the issue was learned in. With the customer's or player's words.
+   */
+  #openTickets(issue: KnownIssue): { readonly ticket: TicketSession; readonly entry: KnownIssueTicket; readonly text: string }[] {
+    const open = (ticket: TicketSession) => ticket.created && ticket.sessionId !== issue.source.sessionId && !["resolved", "failed", "opened"].includes(ticket.status());
+    const players = [...this.#players.values()]
+      .sort((a, b) => firstOpened(b, a))
+      .filter((ticket) => open(ticket) && !ticket.ending)
+      .map((ticket) => {
+        const view = ticket.view();
+        const words = view.items.flatMap((item) => (item.kind === "message" && item.from === "customer" ? [item.text] : [])).join("\n\n");
+        const text = [checkoutContext(view.checkout), words].filter(Boolean).join("\n\n");
+        return { ticket, entry: { sessionId: ticket.sessionId, ticketId: ticket.ticketId, name: view.player.name, state: "classifying" as const }, text };
+      });
+    const customers = [...this.#tickets.values()]
+      .filter(open)
+      .map((ticket) => ({
+        ticket,
+        entry: { sessionId: ticket.sessionId, customerId: ticket.customer.id, name: ticket.customer.name, state: "classifying" as const },
+        text: customerText(ticket) || ticket.customer.opening,
+      }));
+    return [...players, ...customers].filter((candidate) => candidate.text.trim());
+  }
+
+  /**
+   * Answers a known issue's matching tickets: the decision model classifies every open ticket (the customer's words) as
+   * about the issue or not, and each match's agent is sent the issue's update in a team note, so the reply comes from
+   * the agent, in the customer's own conversation. Tickets an earlier answer reached aren't checked again. Each
+   * ticket's outcome is published as it arrives; refunds and cancellations the agents ask for still wait for a person.
+   */
+  answerKnownIssue(id: string): KnownIssue {
+    const issue = this.knownIssues.get(id);
+    if (!issue) throw new HelpDeskError("not_found", "That known issue was resolved, or doesn't exist.", 404);
+    this.#requireConnected();
+    if (!this.#triage.enabled) {
+      throw new HelpDeskError("classification_off", "Answering matching tickets needs the decision model, which isn't set up. Help Desk's README shows how to turn it on.", 409);
+    }
+    if (!this.#triage.connected) throw new HelpDeskError("classification_unavailable", "The decision model's environment isn't connected yet. Try again in a moment.", 503);
+    if (this.#answering.has(id)) throw new HelpDeskError("busy", "Its matching tickets are being answered already.", 409);
+    if (this.#run?.ending) throw new HelpDeskError("busy", "The simulation is ending. Try again in a moment.", 409);
+    const onWall = new Set(this.#allTickets().map((ticket) => ticket.sessionId));
+    const replied = (issue.answer?.tickets ?? []).filter((entry) => entry.state === "replied" && onWall.has(entry.sessionId));
+    const done = new Set(replied.map((entry) => entry.sessionId));
+    const open = this.#openTickets(issue).filter((candidate) => !done.has(candidate.ticket.sessionId));
+    if (open.length === 0) {
+      throw new HelpDeskError(
+        "conflict",
+        replied.length > 0 ? "Every open ticket about it was sent its update already." : "There are no open tickets to check. Simulate customers, or wait for a player to write.",
+        409,
+      );
+    }
+    const answer: KnownIssueAnswer = { startedAt: new Date().toISOString(), startedBy: this.#teamMember(), tickets: [...open.map((candidate) => candidate.entry), ...replied] };
+    this.#answering.add(id);
+    this.knownIssues.answer(id, answer);
+    this.#publishKnownIssues();
+    for (const { ticket } of open) this.changed(ticket);
+    log.info("Answering a known issue's matching tickets", { title: issue.title, tickets: open.length });
+    void this.#answerAll(issue, open).finally(() => this.#answering.delete(id));
+    return this.knownIssues.get(id)!;
+  }
+
+  async #answerAll(issue: KnownIssue, open: readonly { readonly ticket: TicketSession; readonly text: string }[]): Promise<void> {
+    const batch = this.#triage.batch(matchQuestions(issue), MATCH);
+    try {
+      await Promise.all(
+        open.map(async ({ ticket, text }) => {
+          let matches: boolean;
+          try {
+            matches = (await batch.ask(text.length > MAX_TRIAGE_TEXT ? text.slice(-MAX_TRIAGE_TEXT) : text)).matches;
+          } catch (error) {
+            return this.#answered(issue.id, ticket, { state: "failed", message: errorText(error) });
+          }
+          if (!matches) return this.#answered(issue.id, ticket, { state: "no-match" });
+          if (!this.#onWall(ticket)) return this.#answered(issue.id, ticket, { state: "failed", matched: true, message: "This conversation ended before its update was sent." });
+          this.#answered(issue.id, ticket, { state: "replying", matched: true });
+          try {
+            const waiting = ticket.status() === "approval";
+            await ticket.sendTeamNote(updateNote(issue), HELP_DESK_AUTHOR, issue.id);
+            this.#answered(issue.id, ticket, {
+              state: "replied",
+              ...(waiting ? { message: "Queued: the agent replies once you answer the request it's waiting on." } : {}),
+            });
+          } catch (error) {
+            this.#answered(issue.id, ticket, { state: "failed", message: errorText(error) });
+          }
+        }),
+      );
+    } finally {
+      batch.close();
+    }
+    const answer = this.knownIssues.get(issue.id)?.answer;
+    if (!answer) return;
+    this.knownIssues.answer(issue.id, { ...answer, finishedAt: new Date().toISOString() });
+    this.#publishKnownIssues();
+    const count = (state: KnownIssueTicket["state"]) => answer.tickets.filter((entry) => entry.state === state).length;
+    log.info("Answered a known issue's matching tickets", { title: issue.title, checked: open.length, replied: count("replied"), failed: count("failed") });
+  }
+
+  /** One ticket's outcome in a known issue's answer. */
+  #answered(issueId: string, ticket: TicketSession, outcome: Pick<KnownIssueTicket, "state" | "matched" | "message">): void {
+    const answer = this.knownIssues.get(issueId)?.answer;
+    if (!answer) return;
+    const settled = outcome.state !== "classifying" && outcome.state !== "replying";
+    const tickets = answer.tickets.map((entry): KnownIssueTicket => {
+      if (entry.sessionId !== ticket.sessionId) return entry;
+      const { message: _previous, at: _at, ...rest } = entry;
+      return {
+        ...rest,
+        state: outcome.state,
+        ...(outcome.matched ? { matched: true } : {}),
+        ...(outcome.message ? { message: outcome.message } : {}),
+        ...(settled ? { at: new Date().toISOString() } : {}),
+      };
+    });
+    if (!this.knownIssues.answer(issueId, { ...answer, tickets })) return;
+    if (outcome.state === "failed") log.warn("Couldn't answer a ticket about a known issue", { session: ticket.sessionId, error: outcome.message });
+    this.#publishKnownIssues();
+    this.changed(ticket);
   }
 
   // ─── Players ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -599,7 +830,7 @@ export class HelpDesk implements TicketHost {
   }
 
   playerTicket(ticketId: string): PlayerTicket {
-    return this.#requirePlayer(ticketId).view();
+    return this.#playerView(this.#requirePlayer(ticketId));
   }
 
   /** Sends a message as the player (from their chat page, or from the wall). The first one starts the session. */
@@ -621,7 +852,7 @@ export class HelpDesk implements TicketHost {
     const ticket = this.#requirePlayer(ticketId);
     if (ticket.ending) throw new HelpDeskError("busy", "This ticket is being ended already.", 409);
     ticket.ending = true;
-    this.#publish({ type: "player", ticket: ticket.view() });
+    this.#publish({ type: "player", ticket: this.#playerView(ticket) });
     try {
       // A create in flight finishes first, so its session is deleted too.
       await ticket.settled();
@@ -1030,6 +1261,36 @@ export class HelpDesk implements TicketHost {
     this.changed(ticket);
   }
 
+  knownIssuesPrompt(person: "customer" | "player"): string {
+    return this.knownIssues.prompt(person);
+  }
+
+  proposeKnownIssue(ticket: CustomerTicket, report: KnownIssueReport): ToolResult {
+    const known = this.knownIssues.titled(report.title);
+    if (known) return { ok: true, alreadyKnown: true, update: known.update };
+    let proposal: MemoryProposal | undefined;
+    try {
+      proposal = this.knowledge.propose({
+        kind: "known-issue",
+        subject: report.title,
+        fact: report.update,
+        symptoms: report.symptoms,
+        customerId: ticket.customer.id,
+        customerName: ticket.customer.name,
+        sessionId: ticket.sessionId,
+      });
+    } catch (error) {
+      log.error("Couldn't keep a proposed known issue", { customer: ticket.customer.id, error: errorText(error) });
+      return { ok: false, error: "The known issue couldn't be kept right now." };
+    }
+    if (proposal) {
+      log.info("An agent proposed a known issue", { customer: ticket.customer.id, title: proposal.subject });
+      this.#publishKnowledge();
+      this.changed(ticket);
+    }
+    return { ok: true, sentTo: "a support team member, who records it for the whole desk" };
+  }
+
   proposal(ticket: CustomerTicket): MemoryProposal | undefined {
     return this.knowledge.proposals().find((proposal) => proposal.source.sessionId === ticket.sessionId);
   }
@@ -1040,7 +1301,7 @@ export class HelpDesk implements TicketHost {
       const timer = setTimeout(() => {
         this.#ticketTimers.delete(key);
         if (ticket instanceof PlayerTicketSession) {
-          if (this.#players.get(ticket.ticketId) === ticket) this.#publish({ type: "player", ticket: ticket.view() });
+          if (this.#players.get(ticket.ticketId) === ticket) this.#publish({ type: "player", ticket: this.#playerView(ticket) });
         } else if (ticket instanceof CustomerTicket && this.#tickets.get(ticket.customer.id) === ticket) {
           this.#publish({ type: "ticket", ticket: this.#view(ticket) });
         }

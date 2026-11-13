@@ -38,6 +38,7 @@ import {
   type TestReport,
   type TestSummary,
   type WorkOrder,
+  type WorkOrderGate,
   type WorkOrderMode,
   type WorkOrderSummary,
 } from "../../shared/types.js";
@@ -75,6 +76,7 @@ import {
   type RoutedInputs,
 } from "./inputs.js";
 import { factoryPermissions } from "./permissions.js";
+import { decideGate, gateActivity, openGate, parseDecision, parseGateDeclarations, parseOpenGate, parseOutcome, reportGate } from "./gates.js";
 import { PlanInputSchema, ReviewInputSchema, topologicalOrder, validatePlan, validateReview, type ValidReview } from "./plan.js";
 import {
   buildPrompt,
@@ -449,6 +451,7 @@ export class Factory {
     const described = describeInputs(inputs);
     const owner = this.#options.account();
     const created = now();
+    const gates = parseGateDeclarations(request.gates, inputs.origin !== undefined, created);
     const wo: MWorkOrder = {
       id: `wo_${randomUUID().replace(/-/g, "").slice(0, 10)}`,
       number: this.#store.nextWorkOrderNumber(),
@@ -465,6 +468,7 @@ export class Factory {
       ...(owner ? { owner } : {}),
       ...(inputs.origin ? { origin: inputs.origin } : {}),
       ...(described ? { inputs: described } : {}),
+      ...(gates.length ? { gates } : {}),
     };
     this.#store.saveWorkOrder(wo);
     this.#storeInputs(wo, inputs);
@@ -474,6 +478,7 @@ export class Factory {
       title,
       ...(inputs.origin ? { origin: inputs.origin.app } : {}),
       ...(described ? { context: described.context.length, projectFiles: described.project?.files ?? 0 } : {}),
+      ...(gates.length ? { gates: gates.map((gate) => gate.id).join(",") } : {}),
     });
     const snapshot = structuredClone(wo);
     this.#start(wo);
@@ -554,6 +559,7 @@ export class Factory {
     if ((request.context !== undefined && request.context !== null) || (request.project !== undefined && request.project !== null)) {
       throw new StationError("invalid_request", "GitHub work orders change the repository itself: put what the factory needs to know in the brief.");
     }
+    if (Array.isArray(request.gates) && request.gates.length > 0) throw new StationError("invalid_request", "GitHub work orders end in a pull request: they take no gates.");
     const origin = parseRoutedInputs({ ...request, context: undefined, project: undefined }).origin;
     const target = parseRepository(request.github.repository);
     if (!target) throw new StationError("invalid_request", "Pick a repository as owner/name.");
@@ -687,6 +693,49 @@ export class Factory {
   #requireGitHub(): GitHubApi {
     if (!this.#options.github) throw new StationError("platform_unavailable", "This factory isn't set up to work with GitHub.");
     return this.#options.github;
+  }
+
+  // ─── Gates ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+  /** The routing app's request on a gate (its deploy request): it waits for a person on the floor. */
+  openGate(id: string, gateId: string, body: unknown): WorkOrder {
+    return this.#changeGate(id, gateId, (wo, gate, at) => {
+      if (wo.status !== "completed") {
+        throw new StationError(
+          "conflict",
+          ACTIVE_WORK_ORDER_STATUSES.includes(wo.status) ? `${formatWorkOrderNumber(wo.number)} hasn't released yet.` : `${formatWorkOrderNumber(wo.number)} was ${wo.status}: there's nothing to deploy.`,
+        );
+      }
+      return openGate(gate, parseOpenGate(body, gate, at), at);
+    });
+  }
+
+  /** A person's decision on an open gate, as the factory's signed-in account. */
+  decideGate(id: string, gateId: string, body: unknown): WorkOrder {
+    const decision = parseDecision(body);
+    return this.#changeGate(id, gateId, (_wo, gate, at) => decideGate(gate, decision, this.#options.account()?.login, at));
+  }
+
+  /** The routing app's report: how the approved deploy went, or that its request was answered elsewhere. */
+  reportGate(id: string, gateId: string, body: unknown): WorkOrder {
+    const report = parseOutcome(body);
+    return this.#changeGate(id, gateId, (_wo, gate, at) => reportGate(gate, report, at));
+  }
+
+  #changeGate(id: string, gateId: string, change: (wo: WorkOrder, gate: WorkOrderGate, at: string) => WorkOrderGate): WorkOrder {
+    // A running work order's record is the run's; a finished one's is the store's.
+    const wo = (this.#runs.get(id)?.wo ?? this.#store.getWorkOrder(id)) as MWorkOrder | undefined;
+    if (!wo) throw new StationError("not_found", "That work order doesn't exist.");
+    const gate = wo.gates?.find((candidate) => candidate.id === gateId);
+    if (!gate) throw new StationError("not_found", `${formatWorkOrderNumber(wo.number)} has no ${gateId} gate.`);
+    const updated = change(wo, gate, now());
+    if (updated === gate) return structuredClone(wo);
+    wo.gates = wo.gates!.map((candidate) => (candidate.id === gateId ? updated : candidate));
+    this.#persist(wo);
+    const said = gateActivity(updated, wo.origin?.name ?? "The routing app");
+    this.#activity(wo, "release", said.text, said.level);
+    log.info("Gate changed", { id: wo.id, gate: gateId, state: updated.state, ...(updated.decision?.by ? { by: updated.decision.by } : {}) });
+    return structuredClone(wo);
   }
 
   async cancel(id: string): Promise<WorkOrder> {
@@ -3138,6 +3187,7 @@ export function toSummary(wo: WorkOrder): WorkOrderSummary {
     ...(wo.tests ? { tests: wo.tests } : {}),
     ...(wo.error ? { error: wo.error } : {}),
     ...(wo.origin ? { origin: wo.origin } : {}),
+    ...(wo.gates?.length ? { gates: wo.gates.map(({ id, kind, target, label, state }) => ({ id, kind, target, label, state })) } : {}),
     ...(wo.github
       ? {
           github: {

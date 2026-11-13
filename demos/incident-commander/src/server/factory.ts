@@ -1,7 +1,9 @@
 // Software Factory, for incidents whose fix it builds. Incident Commander sends it a work order (the service's code and
-// tests as the project to change in place, the incident as reference material), follows its status while the factory
-// plans, builds, reviews, and releases the fix, and takes the changed files from its release. Server to server, JSON:
-// the routing contract Help Desk and Data Desk share. People follow links to the factory's own pages.
+// tests as the project to change in place, the incident as reference material, and a deploy gate for the service),
+// follows its status while the factory plans, builds, reviews, and releases the fix, and takes the changed files from
+// its release. Copilot's deploy request then goes on the work order's deploy gate, where a person decides; this app
+// reads the decision, deploys, and reports how it went. Server to server, JSON: the routing contract Help Desk and Data
+// Desk share. People follow links to the factory's own pages.
 import type { AlertInfo, FactoryStatus, FactoryTests } from "../shared/types.js";
 import type { FactoryTarget } from "./config.js";
 import { isEvidence } from "./services.js";
@@ -51,6 +53,41 @@ export interface NewWorkOrder {
   readonly context?: readonly FactoryFile[];
   /** The codebase to change in place. */
   readonly project?: { readonly name: string; readonly files: readonly FactoryFile[] };
+  /** Steps after the release that wait for a person in the factory: the deploy request, decided there. */
+  readonly gates?: readonly { readonly kind: "deploy"; readonly target: string; readonly label?: string }[];
+}
+
+/** The work order's deploy gate (its ID). */
+export const DEPLOY_GATE = "deploy";
+
+/** What the app reads of a work order's gate. */
+export interface GateInfo {
+  readonly id: string;
+  /** `pending`, `open`, `approved`, `declined`, `deployed`, `failed`, or `closed`. */
+  readonly state: string;
+  readonly requestId?: string;
+  readonly decision?: { readonly requestId: string; readonly approve: boolean; readonly reason?: string; readonly by?: string; readonly at?: string };
+}
+
+/** `POST /api/work-orders/:id/gates/:gateId/request`: the deploy request, for a person in the factory. */
+export interface GateRequest {
+  readonly requestId: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly target: string;
+  readonly version?: string;
+  readonly previousVersion?: string;
+  readonly tests?: string;
+  readonly files?: readonly string[];
+  readonly url?: string;
+}
+
+/** `POST /api/work-orders/:id/gates/:gateId/outcome`. */
+export interface GateReport {
+  readonly requestId: string;
+  readonly outcome: "deployed" | "failed" | "closed";
+  readonly message?: string;
+  readonly version?: string;
 }
 
 /** What the app reads of a work order (or of its summary in the factory's list). */
@@ -64,6 +101,8 @@ export interface WorkOrderInfo {
   readonly tests?: FactoryTests;
   readonly error?: { readonly code: string; readonly message: string };
   readonly origin?: WorkOrderOrigin;
+  /** Absent from a factory that doesn't know gates. */
+  readonly gates?: readonly GateInfo[];
 }
 
 /** `GET /api/work-orders/:id/release`. */
@@ -99,6 +138,10 @@ export interface FactoryClient {
   find(key: string, since: string): Promise<WorkOrderInfo | undefined>;
   /** The released files. Answers 404 (a `FactoryError`) until the work order is released. */
   release(workOrderId: string): Promise<ReleaseFiles>;
+  /** Puts the deploy request on the work order's gate, for a person in the factory. The same `requestId` again changes nothing. */
+  openGate(workOrderId: string, gateId: string, request: GateRequest): Promise<WorkOrderInfo>;
+  /** Tells the gate how the approved deploy went, or that the request was answered here or ended. */
+  reportGate(workOrderId: string, gateId: string, report: GateReport): Promise<WorkOrderInfo>;
 }
 
 // ─── Reading the factory's answers ───────────────────────────────────────────────────────────────────────────
@@ -128,6 +171,28 @@ function readOrigin(value: unknown): WorkOrderOrigin | undefined {
   };
 }
 
+function readGates(value: unknown): GateInfo[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const gates: GateInfo[] = [];
+  for (const item of value) {
+    if (!isObject(item) || typeof item.id !== "string" || typeof item.state !== "string") continue;
+    const request = isObject(item.request) && typeof item.request.requestId === "string" ? item.request.requestId : undefined;
+    const raw = item.decision;
+    const decision =
+      isObject(raw) && typeof raw.requestId === "string" && typeof raw.approve === "boolean"
+        ? {
+            requestId: raw.requestId,
+            approve: raw.approve,
+            ...(typeof raw.reason === "string" && raw.reason.trim() ? { reason: clip(raw.reason.trim(), 500) } : {}),
+            ...(typeof raw.by === "string" && raw.by ? { by: clip(raw.by, 100) } : {}),
+            ...(typeof raw.at === "string" ? { at: raw.at } : {}),
+          }
+        : undefined;
+    gates.push({ id: item.id, state: item.state, ...(request ? { requestId: request } : {}), ...(decision ? { decision } : {}) });
+  }
+  return gates;
+}
+
 function readWorkOrder(value: unknown, httpStatus: number): WorkOrderInfo {
   const fields = isObject(value) ? value : {};
   const { id, number, title, status, createdAt, taskCount, error } = fields;
@@ -136,6 +201,7 @@ function readWorkOrder(value: unknown, httpStatus: number): WorkOrderInfo {
   }
   const tests = readTests(fields.tests);
   const origin = readOrigin(fields.origin);
+  const gates = readGates(fields.gates);
   const failure = isObject(error) && typeof error.message === "string" ? { code: typeof error.code === "string" ? error.code : "failed", message: error.message } : undefined;
   return {
     id,
@@ -147,6 +213,7 @@ function readWorkOrder(value: unknown, httpStatus: number): WorkOrderInfo {
     ...(tests ? { tests } : {}),
     ...(failure ? { error: failure } : {}),
     ...(origin ? { origin } : {}),
+    ...(gates ? { gates } : {}),
   };
 }
 
@@ -215,6 +282,16 @@ export class SoftwareFactory implements FactoryClient {
   async release(workOrderId: string): Promise<ReleaseFiles> {
     const { body, status } = await this.#call("GET", `/api/work-orders/${encodeURIComponent(workOrderId)}/release`, undefined, 30_000);
     return readRelease(body, status);
+  }
+
+  async openGate(workOrderId: string, gateId: string, request: GateRequest): Promise<WorkOrderInfo> {
+    const { body, status } = await this.#call("POST", `/api/work-orders/${encodeURIComponent(workOrderId)}/gates/${encodeURIComponent(gateId)}/request`, request);
+    return readWorkOrder(body, status);
+  }
+
+  async reportGate(workOrderId: string, gateId: string, report: GateReport): Promise<WorkOrderInfo> {
+    const { body, status } = await this.#call("POST", `/api/work-orders/${encodeURIComponent(workOrderId)}/gates/${encodeURIComponent(gateId)}/outcome`, report);
+    return readWorkOrder(body, status);
   }
 
   async #call(method: "GET" | "POST", path: string, payload?: unknown, timeoutMs = 15_000): Promise<{ body: unknown; status: number }> {
@@ -447,6 +524,8 @@ export function fixWorkOrder(input: FixOrderInput): NewWorkOrder {
       { path: "INCIDENT.md", content: incidentContext(input), description: "The incident: the alert, the root cause and its evidence, the failing path, the deploy that caused it, and the errors in the production logs" },
     ],
     project: { name: service, files: projectFiles(input.workspace) },
+    // The deploy request is decided on the work order, in the factory; this app keeps deploying it.
+    gates: [{ kind: "deploy", target: service }],
   };
 }
 

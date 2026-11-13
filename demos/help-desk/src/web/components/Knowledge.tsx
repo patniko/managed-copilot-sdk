@@ -1,4 +1,4 @@
-import { BookIcon, CheckIcon, LightBulbIcon, TrashIcon, XIcon } from "@primer/octicons-react";
+import { AlertIcon, BookIcon, CheckIcon, LightBulbIcon, TrashIcon, XIcon } from "@primer/octicons-react";
 import { useState } from "react";
 import type { KnowledgeEntry, MemoryProposal } from "../../shared/types.js";
 import { customerHref } from "../lib/router.js";
@@ -72,15 +72,20 @@ function Source({ source, at, verb, title }: { readonly source: KnowledgeEntry["
   );
 }
 
-/** A fact an agent proposed: the operator adds it or not. The agent's conversation never hears which. */
+/**
+ * A fact an agent proposed, or a known issue: the operator adds (records) it or not. The agent's conversation never
+ * hears which.
+ */
 function ProposalRow({ proposal }: { readonly proposal: MemoryProposal }) {
   const busy = useStore((state) => Boolean(state.answering[proposal.id]));
+  const issue = proposal.kind === "known-issue";
+  const Icon = issue ? AlertIcon : LightBulbIcon;
   return (
     <li className="Box-row flex min-w-0 flex-wrap items-start gap-3 py-2.5">
-      <LightBulbIcon size={16} className="mt-0.5 shrink-0 text-fg-attention" />
+      <Icon size={16} className="mt-0.5 shrink-0 text-fg-attention" />
       <div className="min-w-0 flex-1 basis-60">
-        <div className="text-sm">
-          <span className="text-fg-muted">Proposed: </span>
+        <div className="text-sm" title={issue && proposal.symptoms ? `Customers describe it as: ${proposal.symptoms}` : undefined}>
+          <span className="text-fg-muted">{issue ? "Proposed known issue: " : "Proposed: "}</span>
           <span className="font-semibold">{proposal.subject}</span>
           <span className="text-fg-muted"> · </span>
           {proposal.fact}
@@ -90,11 +95,11 @@ function ProposalRow({ proposal }: { readonly proposal: MemoryProposal }) {
       <div className="flex shrink-0 gap-2">
         <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void decide(proposal.id, false)}>
           <XIcon size={16} />
-          Don't add
+          {issue ? "Don't record" : "Don't add"}
         </button>
         <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void decide(proposal.id, true)}>
           <CheckIcon size={16} className="text-fg-success!" />
-          Add
+          {issue ? "Record known issue" : "Add"}
         </button>
       </div>
     </li>
