@@ -26,6 +26,16 @@ export function makeHit(): GroundHit {
   return { h: 0, nx: 0, ny: 1, nz: 0, surface: 'grass', feature: null, trailDist: 1e4 };
 }
 
+/** How far the trail ribbons sit above the terrain they drape over, m (it keeps them clear of the terrain mesh). */
+export const TRAIL_LIFT = 0.06;
+/** How far past a trail's edge its ribbon fades out, m (its outermost vertices, at 1.35 × the half-width). */
+export const TRAIL_FADE = 0.35 * 0.9;
+
+/** How far above the terrain the drawn trail is at `trailDist` (m past the trail's edge; negative on the trail). */
+export function trailLift(trailDist: number): number {
+  return TRAIL_LIFT * Math.min(1, Math.max(0, 1 - trailDist / TRAIL_FADE));
+}
+
 /** Physics-facing view of the world surface. */
 export class Ground {
   private featureGrid = new Map<number, JumpFeature[]>();
@@ -82,6 +92,16 @@ export class Ground {
 
   heightAt(x: number, z: number): number {
     const t = this.terrain.heightAt(x, z);
+    const f = this.featureHeight(x, z).h;
+    return f > t ? f : t;
+  }
+
+  /**
+   * The ground's height as drawn: like `heightAt`, but on a trail its ribbon sits TRAIL_LIFT above the terrain. Wheels
+   * stand on this, or the ribbon paints over the bottom of the tyres.
+   */
+  drawnHeightAt(x: number, z: number): number {
+    const t = this.terrain.heightAt(x, z) + trailLift(this.terrain.trailDistAt(x, z));
     const f = this.featureHeight(x, z).h;
     return f > t ? f : t;
   }

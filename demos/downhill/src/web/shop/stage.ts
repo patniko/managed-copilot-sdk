@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { defaultRiderPose, type BikeVisual, type CharacterDef, type RiderRig } from '../game/rider/types';
+import { standingOn } from '../game/bike';
 import type { World } from '../world/world';
 
 const UP = new THREE.Vector3(0, 1, 0);
@@ -43,10 +44,18 @@ export class ShopStage {
       if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).castShadow = true;
     });
     root.position.copy(this.spot);
-    root.rotation.y = -this.world.start.heading - 0.9 + this.turn;
     this.world.scene.add(root);
     this.figure = { key, bike, rider, root };
+    this.place(root);
     this.cheer = 1.2;
+  }
+
+  /** Stands the bike on the trail facing the way it's turned to: both wheels on the ground, whatever the slope. */
+  private place(root: THREE.Group): void {
+    const heading = this.world.start.heading + 0.9 - this.turn;
+    const { y, pitch } = standingOn(this.world.ground, this.spot.x, this.spot.z, heading);
+    root.position.y = y;
+    root.rotation.set(-pitch, -heading, 0, 'YXZ');
   }
 
   clear(): void {
@@ -68,7 +77,7 @@ export class ShopStage {
     this.turn += dt * 0.42;
     this.cheer = Math.max(0, this.cheer - dt);
     if (f) {
-      f.root.rotation.y = -this.world.start.heading - 0.9 + this.turn;
+      this.place(f.root);
       const pose = this.pose;
       pose.time = time;
       pose.speed = 0;

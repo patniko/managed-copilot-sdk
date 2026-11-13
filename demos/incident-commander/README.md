@@ -29,6 +29,9 @@ request now waits on the platform, and the app holds no connection to the sessio
   pages Incident Commander when checkout rejects its launch code, and takes the fix back
   ([From Downhill's shop](#from-downhills-shop)). **Simulate an incident** is the labeled demo: a sample alert for a
   bundled checkout service.
+- **Real logs, live.** Services stream OpenTelemetry logs to an OTLP/HTTP endpoint, and the board and each incident show
+  them as they arrive ([Stream your logs](#stream-your-logs)). Play Downhill and every trick, crash, and checkout
+  streams in; the rejected code shows up seconds before the incident it opens.
 - **The fix, routed through Software Factory.** Choose **Fix with: Software Factory** and Copilot triages as usual,
   then sends the fix to [Software Factory](../software-factory/README.md) as a work order (the service's code as the
   project, the incident as its context) while a worker writes the repro. The factory plans, builds, reviews, and
@@ -240,6 +243,24 @@ The service comes from the `service`, `app`, `component`, or `job` label. Copilo
 Incident Commander has one: the bundled `checkout`, a folder of your own, or a service over HTTP (below). Without one,
 it records what the alert says and what to check next.
 
+## Stream your logs
+
+Services can send their OpenTelemetry logs too, and people watch them arrive: **Live telemetry** on the board shows
+every service's, newest first, and each incident's page shows its own service's next to the timeline. New records
+flash as they land, warnings and errors are tinted, a click shows a record's attributes, and **Pause** holds the list
+still while records keep arriving behind it.
+
+- **The endpoint.** `POST /api/otlp/v1/logs`: OTLP/HTTP with JSON encoding (`Content-Type: application/json`,
+  optionally gzip-compressed), with the alert secret as a bearer token. Point an OpenTelemetry SDK's or Collector's
+  OTLP/HTTP logs exporter at it; the bell in the header shows the URL. Protobuf gets a 415 saying to switch to JSON
+  (the Collector's `otlphttp` exporter: `encoding: json`). The answer is OTLP's `{ "partialSuccess": {} }`, with
+  `rejectedLogRecords` past 5,000 records in one export.
+- **What's kept.** Each record's time, `service.name` (normalized like an alert's service), severity, event name,
+  body, attributes, and trace ID, as text. Secret-named attributes and token-shaped values are masked. The last 1,000
+  records stay in memory, not on disk: a restart starts the stream empty. A browser gets the last 300 when it
+  connects. `GET /api/telemetry?service=<name>` returns the recent ones.
+- **Display only.** Copilot doesn't read the stream: an incident's evidence is still the service's `logs/` folder.
+
 ## Your own services and deploys
 
 | Setting | What it does |
@@ -289,6 +310,10 @@ code.** Under `aspire run`, the root AppHost connects the two apps: Incident Com
 (`<downhill>/api/deploys`), Downhill pages Incident Commander with the alert secret, and the two share the deploy
 secret.
 
+0. **The stream.** Before anything breaks, Downhill's server streams its OpenTelemetry logs here with the alert
+   secret: each drop-in, trick, crash, and finish, the shop's carts and checkouts, and its own log lines, all as
+   `downhill-shop`. They show up in **Live telemetry** on the board as you play; the rejected `trail15` is a WARN
+   `shop.promo_rejected` line, followed by `alert.fired`.
 1. **The alert.** When checkout rejects the launch code, Downhill's server posts the JSON shape to `/api/alerts`:
    `{ "id": "downhill-promo-rejected", "service": "downhill-shop", "severity": "major", "title": …, "summary": … }`.
    That opens a SEV2 incident for `downhill-shop`, at the version the shop reports; the same alert again adds to it.
@@ -326,6 +351,7 @@ secret.
 | `src/server/runbook.ts`, `tools.ts` | The coordinator's instructions (for each fix route) and the app's tools |
 | `src/server/factory.ts` | Software Factory: the work order for a fix (project, `INCIDENT.md`, origin), its API, and the fix in its release |
 | `src/server/alerts.ts`, `deploy.ts`, `services.ts` | Alert parsing and auth, deploy targets, the service catalog (your folders, services over HTTP, the demo) |
+| `src/server/telemetry.ts` | OpenTelemetry logs in: the OTLP/HTTP JSON parser and the recent records streamed to browsers |
 | `src/server/demo.ts`, `demo-services/checkout` | The labeled demo: the checkout service and its generated production logs |
 | `src/web` | The UI (React, Tailwind with `@managed-copilot/github-theme`, Octicons) |
 | `src/scripts/happy-path.ts` | The scripted real run |

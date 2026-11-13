@@ -7,6 +7,7 @@ import { World } from './world/world';
 import { loadEnvironments } from './world/envs';
 import type { EnvironmentDef } from './world/types';
 import { GameSession } from './game/session';
+import { standingOn } from './game/bike';
 import { defaultRiderPose, dressed, type BikeVisual, type CharacterDef, type CharacterId, type RiderRig } from './game/rider/types';
 import { UI, type Settings } from './ui/ui';
 import { applyPost } from './viewer';
@@ -15,6 +16,8 @@ import { ShopScreen, type PreviewLook } from './shop/screen';
 import { browserStorage } from './shop/shop';
 import { ShopStage } from './shop/stage';
 import { SupportPanel } from './support/panel';
+import type { SessionUI } from './game/session';
+import { GameTelemetry, type GameEventInput } from './telemetry';
 
 type AppState = 'boot' | 'title' | 'select' | 'loading' | 'play' | 'shop';
 
@@ -27,6 +30,34 @@ async function loadOptional<T>(glob: Record<string, () => Promise<unknown>>, key
     console.error(e);
     return null;
   }
+}
+
+/** The HUD, telling telemetry what happens on a ride: the drop-in, checkpoints, tricks, crashes, and the finish. */
+function trackedUi(ui: SessionUI, track: (event: GameEventInput) => void, crashKmh: () => number | undefined): SessionUI {
+  return {
+    trick: (report, combo, gained) => {
+      ui.trick(report, combo, gained);
+      track({ type: 'trick', title: report.title, points: gained, combo, perfect: report.perfect });
+    },
+    live: (names) => ui.live(names),
+    message: (text, kind) => {
+      ui.message(text, kind);
+      if (kind === 'crash') track({ type: 'crash', reason: text, kmh: crashKmh() });
+    },
+    countdown: (n) => {
+      ui.countdown(n);
+      if (n === 0) track({ type: 'ride_started' });
+    },
+    checkpoint: (i, total) => {
+      ui.checkpoint(i, total);
+      track({ type: 'checkpoint', checkpoint: i, total });
+    },
+    finish: (stats) => {
+      ui.finish(stats);
+      track({ type: 'ride_finished', seconds: stats.time, score: stats.score, tricks: stats.tricks, crashes: stats.crashes });
+    },
+    fade: (amount) => ui.fade(amount),
+  };
 }
 
 export async function startApp(params: URLSearchParams) {
@@ -94,6 +125,8 @@ export async function startApp(params: URLSearchParams) {
   );
   // The Downhill Shop, and Contoso Outdoors' support chat (its AI agent, in Help Desk), open from anywhere
   const names = Object.fromEntries(characters.map((c) => [c.id, c.name])) as Record<CharacterId, string>;
+  // What the player does streams to Incident Commander (through Downhill's server, as OpenTelemetry logs)
+  const telemetry = new GameTelemetry();
   const support = new SupportPanel(ui.root, () => audio?.playUiClick());
   const shop = new ShopScreen(ui.root, browserStorage(), names, {
     back: () => goTitle(),
@@ -104,6 +137,7 @@ export async function startApp(params: URLSearchParams) {
       ui.selChar = char.id;
     },
     support: (request) => support.open(request),
+    added: (sku) => telemetry.track(shop.state.rider, { type: 'cart_added', sku }),
     click: () => audio?.playUiClick(),
   });
   let stage: ShopStage | null = null;
@@ -214,9 +248,11 @@ export async function startApp(params: URLSearchParams) {
         if ((o as THREE.Mesh).isMesh) (o as THREE.Mesh).castShadow = true;
       });
       const p = new THREE.Vector3(st.x, 0, st.z).addScaledVector(right, (i - 1) * 2.3).addScaledVector(fwd, 14 - Math.abs(i - 1) * 1.2);
-      p.y = world!.ground.heightAt(p.x, p.z);
+      const heading = st.heading + 0.6;
+      const stand = standingOn(world!.ground, p.x, p.z, heading);
+      p.y = stand.y;
       root.position.copy(p);
-      root.rotation.y = -st.heading - 0.6;
+      root.rotation.set(-stand.pitch, -heading, 0, 'YXZ');
       world!.scene.add(root);
       preview.push({ def, bike, rider, root });
     });
@@ -269,6 +305,7 @@ export async function startApp(params: URLSearchParams) {
     }
     input.suspend(true);
     shop.open();
+    telemetry.track(shop.state.rider, { type: 'shop_opened' });
     audio?.setAmbience('menu');
     post.fade = 0;
   }
@@ -296,7 +333,10 @@ export async function startApp(params: URLSearchParams) {
     session?.dispose();
     session = null;
     await loadWorld(e);
-    session = new GameSession(world!, dress(char), input, audio, ui, { autopilot, aspect: window.innerWidth / window.innerHeight });
+    const rider = char.id;
+    const where = { world: e.id, worldName: e.name, ...(autopilot ? { bot: true } : {}) };
+    const track = (event: GameEventInput) => telemetry.track(rider, { ...where, ...event } as GameEventInput);
+    session = new GameSession(world!, dress(char), input, audio, trackedUi(ui, track, () => session?.crashLog.at(-1)?.kmh), { autopilot, aspect: window.innerWidth / window.innerHeight });
     session.player.physics.assist = ui.settings.assist ? 1 : 0;
     const main = world!.trails.main;
     ui.setCheckpointMarkers(world!.gates.filter((g) => g.kind === 'checkpoint').map((g) => g.s / (main.length - 45)));

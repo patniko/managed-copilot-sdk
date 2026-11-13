@@ -1,6 +1,7 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
+import { gunzipSync } from "node:zlib";
 import { isManagedCopilotError } from "@managed-copilot/sdk";
 import type { AlertsAccepted, ApiErrorBody, CreatedIncident, DecisionRequest, FixRoute, NoteRequest, SettingsRequest, SimulateRequest } from "../shared/types.js";
 import { authorized, parseAlertPayload } from "./alerts.js";
@@ -8,10 +9,12 @@ import type { Commander } from "./commander.js";
 import { AppError } from "./errors.js";
 import type { EventHub } from "./hub.js";
 import { log } from "./log.js";
+import { MAX_OTLP_BYTES, OTLP_LOGS_PATH, type TelemetryFeed } from "./telemetry.js";
 
 export interface ApiContext {
   readonly commander: Commander;
   readonly hub: EventHub;
+  readonly telemetry: TelemetryFeed;
 }
 
 type Next = () => void;
@@ -83,6 +86,35 @@ async function readJson<T>(req: IncomingMessage, limit = 64 * 1024, { optional =
 
 const FIX_ROUTES: readonly FixRoute[] = ["workers", "factory"];
 
+/** An OTLP/HTTP export's JSON body, gzip-compressed or not (the Collector compresses by default). */
+async function readOtlpJson(req: IncomingMessage): Promise<unknown> {
+  const type = req.headers["content-type"] ?? "";
+  if (/^application\/x-protobuf\b/i.test(type)) {
+    throw new AppError(
+      "unsupported_media_type",
+      "Send OTLP/HTTP logs as JSON (Content-Type: application/json), not protobuf. OpenTelemetry's JavaScript OTLP/HTTP log exporter sends JSON; with the OpenTelemetry Collector, set encoding: json on its otlphttp exporter.",
+      415,
+    );
+  }
+  if (!/^application\/json\b/i.test(type)) throw new AppError("unsupported_media_type", "Send OTLP/HTTP logs as JSON (Content-Type: application/json).", 415);
+  const encoding = (req.headers["content-encoding"] ?? "identity").trim().toLowerCase();
+  if (encoding !== "identity" && encoding !== "gzip") throw new AppError("unsupported_media_type", "Send the export uncompressed or gzip-compressed.", 415);
+  let raw = await readRaw(req, MAX_OTLP_BYTES);
+  if (encoding === "gzip") {
+    try {
+      raw = gunzipSync(raw, { maxOutputLength: MAX_OTLP_BYTES });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ERR_BUFFER_TOO_LARGE") throw new AppError("payload_too_large", "The export is too large: send at most 4 MB at a time.", 413);
+      throw new AppError("invalid_request", "The export says it's gzip-compressed, but it isn't.");
+    }
+  }
+  try {
+    return JSON.parse(raw.toString("utf8"));
+  } catch {
+    throw new AppError("invalid_request", "The export isn't valid JSON.");
+  }
+}
+
 /**
  * Blocks DNS rebinding: only loopback names may address this server. `*.localhost` names always resolve to loopback
  * (RFC 6761); `INCIDENT_ALLOWED_HOSTS` adds the deployed app's host names.
@@ -149,12 +181,12 @@ class Router {
   }
 }
 
-function buildRouter({ commander, hub }: ApiContext): Router {
+function buildRouter({ commander, hub, telemetry }: ApiContext): Router {
   const router = new Router();
 
   router.add("GET", "/api/health", (_req, res) => sendJson(res, 200, { status: "ok", platform: commander.platform.status.state }));
   router.add("GET", "/api/state", (_req, res) => sendJson(res, 200, commander.state()));
-  router.add("GET", "/api/events", (req, res) => hub.attach(req, res, commander.initialEvents()));
+  router.add("GET", "/api/events", (req, res) => hub.attach(req, res, [...commander.initialEvents(), telemetry.snapshot()]));
   router.add("GET", "/api/incidents/:id", (_req, res, params) => sendJson(res, 200, commander.view(params.id!)));
   router.add("DELETE", "/api/incidents/:id", async (_req, res, params) => {
     await commander.delete(params.id!);
@@ -196,6 +228,18 @@ function buildRouter({ commander, hub }: ApiContext): Router {
     const alerts = parseAlertPayload(await readJson<unknown>(req, 256 * 1024));
     const accepted: AlertsAccepted = { incidents: await commander.ingest(alerts) };
     sendJson(res, 202, accepted);
+  });
+  // OpenTelemetry logs (OTLP/HTTP, JSON), with the alert secret: streamed live to the browsers.
+  router.add("POST", OTLP_LOGS_PATH, async (req, res) => {
+    const secret = commander.config.alertSecret;
+    if (!secret) throw new AppError("telemetry_not_configured", "Set INCIDENT_ALERT_SECRET to accept OpenTelemetry logs: services send it as a bearer token, as alerts do.", 503);
+    if (!authorized(req.headers.authorization, secret)) throw new AppError("unauthorized", "Send the alert secret as a bearer token (Authorization: Bearer <secret>).", 401);
+    sendJson(res, 200, telemetry.ingest(await readOtlpJson(req)));
+  });
+  // The recent telemetry, oldest first (`?service=` for one service's).
+  router.add("GET", "/api/telemetry", (req, res) => {
+    const service = new URL(req.url ?? "/", "http://localhost").searchParams.get("service")?.trim() || undefined;
+    sendJson(res, 200, { records: telemetry.recent(service) });
   });
   // The platform's signed webhook: session.action_required, session.idle, session.failed, and worker.*.
   router.add("POST", "/api/copilot-events", async (req, res) => {

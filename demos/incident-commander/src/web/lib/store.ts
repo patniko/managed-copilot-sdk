@@ -1,8 +1,11 @@
 import { useSyncExternalStore } from "react";
-import type { AppSettings, IncidentSummary, IncidentView, IntegrationsView, PlatformStatus, ServerEvent } from "../../shared/types.js";
+import type { AppSettings, IncidentSummary, IncidentView, IntegrationsView, PlatformStatus, ServerEvent, TelemetryRecord } from "../../shared/types.js";
 import { api, errorMessage } from "./api.js";
 
 export type Connection = "connecting" | "open" | "reconnecting";
+
+/** Telemetry records kept in the browser. */
+const KEEP_TELEMETRY = 500;
 
 export interface StoreState {
   readonly phase: "loading" | "ready" | "error";
@@ -15,9 +18,15 @@ export interface StoreState {
   readonly incidents: readonly IncidentSummary[];
   readonly views: Readonly<Record<string, IncidentView>>;
   readonly viewErrors: Readonly<Record<string, string>>;
+  /** Services' recent OpenTelemetry log records, oldest first. */
+  readonly telemetry: readonly TelemetryRecord[];
+  /** When the last new records arrived (this browser's clock). */
+  readonly telemetryAt?: number;
+  /** The last record that was already there when the stream opened: later ones are new, and show it. */
+  readonly telemetryBaseline: number;
 }
 
-let state: StoreState = { phase: "loading", connection: "connecting", incidents: [], views: {}, viewErrors: {} };
+let state: StoreState = { phase: "loading", connection: "connecting", incidents: [], views: {}, viewErrors: {}, telemetry: [], telemetryBaseline: 0 };
 const listeners = new Set<() => void>();
 
 function setState(update: (current: StoreState) => StoreState): void {
@@ -78,6 +87,14 @@ function apply(event: ServerEvent): void {
         return { ...current, views: { ...current.views, [event.incident.id]: event.incident }, viewErrors: without(current.viewErrors, event.incident.id) };
       case "removed":
         return { ...current, incidents: current.incidents.filter((incident) => incident.id !== event.id), views: without(current.views, event.id) };
+      case "telemetry": {
+        if (event.reset) {
+          const last = event.records.at(-1);
+          return { ...current, telemetry: event.records.slice(-KEEP_TELEMETRY), telemetryBaseline: last ? Number(last.id.slice(1)) || 0 : 0 };
+        }
+        if (!event.records.length) return current;
+        return { ...current, telemetry: [...current.telemetry, ...event.records].slice(-KEEP_TELEMETRY), telemetryAt: Date.now() };
+      }
     }
   });
 }
@@ -89,7 +106,7 @@ export function connect(): void {
   if (source) return;
   void loadState();
   source = new EventSource("/api/events");
-  for (const type of ["platform", "integrations", "settings", "incidents", "incident", "removed"] as const) {
+  for (const type of ["platform", "integrations", "settings", "incidents", "incident", "removed", "telemetry"] as const) {
     source.addEventListener(type, (message) => {
       try {
         apply(JSON.parse((message as MessageEvent<string>).data) as ServerEvent);

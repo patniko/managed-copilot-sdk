@@ -3,6 +3,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { paintMaterial, patchMaterial } from '../render/globals';
 import { hash2 } from '../core/rng';
 import type { JumpFeature } from './features';
+import { TRAIL_LIFT } from './ground';
 import type { TerrainData } from './terrain';
 import type { Trail, TrailNetwork } from './trails';
 import type { CourseSpec } from './types';
@@ -35,6 +36,7 @@ export function buildTrailRibbons(net: TrailNetwork, terrain: TerrainData, cours
 
 function ribbon(t: Trail, terrain: TerrainData, c: number[], e: number[]): THREE.BufferGeometry {
   const n = t.x.length;
+  // the ribbon's outermost vertices: 1.35 × the half-width (TRAIL_FADE past the edge), faded out
   const offs = [-1.35, -1.0, -0.55, 0, 0.55, 1.0, 1.35];
   const k = offs.length;
   const pos = new Float32Array(n * k * 3);
@@ -52,7 +54,7 @@ function ribbon(t: Trail, terrain: TerrainData, c: number[], e: number[]): THREE
       const z = t.z[i] + rz * v;
       const p = (i * k + j) * 3;
       pos[p] = x;
-      pos[p + 1] = terrain.heightAt(x, z) + 0.06;
+      pos[p + 1] = terrain.heightAt(x, z) + TRAIL_LIFT;
       pos[p + 2] = z;
       terrain.normalAt(x, z, nn, 0.6);
       nor[p] = nn.x;

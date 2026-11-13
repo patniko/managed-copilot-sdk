@@ -4,14 +4,16 @@ import { createServer, request, type IncomingMessage, type Server } from "node:h
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AlertsAccepted, AppSettings, AppState, CreatedIncident, IncidentView } from "../src/shared/types.js";
+import type { AlertsAccepted, AppSettings, AppState, CreatedIncident, IncidentView, ServerEvent, TelemetryRecord } from "../src/shared/types.js";
 import type { AppConfig } from "../src/server/config.js";
 import { Commander } from "../src/server/commander.js";
 import { createRequestHandler, hostAllowed } from "../src/server/http.js";
 import { EventHub } from "../src/server/hub.js";
 import { ServiceCatalog } from "../src/server/services.js";
 import { Store } from "../src/server/store.js";
+import { TelemetryFeed } from "../src/server/telemetry.js";
 import { deployRequest, FakeFactory, FakePlatform, FakeRemoteService, settle, SHOP_PROMOTIONS, shopFiles, testConfig, worker } from "./fakes.js";
 
 let server: Server;
@@ -26,7 +28,7 @@ async function serve(config: AppConfig, catalog = new ServiceCatalog(config.demo
   hub = new EventHub();
   const commander = new Commander(config, platform, new Store(mkdtempSync(join(tmpdir(), "incident-http-"))), catalog, hub);
   commander.start();
-  server = createServer(createRequestHandler({ commander, hub }, join(tmpdir(), "no-web-root")));
+  server = createServer(createRequestHandler({ commander, hub, telemetry: new TelemetryFeed(hub) }, join(tmpdir(), "no-web-root")));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://localhost:${(server.address() as AddressInfo).port}`;
 }
@@ -76,6 +78,7 @@ describe("the API", () => {
       webhookConfigured: true,
       deployConfigured: false,
       factory: { configured: false },
+      telemetryUrl: "http://localhost:7445/api/otlp/v1/logs",
     });
     expect(state.settings).toEqual({ fixRoute: "workers" });
     expect(state.incidents).toEqual([]);
@@ -193,6 +196,95 @@ describe("the API", () => {
     });
     expect(page.status).toBe(503);
     expect(page.body).toContain("isn't built yet");
+  });
+});
+
+/** An OTLP/HTTP JSON logs export, as OpenTelemetry's JavaScript exporter sends it. */
+const OTLP_EXPORT = {
+  resourceLogs: [
+    {
+      resource: { attributes: [{ key: "service.name", value: { stringValue: "downhill-shop" } }, { key: "service.version", value: { stringValue: "1.0.0" } }], droppedAttributesCount: 0 },
+      scopeLogs: [
+        {
+          scope: { name: "downhill", version: "1.0.0" },
+          logRecords: [
+            {
+              timeUnixNano: "1794523800123000000",
+              observedTimeUnixNano: "1794523800124000000",
+              severityNumber: 13,
+              severityText: "WARN",
+              body: { stringValue: "Checkout rejected code trail15 for Mona: Invalid code." },
+              eventName: "shop.promo_rejected",
+              attributes: [
+                { key: "code", value: { stringValue: "trail15" } },
+                { key: "subtotal_cents", value: { intValue: 499 } },
+                { key: "perfect", value: { boolValue: true } },
+                { key: "api_token", value: { stringValue: "abc" } },
+              ],
+              droppedAttributesCount: 0,
+            },
+            {
+              timeUnixNano: "0",
+              observedTimeUnixNano: "1794523801000000000",
+              severityText: "error",
+              body: { kvlistValue: { values: [{ key: "ok", value: { boolValue: false } }] } },
+              attributes: [{ key: "event.name", value: { stringValue: "ride.crash" } }],
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+describe("OpenTelemetry logs", () => {
+  const otlp = (body: string | Buffer, headers: Record<string, string> = {}) =>
+    fetch(`${base}/api/otlp/v1/logs`, { method: "POST", headers: { "content-type": "application/json", ...AUTH, ...headers }, body });
+
+  it("takes OTLP/HTTP JSON exports with the alert secret, and streams the records to browsers", async () => {
+    const published: ServerEvent[] = [];
+    hub.publish = (event) => void published.push(event);
+    expect((await otlp(JSON.stringify(OTLP_EXPORT), { authorization: "Bearer wrong" })).status).toBe(401);
+    const response = await otlp(JSON.stringify(OTLP_EXPORT));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ partialSuccess: {} });
+    const expected: TelemetryRecord[] = [
+      {
+        id: "t1",
+        at: "2026-11-12T22:50:00.123Z",
+        service: "downhill-shop",
+        severity: "warn",
+        event: "shop.promo_rejected",
+        body: "Checkout rejected code trail15 for Mona: Invalid code.",
+        attributes: { code: "trail15", subtotal_cents: "499", perfect: "true", api_token: "***" },
+      },
+      { id: "t2", at: "2026-11-12T22:50:01.000Z", service: "downhill-shop", severity: "error", event: "ride.crash", body: "{ok: false}", attributes: {} },
+    ];
+    expect(published).toEqual([{ type: "telemetry", records: expected }]);
+    expect(await (await fetch(`${base}/api/telemetry?service=downhill-shop`)).json()).toEqual({ records: expected });
+    expect(await (await fetch(`${base}/api/telemetry?service=checkout`)).json()).toEqual({ records: [] });
+
+    // gzip, as the OpenTelemetry Collector sends by default.
+    expect((await otlp(gzipSync(JSON.stringify(OTLP_EXPORT)), { "content-encoding": "gzip" })).status).toBe(200);
+    expect(((await (await fetch(`${base}/api/telemetry`)).json()) as { records: TelemetryRecord[] }).records.map((record) => record.id)).toEqual(["t1", "t2", "t3", "t4"]);
+  });
+
+  it("says what to send instead of protobuf or anything that isn't an export", async () => {
+    const protobuf = await otlp(Buffer.from([1, 2, 3]), { "content-type": "application/x-protobuf" });
+    expect(protobuf.status).toBe(415);
+    expect(((await protobuf.json()) as { error: { message: string } }).error.message).toContain("set encoding: json");
+    const wrong = await otlp(JSON.stringify({ logs: [] }));
+    expect(wrong.status).toBe(400);
+    expect(((await wrong.json()) as { error: { message: string } }).error.message).toContain("resourceLogs");
+    expect((await otlp("{", { "content-encoding": "gzip" })).status).toBe(400);
+  });
+
+  it("is off without the alert secret", async () => {
+    await stop();
+    await serve(testConfig({ alertSecret: undefined }));
+    const response = await otlp(JSON.stringify(OTLP_EXPORT));
+    expect(response.status).toBe(503);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe("telemetry_not_configured");
   });
 });
 

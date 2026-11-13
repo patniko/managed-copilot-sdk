@@ -6,6 +6,7 @@ import { ago, between, cx, duration } from "../lib/format.js";
 import { useNow } from "../lib/hooks.js";
 import { incidentHref, navigate } from "../lib/router.js";
 import { useStore } from "../lib/store.js";
+import { LiveTelemetry } from "./Telemetry.js";
 import { FACTORY_TONE, FACTORY_UNAVAILABLE, SeverityBadge, Spinner, STATUS_LABEL, STATUS_TEXT, Tooltip } from "./ui.js";
 
 const ORDER: readonly IncidentStatus[] = ["investigating", "mitigating", "resolved"];
@@ -269,6 +270,8 @@ export function Board() {
           ))}
         </section>
       )}
+
+      {phase === "ready" ? <LiveTelemetry /> : null}
 
       {resolved.length ? (
         <section aria-label="Resolved incidents">

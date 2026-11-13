@@ -9,6 +9,18 @@ const RR: Record<Surface, number> = { dirt: 0.012, wood: 0.01, grass: 0.04, sand
 const GRIP: Record<Surface, number> = { dirt: 11, wood: 12, grass: 7.5, sand: 4.5, rock: 9, snow: 4 };
 const DRAG = 0.003;
 const HALF_WB = 0.58;
+
+/**
+ * A bike standing still at (x, z), facing `heading`: the height and pitch that put both wheels on the ground as it's
+ * drawn (the trail's ribbon included). For bikes placed outside a ride (the shop's preview, the select screen).
+ */
+export function standingOn(ground: Ground, x: number, z: number, heading: number): { y: number; pitch: number } {
+  const fx = Math.sin(heading) * HALF_WB;
+  const fz = -Math.cos(heading) * HALF_WB;
+  const hf = ground.drawnHeightAt(x + fx, z + fz);
+  const hr = ground.drawnHeightAt(x - fx, z - fz);
+  return { y: (hf + hr) / 2, pitch: Math.atan2(hr - hf, HALF_WB * 2) };
+}
 /** Pedalling: peak drive (m/s²) fading to nothing at PEDAL_TOP (m/s). */
 const PEDAL_ACCEL = 6.8;
 const PEDAL_TOP = 17.5;
