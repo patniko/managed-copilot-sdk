@@ -1,8 +1,10 @@
 import * as THREE from 'three';
 import { clamp, damp } from '../core/math';
 import type { Surface } from '../core/audioTypes';
-import { BikePhysics } from './bike';
+import { BikePhysics, GRAVITY, type AirState, type LandingResult } from './bike';
+import { Choreographer, LOOK_AHEAD, type Flight } from './choreography';
 import { defaultRiderPose, type BikeVisual, type CharacterDef, type RiderPose, type RiderRig } from './rider/types';
+import type { AirReport } from './tricks';
 import type { Ground } from '../world/ground';
 
 /** How much each surface shakes the bike and rider at speed (0..1). */
@@ -44,20 +46,23 @@ export class Player {
   readonly bike: BikeVisual;
   readonly rider: RiderRig;
   readonly pose: RiderPose = defaultRiderPose();
+  /** Directs how the rider acts out jumps, landings and celebrations. */
+  readonly choreo: Choreographer;
   private euler = new THREE.Euler();
   private tumblers: Tumbler[] = [];
   private seated = 1;
-  celebrate = 0;
   private time = 0;
   /** How far the visuals stand above the physics' ground (the trail's ribbon), m. */
   private lift = 0;
   private readonly velocity = new THREE.Vector3();
+  private readonly flight: Flight = { airborne: false, airTime: 0, timeToLand: 0, height: 0, tricking: 0, rotating: 0, preload: 0 };
 
   constructor(
     readonly character: CharacterDef,
     readonly ground: Ground,
   ) {
     this.physics = new BikePhysics(ground);
+    this.choreo = new Choreographer(character.celebrations);
     this.bike = character.createBike();
     this.rider = character.createRider();
     this.root.add(this.bike.root);
@@ -75,6 +80,21 @@ export class Player {
 
   get crashed() {
     return this.tumblers.length > 0;
+  }
+
+  /** The wheels left the ground. */
+  launched(air: AirState) {
+    this.choreo.launch({ popped: air.popped, fromFeature: air.fromFeature, vy: this.physics.vel.y });
+  }
+
+  /** The wheels touched down: `report` is the scored air (null for a small hop), `combo` the combo it landed in. */
+  landed(res: LandingResult, report: AirReport | null, combo: number) {
+    this.choreo.land(res, report, combo);
+  }
+
+  /** Crossed the finish line. */
+  finished() {
+    this.choreo.finish();
   }
 
   startCrash() {
@@ -107,6 +127,7 @@ export class Player {
       });
     }
     this.pose.crashed = true;
+    this.choreo.crash();
   }
 
   endCrash() {
@@ -119,6 +140,7 @@ export class Player {
     this.rider.root.quaternion.identity();
     this.tumblers = [];
     this.pose.crashed = false;
+    this.choreo.reset();
   }
 
   private updateTumble(dt: number) {
@@ -153,6 +175,7 @@ export class Player {
       pose.crashed = true;
       pose.velocity = this.velocity.copy(this.tumblers[0].vel);
       pose.roughness = 0;
+      this.choreo.write(pose);
       this.rider.update(pose, this.bike.anchors, dt);
       return;
     }
@@ -192,8 +215,17 @@ export class Player {
     pose.tricks.tailwhip = p.tricks.tailwhip > 0 ? Math.sin(Math.PI * p.tricks.tailwhip) : 0;
     pose.tricks.barspin = p.tricks.barspin > 0 ? Math.sin(Math.PI * p.tricks.barspin) : 0;
     pose.tricks.tabletop = clamp(Math.abs(p.air.roll) / 0.9, 0, 1) * (p.grounded ? 0 : 1);
-    this.celebrate = damp(this.celebrate, 0, 0.9, dt);
-    pose.celebrate = this.celebrate > 0.05 ? Math.min(1, this.celebrate * 1.5) : 0;
+    const tr = pose.tricks;
+    const f = this.flight;
+    f.airborne = !p.grounded;
+    f.airTime = f.airborne ? p.air.time : 0;
+    f.timeToLand = f.airborne ? this.timeToLand() : 0;
+    f.height = f.airborne ? p.pos.y - this.ground.heightAt(p.pos.x, p.pos.z) : 0;
+    f.tricking = Math.max(tr.superman, tr.noHander, tr.canCan, tr.tailwhip, tr.barspin, tr.tabletop);
+    f.rotating = f.airborne ? clamp((Math.abs(p.air.flipVel) + Math.abs(p.air.spinVel)) / 3, 0, 1) : 0;
+    f.preload = p.preload;
+    this.choreo.update(dt, f);
+    this.choreo.write(pose);
     this.bike.update({
       rearSpin: p.wheelAngle,
       frontSpin: p.wheelAngle,
@@ -204,5 +236,22 @@ export class Player {
       suspension: clamp(p.compress, 0, 1),
     });
     this.rider.update(pose, this.bike.anchors, dt);
+  }
+
+  /** Seconds until the wheels meet the ground along the bike's ballistic path (Infinity beyond LOOK_AHEAD). */
+  private timeToLand(): number {
+    const p = this.physics;
+    const steps = 12;
+    let prevT = 0;
+    let prevGap = p.pos.y - this.ground.heightAt(p.pos.x, p.pos.z);
+    for (let i = 1; i <= steps; i++) {
+      const t = (i / steps) * LOOK_AHEAD;
+      const y = p.pos.y + p.vel.y * t - 0.5 * GRAVITY * t * t;
+      const gap = y - this.ground.heightAt(p.pos.x + p.vel.x * t, p.pos.z + p.vel.z * t);
+      if (gap <= 0) return prevT + ((t - prevT) * prevGap) / Math.max(1e-6, prevGap - gap);
+      prevT = t;
+      prevGap = gap;
+    }
+    return Infinity;
   }
 }

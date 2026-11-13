@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { defaultRiderPose, type BikeVisual, type CharacterDef, type RiderRig } from '../game/rider/types';
+import { DEFAULT_CELEBRATIONS, EMOTE_LENGTH, defaultRiderPose, type BikeVisual, type CharacterDef, type EmotePose, type RiderRig } from '../game/rider/types';
 import { standingOn } from '../game/bike';
 import type { World } from '../world/world';
 
@@ -20,7 +20,8 @@ export class ShopStage {
   private readonly look = new THREE.Vector3();
   private readonly side = new THREE.Vector3();
   private turn = 0;
-  private cheer = 0;
+  /** The rider shows off each new look with their favourite celebration. */
+  private readonly cheer: EmotePose = { kind: 'pump', t: Infinity, strength: 1, weight: 1 };
   private snap = true;
 
   constructor(readonly world: World) {
@@ -47,7 +48,8 @@ export class ShopStage {
     this.world.scene.add(root);
     this.figure = { key, bike, rider, root };
     this.place(root);
-    this.cheer = 1.2;
+    this.cheer.kind = (def.celebrations ?? DEFAULT_CELEBRATIONS).trick[0] ?? 'pump';
+    this.cheer.t = 0;
   }
 
   /** Stands the bike on the trail facing the way it's turned to: both wheels on the ground, whatever the slope. */
@@ -75,14 +77,14 @@ export class ShopStage {
   update(dt: number, time: number, cam: THREE.PerspectiveCamera, screenX: number): THREE.Vector3 {
     const f = this.figure;
     this.turn += dt * 0.42;
-    this.cheer = Math.max(0, this.cheer - dt);
+    this.cheer.t += dt;
     if (f) {
       this.place(f.root);
       const pose = this.pose;
       pose.time = time;
       pose.speed = 0;
       pose.seated = 1;
-      pose.celebrate = this.cheer > 0 ? Math.sin(Math.min(1, this.cheer) * Math.PI) : 0;
+      pose.emote = this.cheer.t < EMOTE_LENGTH[this.cheer.kind] ? this.cheer : null;
       f.bike.update({ rearSpin: 0, frontSpin: 0, crank: 0.4, steer: Math.sin(time * 0.8) * 0.1, barspin: 0, tailwhip: 0, suspension: 0 });
       f.rider.update(pose, f.bike.anchors, dt);
     }

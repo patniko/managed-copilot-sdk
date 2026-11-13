@@ -72,6 +72,62 @@ export interface TrickPose {
   tabletop: number;
 }
 
+/**
+ * The jump as the rider acts it out, shaped by the game from the takeoff, the flight and the landing. All 0..1 except
+ * `absorb`, and all 0 on the ground between jumps.
+ */
+export interface JumpPose {
+  /** Crouching to pop (holding jump). */
+  load: number;
+  /** The explosive extension off the lip: legs and arms drive the bike up. */
+  pop: number;
+  /** In the air: knees and elbows drawn up, the bike pulled in under the body. */
+  tuck: number;
+  /** Spotting the landing: eyes on it, arms and legs reaching to meet the ground. */
+  spot: number;
+  /** Soaking up the landing (up to 1 for the hardest); goes a little negative as the rider springs back up. */
+  absorb: number;
+  /** Big air: chest up, head back, a whoop. */
+  whoop: number;
+}
+
+/** Celebrations and reactions a rider acts out on the bike. */
+export type EmoteKind = 'pump' | 'victory' | 'point' | 'wave' | 'salute' | 'nod' | 'phew';
+
+/** How long each emote lasts, s. Every rig's choreography for it fits in this time, back on the bars by the end. */
+export const EMOTE_LENGTH: Readonly<Record<EmoteKind, number>> = {
+  pump: 1.5,
+  victory: 1.8,
+  point: 1.5,
+  wave: 1.8,
+  salute: 1.4,
+  nod: 0.8,
+  phew: 1.9,
+};
+
+/** An emote in progress. */
+export interface EmotePose {
+  kind: EmoteKind;
+  /** Seconds since it started (0..EMOTE_LENGTH). */
+  t: number;
+  /** 0..1 how big the moves are: bigger tricks, bigger celebrations. */
+  strength: number;
+  /** 0..1 fade: cut short (taking off again), an emote fades out rather than snapping back to the bars. */
+  weight: number;
+}
+
+/** The emotes a character celebrates with, favourites first. */
+export interface Celebrations {
+  /** Hello, when picked on the select screen. */
+  greet: EmoteKind;
+  /** After landing a trick (the first one also shows off a new look in the shop). */
+  trick: readonly EmoteKind[];
+  /** After a big trick, or a perfect one deep in a combo, and at the finish. */
+  big: readonly EmoteKind[];
+}
+
+export const DEFAULT_CELEBRATIONS: Celebrations = { greet: 'wave', trick: ['pump', 'point'], big: ['victory'] };
+
 export interface RiderPose {
   /** Seconds since start, for idle/secondary animation. */
   time: number;
@@ -89,8 +145,10 @@ export interface RiderPose {
   /** When true the rider has been thrown off: play a limp tumbling pose (no IK to bike). */
   crashed: boolean;
   tricks: TrickPose;
-  /** 0..1 celebratory fist-pump / wave after a landed trick. */
-  celebrate: number;
+  /** The takeoff, flight and landing as acted out. */
+  jump: JumpPose;
+  /** A celebration or reaction in progress, if any. */
+  emote: EmotePose | null;
   /** World-space velocity of the bike in m/s, when known: drives the body's inertia and the wind on loose clothing. */
   velocity?: THREE.Vector3;
   /** 0..1 roughness of the ground under the wheels (adds chatter to the rider's body). */
@@ -100,7 +158,7 @@ export interface RiderPose {
 export interface RiderRig {
   /** Root group, placed by the game as a child of the bike root (bike-local frame). Meshes should cast shadows. */
   root: THREE.Group;
-  /** Pose the rider. Hands/feet IK to `anchors` unless a trick or crash releases them. */
+  /** Pose the rider. Hands/feet IK to `anchors` unless a trick, an emote or a crash releases them. */
   update(pose: RiderPose, anchors: BikeAnchors, dt: number): void;
 }
 
@@ -120,6 +178,8 @@ export interface CharacterDef {
   accent: string;
   /** Stays seated while coasting downhill (like the video's rider) instead of standing in the attack position. */
   ridesSeated?: boolean;
+  /** How the character celebrates (DEFAULT_CELEBRATIONS when absent). */
+  celebrations?: Celebrations;
   /** Warm up expensive assets in the background; `createRider` works without it (just slower the first time). */
   preload?(): Promise<void>;
   createBike(paint?: BikePaint): BikeVisual;
@@ -136,6 +196,10 @@ export function defaultTrickPose(): TrickPose {
   return { superman: 0, noHander: 0, canCan: 0, tailwhip: 0, barspin: 0, tabletop: 0 };
 }
 
+export function defaultJumpPose(): JumpPose {
+  return { load: 0, pop: 0, tuck: 0, spot: 0, absorb: 0, whoop: 0 };
+}
+
 export function defaultRiderPose(): RiderPose {
   return {
     time: 0,
@@ -147,6 +211,7 @@ export function defaultRiderPose(): RiderPose {
     airborne: false,
     crashed: false,
     tricks: defaultTrickPose(),
-    celebrate: 0,
+    jump: defaultJumpPose(),
+    emote: null,
   };
 }

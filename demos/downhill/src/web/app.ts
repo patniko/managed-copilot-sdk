@@ -8,10 +8,20 @@ import { loadEnvironments } from './world/envs';
 import type { EnvironmentDef } from './world/types';
 import { GameSession } from './game/session';
 import { standingOn } from './game/bike';
-import { defaultRiderPose, dressed, type BikeVisual, type CharacterDef, type CharacterId, type RiderRig } from './game/rider/types';
+import {
+  DEFAULT_CELEBRATIONS,
+  EMOTE_LENGTH,
+  defaultRiderPose,
+  dressed,
+  type BikeVisual,
+  type CharacterDef,
+  type CharacterId,
+  type EmotePose,
+  type RiderRig,
+} from './game/rider/types';
 import { UI, type Settings } from './ui/ui';
 import { applyPost } from './viewer';
-import { clamp } from './core/math';
+import { clamp, damp } from './core/math';
 import { ShopScreen, type PreviewLook } from './shop/screen';
 import { browserStorage } from './shop/shop';
 import { ShopStage } from './shop/stage';
@@ -92,7 +102,11 @@ export async function startApp(params: URLSearchParams) {
   let quality: QualityLevel = 'high';
   let scale = 1;
   let maxScale = 1;
-  let celebrateT = 0;
+  /**
+   * Hellos on the select screen: the picked rider greets you, and one passed over mid-greeting lowers its arm rather than
+   * snapping back to the bars (picked again, it carries on).
+   */
+  const greetings = new Map<CharacterId, { emote: EmotePose; on: boolean }>();
 
   const ui = new UI(
     characters,
@@ -103,7 +117,10 @@ export async function startApp(params: URLSearchParams) {
       previewChar: (id) => {
         char = characters.find((c) => c.id === id) ?? char;
         shop.setRider(char.id);
-        celebrateT = 1.2;
+        for (const g of greetings.values()) g.on = false;
+        const g = greetings.get(char.id);
+        if (g) g.on = true;
+        else greetings.set(char.id, { emote: { kind: (char.celebrations ?? DEFAULT_CELEBRATIONS).greet, t: 0, strength: 1, weight: 1 }, on: true });
       },
       resume: () => {
         if (session) session.paused = false;
@@ -428,13 +445,17 @@ export async function startApp(params: URLSearchParams) {
       menuCam.fov = 44;
       menuCam.aspect = window.innerWidth / window.innerHeight;
       menuCam.updateProjectionMatrix();
-      celebrateT = Math.max(0, celebrateT - dt);
+      for (const [id, g] of greetings) {
+        g.emote.t += dt;
+        g.emote.weight = damp(g.emote.weight, g.on ? 1 : 0, 10, dt);
+        if (g.emote.t >= EMOTE_LENGTH[g.emote.kind] || g.emote.weight < 0.02) greetings.delete(id);
+      }
       preview.forEach((p, i) => {
         const sel = p.def.id === char.id;
         pose.time = time + i;
         pose.speed = 0;
         pose.seated = 1;
-        pose.celebrate = sel && celebrateT > 0 ? Math.sin(Math.min(1, celebrateT) * Math.PI) : 0;
+        pose.emote = greetings.get(p.def.id)?.emote ?? null;
         p.bike.update({ rearSpin: 0, frontSpin: 0, crank: 0.4, steer: Math.sin(time * 0.8 + i) * 0.1, barspin: 0, tailwhip: 0, suspension: 0 });
         p.rider.update(pose, p.bike.anchors, dt);
         const s = sel ? 1.06 : 0.9;

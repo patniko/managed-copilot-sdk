@@ -3,7 +3,8 @@ import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { glossMaterial, paintMaterial } from '../../render/globals';
 import { BIKE, type BikeAnchors, type RiderColors, type RiderPose, type RiderRig } from '../rider/types';
 import { RideDynamics } from './dynamics';
-import { blend } from './humanoid';
+import { emoteFrame, evalEmote, FaceState, type EmoteHand, type EmoteStyle } from './emotes';
+import { blend, NO_JUMP } from './humanoid';
 import { TentacleBundle } from './tentacles';
 import { clamp, clamp01, ellipsoid, enableShadows, lerp, merge, outfit, place, repaint, smooth01, tint, tube, v3, wobble, type Outfit } from './util';
 
@@ -212,10 +213,18 @@ function headGeometry(): THREE.BufferGeometry {
   return merge(parts);
 }
 
-/** Eyes (+ glints) built around the eyes' midpoint so the group can blink via scale.y. */
-function eyeGeometries(): { eyes: THREE.BufferGeometry; glints: THREE.BufferGeometry; center: THREE.Vector3 } {
+/** Eyes (+ glints) built around the eyes' midpoint so the group can blink via scale.y; happy arcs and dazed crosses too. */
+function eyeGeometries(): {
+  eyes: THREE.BufferGeometry;
+  glints: THREE.BufferGeometry;
+  arcs: THREE.BufferGeometry;
+  crosses: THREE.BufferGeometry;
+  center: THREE.Vector3;
+} {
   const eyes: THREE.BufferGeometry[] = [];
   const glints: THREE.BufferGeometry[] = [];
+  const arcs: THREE.BufferGeometry[] = [];
+  const crosses: THREE.BufferGeometry[] = [];
   const pts: THREE.Vector3[] = [];
   const ns: THREE.Vector3[] = [];
   for (const s of [-1, 1]) {
@@ -233,8 +242,115 @@ function eyeGeometries(): { eyes: THREE.BufferGeometry; glints: THREE.BufferGeom
     const g1 = ellipsoid(0.017, 0.02, 0.008, v3(0.02, 0.028, 0.027), '#ffffff', 10, 8);
     const g2 = ellipsoid(0.008, 0.009, 0.006, v3(-0.018, -0.03, 0.025), '#ffffff', 8, 6);
     glints.push(place(g1, p, q), place(g2, p, q));
+    // happy eyes: a closed arc (flipped by the rig for a content, eyes-shut smile)
+    const arc = new THREE.TorusGeometry(0.046, 0.012, 8, 20, Math.PI);
+    arc.translate(0, -0.016, 0);
+    arc.scale(1, 1, 0.5);
+    arcs.push(place(tint(arc, C.eye), p.clone().addScaledVector(ns[i], 0.012), q));
+    // knocked silly: crosses
+    for (const a of [Math.PI / 4, -Math.PI / 4]) {
+      const bar = new THREE.CapsuleGeometry(0.011, 0.07, 3, 8);
+      bar.rotateZ(a);
+      bar.scale(1, 1, 0.5);
+      crosses.push(place(tint(bar, C.eye), p.clone().addScaledVector(ns[i], 0.012), q));
+    }
   }
-  return { eyes: merge(eyes), glints: merge(glints), center };
+  return { eyes: merge(eyes), glints: merge(glints), arcs: merge(arcs), crosses: merge(crosses), center };
+}
+
+/* ------------------------------------------------------------------ mouth */
+
+/** The open-mouth decal's patch of the face (degrees), above the face texture's closed mouth. */
+const MOUTH = { az0: -14, az1: 14, elTop: -16, elBot: -38 };
+
+/** An open mouth on the face's muzzle colour (covering the closed one): a beaming smile, or a gasping "o". */
+function mouthTexture(kind: 'smile' | 'gasp'): THREE.Texture {
+  const W = 256;
+  const H = 200;
+  const cv = document.createElement('canvas');
+  cv.width = W;
+  cv.height = H;
+  const g = cv.getContext('2d');
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  if (!g) return tex;
+  const sx = W / (MOUTH.az1 - MOUTH.az0);
+  const sy = H / (MOUTH.elTop - MOUTH.elBot);
+  const X = (az: number) => (az - MOUTH.az0) * sx;
+  const Y = (el: number) => (MOUTH.elTop - el) * sy;
+  g.clearRect(0, 0, W, H);
+  // muzzle-coloured backing hides the closed mouth underneath
+  g.fillStyle = C.face;
+  g.beginPath();
+  g.ellipse(X(0), Y(-27), 10.5 * sx, 8.5 * sy, 0, 0, Math.PI * 2);
+  g.fill();
+  const lip = '#8a4b47';
+  g.lineJoin = 'round';
+  g.lineWidth = 1.1 * sx;
+  g.strokeStyle = lip;
+  g.beginPath();
+  if (kind === 'smile') {
+    // a wide "D": flat top under the nose, round bottom
+    g.moveTo(X(-8.5), Y(-22));
+    g.quadraticCurveTo(X(0), Y(-21.2), X(8.5), Y(-22));
+    g.bezierCurveTo(X(7.5), Y(-30.5), X(-7.5), Y(-30.5), X(-8.5), Y(-22));
+  } else {
+    g.ellipse(X(0), Y(-27.5), 4.2 * sx, 4.8 * sy, 0, 0, Math.PI * 2);
+  }
+  g.closePath();
+  g.fillStyle = '#5a2030';
+  g.fill();
+  // tongue
+  g.save();
+  g.clip();
+  g.fillStyle = '#e57f93';
+  g.beginPath();
+  if (kind === 'smile') g.ellipse(X(0), Y(-30), 5.5 * sx, 4 * sy, 0, 0, Math.PI * 2);
+  else g.ellipse(X(0), Y(-31.5), 3.4 * sx, 2.6 * sy, 0, 0, Math.PI * 2);
+  g.fill();
+  g.restore();
+  g.stroke();
+  // the line up to the nose
+  g.beginPath();
+  g.moveTo(X(0), Y(-17));
+  g.lineTo(X(0), Y(kind === 'smile' ? -21.5 : -22.7));
+  g.stroke();
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function mouthPatch(): THREE.BufferGeometry {
+  const segU = 12;
+  const segV = 10;
+  const pos: number[] = [];
+  const uv: number[] = [];
+  const idx: number[] = [];
+  const d = new THREE.Vector3();
+  const p = new THREE.Vector3();
+  for (let j = 0; j <= segV; j++) {
+    for (let i = 0; i <= segU; i++) {
+      const u = i / segU;
+      const v = j / segV;
+      dirAzEl(lerp(MOUTH.az0, MOUTH.az1, u), lerp(MOUTH.elBot, MOUTH.elTop, v), d);
+      headPoint(d.x, d.y, d.z, 1.0095, p);
+      pos.push(p.x, p.y, p.z);
+      uv.push(u, v);
+    }
+  }
+  const row = segU + 1;
+  for (let j = 0; j < segV; j++) {
+    for (let i = 0; i < segU; i++) {
+      const a = j * row + i;
+      idx.push(a, a + row, a + 1, a + 1, a + row, a + row + 1);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
 }
 
 /* ------------------------------------------------------------------ rig */
@@ -246,7 +362,6 @@ interface Weights {
   steer: number;
   air: number;
   crash: number;
-  celebrate: number;
   superman: number;
   noHander: number;
   canCan: number;
@@ -256,6 +371,10 @@ interface Weights {
 }
 
 const TRICK_KEYS = ['superman', 'noHander', 'canCan', 'tailwhip', 'barspin', 'tabletop'] as const;
+
+/** Emotes in Mona's body: the grip tentacles are her arms (ARM long, from their roots), her head is all of her (her brow sits low). */
+const STYLE: EmoteStyle = { splay: 0.25, headCenter: new THREE.Vector3(0, -0.05, -0.02), headRadius: 0.27 };
+const ARM = 0.62;
 
 /** Tentacle roots in head space (head centre = origin, facing -Z). */
 const ROOTS = [
@@ -279,6 +398,7 @@ const _up = new THREE.Vector3();
 const _fw = new THREE.Vector3();
 const _ax = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
+const _look = new THREE.Vector3();
 const _side = new THREE.Vector3();
 const _e = new THREE.Euler(0, 0, 0, 'YXZ');
 
@@ -286,15 +406,26 @@ class MonaRig implements RiderRig {
   readonly root = new THREE.Group();
   private readonly head = new THREE.Group();
   private readonly eyes = new THREE.Group();
+  /** Closed, smiling eyes (flipped: content), and dazed crosses. */
+  private readonly arcs: THREE.Mesh;
+  private readonly crosses: THREE.Mesh;
+  /** Open mouths: a beaming smile, a gasp. */
+  private readonly smile: THREE.Mesh;
+  private readonly gasp: THREE.Mesh;
   private readonly tent: TentacleBundle;
   private readonly hc = new THREE.Vector3();
   private readonly saddleRef = new THREE.Vector3();
   private readonly free = new THREE.Vector3();
+  private readonly anchor = new THREE.Vector3();
   private readonly gripAxis = new THREE.Vector3();
   private readonly fwd = new THREE.Vector3();
   private primed = false;
   /** Body bounce on the tentacles over bumps and landings (shared rider suspension model). */
   private readonly dyn = new RideDynamics();
+  private readonly ef = emoteFrame();
+  private readonly face = new FaceState();
+  /** The tail's wag phase (it wags faster when she's happy). */
+  private wag = 0;
   private readonly w: Weights = {
     seated: 1,
     compress: 0,
@@ -302,7 +433,6 @@ class MonaRig implements RiderRig {
     steer: 0,
     air: 0,
     crash: 0,
-    celebrate: 0,
     superman: 0,
     noHander: 0,
     canCan: 0,
@@ -318,6 +448,10 @@ class MonaRig implements RiderRig {
     const faceMat = (_faceMat ??= paintMaterial({ map: faceTexture(), alphaTest: 0.5 }));
     const eyeMat = (_eyeMat ??= glossMaterial(C.eye, 0.1, 0.0));
     const glintMat = (_glintMat ??= paintMaterial({ color: '#ffffff', emissive: '#ffffff', emissiveIntensity: 0.9 }));
+    const mouths = (_mouthMats ??= {
+      smile: paintMaterial({ map: mouthTexture('smile'), alphaTest: 0.5 }),
+      gasp: paintMaterial({ map: mouthTexture('gasp'), alphaTest: 0.5 }),
+    });
 
     const headMesh = new THREE.Mesh(monaHead(look), bodyMat);
     headMesh.name = 'head';
@@ -326,7 +460,20 @@ class MonaRig implements RiderRig {
     const eg = monaGeometries().eyes;
     this.eyes.position.copy(eg.center);
     this.eyes.add(new THREE.Mesh(eg.eyes, eyeMat), new THREE.Mesh(eg.glints, glintMat));
-    this.head.add(headMesh, face, this.eyes);
+    this.arcs = new THREE.Mesh(eg.arcs, eyeMat);
+    this.arcs.name = 'eyes-happy';
+    this.crosses = new THREE.Mesh(eg.crosses, eyeMat);
+    this.crosses.name = 'eyes-dazed';
+    for (const m of [this.arcs, this.crosses]) {
+      m.position.copy(eg.center);
+      m.visible = false;
+    }
+    this.smile = new THREE.Mesh(monaGeometries().mouth, mouths.smile);
+    this.smile.name = 'mouth-smile';
+    this.gasp = new THREE.Mesh(monaGeometries().mouth, mouths.gasp);
+    this.gasp.name = 'mouth-gasp';
+    this.smile.visible = this.gasp.visible = false;
+    this.head.add(headMesh, face, this.eyes, this.arcs, this.crosses, this.smile, this.gasp);
 
     this.tent = new TentacleBundle(ROOTS.length, SEGS, 10, bodyMat, look.palette.body, look.palette.bodyLight);
     this.tent.mesh.name = 'tentacles';
@@ -391,6 +538,41 @@ class MonaRig implements RiderRig {
     }
   }
 
+  /** Where an emote puts a grip tentacle's tip: out from its root, or at her face (head-anchored). */
+  private emoteTarget(h: EmoteHand, root: THREE.Vector3, q: THREE.Quaternion, out: THREE.Vector3): THREE.Vector3 {
+    _tmp.copy(h.dir).normalize();
+    out.copy(root).addScaledVector(_tmp, ARM * h.ext);
+    if (h.head > 0.001) {
+      _tmp.applyQuaternion(q);
+      this.anchor.copy(STYLE.headCenter).applyQuaternion(q).add(this.hc).addScaledVector(_tmp, STYLE.headRadius * h.ext);
+      out.lerp(this.anchor, h.head);
+    }
+    return out;
+  }
+
+  /** Eyes and mouth: blinks, happy arcs, wide or narrowed eyes, dazed crosses, and an open smile or gasp. */
+  private express(t: number, f: FaceState): void {
+    // blink every ~4.3 s
+    const ph = t % 4.3;
+    const blink = 0.1 + 0.9 * clamp01(Math.abs(ph - 0.15) / 0.07);
+    const dazed = smooth01((f.dizzy - 0.25) / 0.5);
+    const happy = smooth01((f.joy - 0.3) / 0.45) * (1 - dazed);
+    const content = smooth01((f.relief - 0.3) / 0.45) * (1 - dazed) * (1 - happy);
+    const shut = Math.max(happy, content);
+    const wideK = 1 + f.surprise * 0.2;
+    const open = blink * wideK * (1 + f.surprise * 0.08) * (1 - 0.5 * f.strain) * (1 - shut) * (1 - dazed);
+    this.eyes.scale.set(wideK, open, wideK);
+    this.eyes.visible = open > 0.02;
+    this.arcs.scale.set(1, shut, 1);
+    this.arcs.rotation.z = content > happy ? Math.PI : 0;
+    this.arcs.visible = shut > 0.02;
+    this.crosses.scale.set(1, dazed, 1);
+    this.crosses.visible = dazed > 0.02;
+    const smiling = f.joy >= Math.max(f.surprise, f.strain, f.dizzy);
+    this.smile.visible = f.mouth > 0.3 && smiling;
+    this.gasp.visible = f.mouth > 0.3 && !smiling;
+  }
+
   update(pose: RiderPose, anchors: BikeAnchors, dt: number): void {
     const w = this.w;
     const t = pose.time || 0;
@@ -402,7 +584,6 @@ class MonaRig implements RiderRig {
     w.steer = blend(snap, w.steer, clamp(pose.steer || 0, -1, 1), 8, dt);
     w.air = blend(snap, w.air, pose.airborne ? 1 : 0, 6, dt);
     w.crash = blend(snap, w.crash, pose.crashed ? 1 : 0, 5, dt);
-    w.celebrate = blend(snap, w.celebrate, clamp01(pose.celebrate || 0), 9, dt);
     for (const key of TRICK_KEYS) w[key] = blend(snap, w[key], clamp01(tr ? tr[key] : 0), 12, dt);
     this.primed = true;
 
@@ -416,7 +597,18 @@ class MonaRig implements RiderRig {
     const bs = smooth01(w.barspin);
     const tt = smooth01(w.tabletop);
     const crash = smooth01(w.crash);
-    const cel = smooth01(w.celebrate) * (1 - crash);
+
+    /* ---------------- acting: the jump and any emote (a trick or a crash takes the body over) */
+    const J = pose.jump ?? NO_JUMP;
+    const E = evalEmote(pose.emote ?? null, STYLE, this.ef);
+    const calm = (1 - Math.max(sup, nh, cc, tw, bs, tt)) * (1 - crash);
+    const pop = J.pop * calm;
+    const tuck = J.tuck * calm;
+    const spot = J.spot * calm;
+    const ab = J.absorb * (1 - crash);
+    const whoop = J.whoop * calm;
+    const face = this.face;
+    face.update(E, J, crash, dt, snap);
 
     const pL = anchors.pedalL;
     const pR = anchors.pedalR;
@@ -430,17 +622,22 @@ class MonaRig implements RiderRig {
     hc.y += lerp(0.33, 0.4, seated) + Math.sin(crank * 2) * 0.012 * seated + Math.sin(t * 2.3) * 0.006;
     hc.z += lerp(-0.22, -0.05, seated);
     hc.y -= comp * 0.12 + w.air * 0.03 * att;
-    hc.y += sup * 0.1 + nh * 0.1 + cc * 0.06 + tw * 0.15 + bs * 0.05 + tt * 0.04 + cel * 0.04;
+    hc.y += sup * 0.1 + nh * 0.1 + cc * 0.06 + tw * 0.15 + bs * 0.05 + tt * 0.04;
     hc.z += sup * -0.16 + nh * 0.04;
+    // the jump: spring up off the lip, curl down onto the bike in the air, stretch for the landing, then squash into it
+    hc.y += pop * 0.08 - tuck * 0.05 + spot * 0.04 - ab * 0.1 + whoop * 0.03 + E.lift;
+    hc.z += tuck * 0.02 + spot * 0.03 + ab * 0.03;
     const parent = this.root.parent;
     if (parent) parent.updateWorldMatrix(true, false);
     const dyn = this.dyn;
     dyn.update(dt, parent ? parent.matrixWorld : null, pose.velocity, pose.roughness ?? 0, pose.speed || 0, !pose.airborne, pose.crashed ? 0 : 1);
     hc.add(dyn.offset);
-    let pitch = lerp(0.3, 0.12, seated) + comp * 0.1 + sup * 0.3 + tt * 0.5 - cel * 0.3 - nh * 0.1 + dyn.pitch * 0.6;
-    let yaw = -w.steer * 0.32 + tt * 0.45 - cc * 0.2 + Math.sin(t * 0.41) * 0.04;
+    let pitch = lerp(0.3, 0.12, seated) + comp * 0.1 + sup * 0.3 + tt * 0.5 - nh * 0.1 + dyn.pitch * 0.6;
+    // chin up off the lip and for a whoop, eyes down on the landing, a nod into it
+    pitch += -pop * 0.12 + tuck * 0.06 + spot * 0.3 - whoop * 0.45 + ab * 0.12 + E.pitch * 0.4 + E.headPitch;
+    let yaw = -w.steer * 0.32 + tt * 0.45 - cc * 0.2 + Math.sin(t * 0.41) * 0.04 + E.yaw * 0.5 + E.headYaw;
     // tabletop: the game rolls the bike (assumed to the right); keep the head upright-ish
-    let roll = w.lean * 0.5 + cc * 0.15 - tt * 0.7 + Math.sin(t * 0.9) * 0.02 * seated + dyn.roll;
+    let roll = w.lean * 0.5 + cc * 0.15 - tt * 0.7 + Math.sin(t * 0.9) * 0.02 * seated + dyn.roll + E.roll + E.headRoll;
     if (crash > 0.001) {
       hc.lerp(_tmp.set(0, 1.08, 0.3), crash);
       pitch = lerp(pitch, 0.6 * wobble(t * 1.1, 1), crash);
@@ -450,16 +647,14 @@ class MonaRig implements RiderRig {
     this.head.position.copy(hc);
     _e.set(-pitch, yaw, -roll, 'YXZ');
     this.head.quaternion.setFromEuler(_e);
-    // squash & stretch on landings
-    // squash & stretch on landings, plus a soft jelly wobble from the bounce velocity (volume preserving)
+    // squash & stretch: up off the lip, down into a landing and back, plus a soft jelly wobble from the bounce
+    // velocity (volume preserving)
     const jig = clamp(dyn.velocity.y * 0.09, -0.07, 0.07);
-    const sq = (1 - comp * 0.06) * (1 + jig);
-    const wide = (1 + comp * 0.04) / Math.sqrt(1 + jig);
+    const stretch = pop * 0.1 + spot * 0.03 + whoop * 0.04 - Math.max(0, ab) * 0.14 + Math.max(0, -ab) * 0.08;
+    const sq = (1 - comp * 0.06) * (1 + jig) * (1 + stretch);
+    const wide = (1 + comp * 0.04) / Math.sqrt((1 + jig) * (1 + stretch));
     this.head.scale.set(wide, sq, wide);
-
-    // blink every ~4.3 s
-    const ph = t % 4.3;
-    this.eyes.scale.y = 0.1 + 0.9 * clamp01(Math.abs(ph - 0.15) / 0.07);
+    this.express(t, face);
 
     /* ---------------- tentacles */
     const q = this.head.quaternion;
@@ -488,11 +683,12 @@ class MonaRig implements RiderRig {
           this.free.set(sg * (0.46 + Math.sin(t * 4 + i * 2) * 0.05), 0.12 + Math.sin(t * 5.3 + i * 1.3) * 0.08, -0.06).add(hc);
           _c.lerp(this.free, nh);
         }
-        if (i === 1 && cel > 0.001) {
-          // happy wave out to the side
-          this.free.set(0.48 + Math.sin(t * 9) * 0.07, 0.3 + Math.sin(t * 12) * 0.05, -0.02).add(hc);
-          _c.lerp(this.free, cel);
-          freeW = Math.max(freeW, cel);
+        // emote: the grip tentacles are her arms
+        const eh = E.hands[i];
+        if (eh.w > 0.001) {
+          const ew = eh.w * (1 - crash);
+          _c.lerp(this.emoteTarget(eh, _p0, q, this.free), ew);
+          freeW = Math.max(freeW, ew);
         }
         if (crash > 0.001) {
           _tmp.set(sg * 0.8, 0.2 + 0.5 * wobble(t * 1.2, 10 + i), -0.4 + 0.4 * wobble(t, 12 + i)).normalize();
@@ -501,6 +697,13 @@ class MonaRig implements RiderRig {
         }
         _ax.copy(this.gripAxis).multiplyScalar(sg);
         _fw.copy(this.fwd);
+        // reaching for her own face (a salute, wiping her brow) the tentacle comes up in front of it, curling forwards
+        const toFace = eh.head * eh.w * (1 - crash);
+        if (toFace > 0.001) {
+          _look.set(0, 0, -1).applyQuaternion(q);
+          _up.lerp(_look, toFace).normalize();
+          _fw.lerp(_look.set(0, 1, 0), toFace).normalize();
+        }
         const rc = lerp(0.031, 0.05, freeW);
         const alphaEnd = lerp(Math.PI * 1.75, Math.PI * 1.1, freeW);
         this.shape(i, _p0, _d0, _c, _up, _fw, _ax, rc, alphaEnd, lerp(0.035, 0.0, freeW), lerp(0.008, 0.035, freeW), t);
@@ -536,9 +739,10 @@ class MonaRig implements RiderRig {
         const alphaEnd = lerp(Math.PI * 1.35, Math.PI * 1.1, off);
         this.shape(i, _p0, _d0, _c, _up, _fw, _ax, rc, alphaEnd, lerp(0.02, 0, off), lerp(0.006, 0.03, off), t);
       } else {
-        /* tail: swishes out behind & to the side like a cat's, tip curling up; wags slowly */
-        const wag = Math.sin(t * 2.2) * (1 - crash);
-        _c.copy(hc).add(_tmp.set(0.3 + wag * 0.09, -0.2 + Math.sin(t * 1.7) * 0.03 - w.air * 0.04, 0.4 + w.air * 0.05));
+        /* tail: swishes out behind & to the side like a cat's, tip curling up; wags slowly, faster and higher when happy */
+        this.wag += dt * lerp(2.2, 7.5, face.joy);
+        const wag = Math.sin(this.wag) * lerp(1, 1.6, face.joy) * (1 - crash);
+        _c.copy(hc).add(_tmp.set(0.3 + wag * 0.09, -0.2 + Math.sin(t * 1.7) * 0.03 - w.air * 0.04 + face.joy * 0.12, 0.4 + w.air * 0.05));
         _c.addScaledVector(_tmp.set(-0.25, 0.05, 0.3), sup);
         if (crash > 0.001) {
           _tmp.set(0.5 * wobble(t, 30), 0.4 * wobble(t * 1.3, 31), 0.8).normalize();
@@ -560,10 +764,11 @@ let _bodyMat: THREE.MeshStandardMaterial | null = null;
 let _faceMat: THREE.MeshLambertMaterial | null = null;
 let _eyeMat: THREE.MeshStandardMaterial | null = null;
 let _glintMat: THREE.MeshLambertMaterial | null = null;
-let _geo: { head: THREE.BufferGeometry; face: THREE.BufferGeometry; eyes: ReturnType<typeof eyeGeometries> } | null = null;
+let _mouthMats: { smile: THREE.MeshLambertMaterial; gasp: THREE.MeshLambertMaterial } | null = null;
+let _geo: { head: THREE.BufferGeometry; face: THREE.BufferGeometry; eyes: ReturnType<typeof eyeGeometries>; mouth: THREE.BufferGeometry } | null = null;
 /** Static head geometry, built once and shared by every Mona instance (tentacles are per instance). */
 function monaGeometries(): NonNullable<typeof _geo> {
-  return (_geo ??= { head: headGeometry(), face: facePatch(), eyes: eyeGeometries() });
+  return (_geo ??= { head: headGeometry(), face: facePatch(), eyes: eyeGeometries(), mouth: mouthPatch() });
 }
 
 const _heads = new Map<string, THREE.BufferGeometry>();

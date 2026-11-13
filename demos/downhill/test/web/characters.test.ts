@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { meshSdf, sdSphere } from '../../src/web/game/characters/sdf';
-import { generateHumanData, type HumanData } from '../../src/web/game/characters/human';
+import { generateHumanData, RIDER_SPEC, type HumanData } from '../../src/web/game/characters/human';
 import { Cloth, type ClothBuild } from '../../src/web/game/characters/cloth';
 import { RideDynamics } from '../../src/web/game/characters/dynamics';
+import { HumanoidRig, type HumanoidBody } from '../../src/web/game/characters/humanoid';
+import { createBike } from '../../src/web/game/characters/bike';
+import { RIDER_BIKE } from '../../src/web/game/characters/bikeStyles';
+import { EMOTE_LENGTH, defaultRiderPose, type EmoteKind } from '../../src/web/game/rider/types';
 
 describe('SDF meshing', () => {
   it('meshes a sphere onto its exact surface with outward normals and a closed surface', () => {
@@ -183,5 +187,42 @@ describe('ride dynamics', () => {
     expect(soft).toBeLessThan(-0.008);
     expect(hard).toBeLessThan(soft * 1.8);
     expect(hard).toBeGreaterThanOrEqual(-0.09);
+  });
+});
+
+describe('emotes on a humanoid rider', () => {
+  it('takes the hands off the bars for each emote, shows it on the face, and is back on the bars by its end', () => {
+    const bike = createBike(RIDER_BIKE);
+    bike.update({ rearSpin: 0, frontSpin: 0, crank: 0.4, steer: 0, barspin: 0, tailwhip: 0, suspension: 0.2 });
+    const A = bike.anchors;
+    for (const kind of Object.keys(EMOTE_LENGTH) as EmoteKind[]) {
+      const part = () => new THREE.Object3D();
+      const pair = (): [THREE.Object3D, THREE.Object3D] => [part(), part()];
+      const body: HumanoidBody = { pelvis: part(), torso: part(), head: part(), upperArm: pair(), forearm: pair(), hand: pair(), thigh: pair(), shin: pair(), foot: pair() };
+      const rig = new HumanoidRig(RIDER_SPEC, body);
+      const pose = defaultRiderPose();
+      pose.seated = 0.3;
+      const len = EMOTE_LENGTH[kind];
+      const offBar = () => Math.max(body.hand[0].position.distanceTo(A.gripL), body.hand[1].position.distanceTo(A.gripR));
+      let farthest = 0;
+      let expressed = 0;
+      for (let t = 0; t < len; t += 1 / 60) {
+        pose.time = t;
+        pose.emote = { kind, t, strength: 1, weight: 1 };
+        rig.update(pose, A, 1 / 60);
+        farthest = Math.max(farthest, offBar());
+        expressed = Math.max(expressed, rig.face.joy, rig.face.relief);
+      }
+      rig.root.traverse((o) => {
+        expect(Number.isFinite(o.position.x + o.position.y + o.position.z + o.quaternion.x + o.quaternion.y + o.quaternion.z + o.quaternion.w)).toBe(true);
+      });
+      // a nod is all head; every other emote lifts a hand well clear of its grip
+      if (kind !== 'nod') expect(farthest, kind).toBeGreaterThan(0.25);
+      expect(expressed, kind).toBeGreaterThan(0.6);
+      pose.time = len;
+      pose.emote = { kind, t: len - 1e-3, strength: 1, weight: 1 };
+      rig.update(pose, A, 1 / 60);
+      expect(offBar(), kind).toBeLessThan(0.01);
+    }
   });
 });

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { glossMaterial, paintMaterial } from '../../render/globals';
 import type { RiderColors, RiderRig } from '../rider/types';
 import { HumanoidRig, type HumanoidSpec } from './humanoid';
-import { box, clamp01, ellipsoid, limb, merge, outfit, place, repaint, roundedSlab, tint, tube, v3, type Outfit } from './util';
+import { box, clamp01, ellipsoid, limb, merge, outfit, place, repaint, roundedSlab, smooth01, tint, tube, v3, type Outfit } from './util';
 
 export const COPILOT_COLORS = {
   shell: '#ecebf4',
@@ -37,7 +37,7 @@ export const COPILOT_SPEC: HumanoidSpec = {
   reachMax: 0.95,
   reachMin: 0.68,
   attackReach: 0.87,
-  celebrateHand: new THREE.Vector3(0.38, 0.4, -0.06),
+  emote: { splay: 0.4, headCenter: new THREE.Vector3(0, 0.29, 0), headRadius: 0.27 },
 };
 
 /* --------------------------------------------------------------- head helpers */
@@ -142,7 +142,32 @@ function plate(w: number, h: number, r: number, depth: number, color: THREE.Colo
 
 /* --------------------------------------------------------------- body parts */
 
-function headParts(): { shell: THREE.BufferGeometry; glass: THREE.BufferGeometry; eyes: THREE.BufferGeometry; eyeCenter: THREE.Vector3 } {
+/** One eye's shapes, in the eye's own frame (+z out of the visor), and where each eye sits on the helmet. */
+interface EyeParts {
+  /** The glowing pill, its happy arc (flipped: content), and dazed crosses. */
+  pill: THREE.BufferGeometry;
+  arc: THREE.BufferGeometry;
+  cross: THREE.BufferGeometry;
+  frames: Array<{ p: THREE.Vector3; q: THREE.Quaternion }>;
+}
+
+function eyeParts(): EyeParts {
+  const pill = new THREE.CapsuleGeometry(0.029, 0.058, 4, 12);
+  pill.scale(1, 1, 0.42);
+  const arc = new THREE.TorusGeometry(0.036, 0.0115, 6, 18, Math.PI);
+  arc.translate(0, -0.014, 0);
+  arc.scale(1, 1, 0.42);
+  const bars = [Math.PI / 4, -Math.PI / 4].map((a) => {
+    const bar = new THREE.CapsuleGeometry(0.0115, 0.066, 3, 8);
+    bar.rotateZ(a);
+    bar.scale(1, 1, 0.42);
+    return tint(bar, C.eye);
+  });
+  const frames = [-1, 1].map((s) => ({ p: helmetPoint(s * 0.3, -0.2, 1.035), q: helmetFrame(s * 0.3, -0.2) }));
+  return { pill: tint(pill, C.eye), arc: tint(arc, C.eye), cross: merge(bars), frames };
+}
+
+function headParts(): { shell: THREE.BufferGeometry; glass: THREE.BufferGeometry; eyes: EyeParts } {
   const shell: THREE.BufferGeometry[] = [];
   const glass: THREE.BufferGeometry[] = [];
   shell.push(tube(v3(0, -0.03, 0.01), v3(0, 0.08, 0.01), 0.056, 0.06, C.joint, 14));
@@ -182,20 +207,7 @@ function headParts(): { shell: THREE.BufferGeometry; glass: THREE.BufferGeometry
   }
   // chin trim under the visor
   glass.push(helmetPatch(-0.98, 0.98, -0.66, 0.22, 4.2, 1.012, C.visor, 20, 14));
-
-  // glowing pill eyes, built around their shared centre so they can blink (scale.y)
-  const eyeCenter = helmetPoint(0, -0.2, 1.0);
-  const eyes: THREE.BufferGeometry[] = [];
-  for (const s of [-1, 1]) {
-    const az = s * 0.3;
-    const el = -0.2;
-    const q = helmetFrame(az, el);
-    const cap = new THREE.CapsuleGeometry(0.029, 0.058, 4, 12);
-    cap.scale(1, 1, 0.42);
-    place(cap, helmetPoint(az, el, 1.035).sub(eyeCenter), q);
-    eyes.push(tint(cap, C.eye));
-  }
-  return { shell: merge(shell), glass: merge(glass), eyes: merge(eyes), eyeCenter };
+  return { shell: merge(shell), glass: merge(glass), eyes: eyeParts() };
 }
 
 function torsoGeometry(): THREE.BufferGeometry {
@@ -351,9 +363,20 @@ export function createCopilotRider(colors?: RiderColors): RiderRig {
   const head = new THREE.Group();
   head.name = 'head';
   head.add(mesh(G.head.shell, 'helmet'), mesh(G.head.glass, 'visor', glassMat));
-  const eyes = mesh(G.head.eyes, 'eyes', eyeMat);
-  eyes.position.copy(G.head.eyeCenter);
-  head.add(eyes);
+  // each eye in its own frame on the visor, so it can squint, tilt, close into a happy arc or go dizzy
+  const eyes = G.head.eyes.frames.map((f, i) => {
+    const holder = new THREE.Group();
+    holder.position.copy(f.p);
+    holder.quaternion.copy(f.q);
+    const side = i === 0 ? 'L' : 'R';
+    const pill = mesh(G.head.eyes.pill, `eye${side}`, eyeMat);
+    const arc = mesh(G.head.eyes.arc, `eyeHappy${side}`, eyeMat);
+    const cross = mesh(G.head.eyes.cross, `eyeDazed${side}`, eyeMat);
+    arc.visible = cross.visible = false;
+    holder.add(pill, arc, cross);
+    head.add(holder);
+    return { pill, arc, cross };
+  });
 
   return new HumanoidRig(COPILOT_SPEC, {
     pelvis: mesh(G.pelvis, 'pelvis'),
@@ -365,13 +388,30 @@ export function createCopilotRider(colors?: RiderColors): RiderRig {
     thigh: [mesh(G.thigh, 'thighL'), mesh(G.thigh, 'thighR')],
     shin: [mesh(G.shin, 'shinL'), mesh(G.shin, 'shinR')],
     foot: [mesh(G.boot, 'footL'), mesh(G.boot, 'footR')],
-    tick: (time) => {
+    tick: (time, _dt, _pose, face) => {
       // blink every ~3.7 s (double blink now and then)
       const period = 3.7;
       const ph = time % period;
       const second = Math.floor(time / period) % 3 === 1 ? Math.abs(ph - 0.32) : 1;
-      const d = Math.min(Math.abs(ph - 0.12), second);
-      eyes.scale.y = 0.12 + 0.88 * clamp01(d / 0.07);
+      const blink = 0.12 + 0.88 * clamp01(Math.min(Math.abs(ph - 0.12), second) / 0.07);
+      // the pills squash shut into arcs: ^ ^ when happy, the other way up when relieved; crosses when dazed
+      const dazed = smooth01((face.dizzy - 0.25) / 0.5);
+      const happy = smooth01((face.joy - 0.3) / 0.45) * (1 - dazed);
+      const content = smooth01((face.relief - 0.3) / 0.45) * (1 - dazed) * (1 - happy);
+      const shut = Math.max(happy, content);
+      const wide = 1 + face.surprise * 0.25;
+      const open = blink * wide * (1 + face.surprise * 0.1) * (1 - 0.55 * face.strain) * (1 - shut) * (1 - dazed);
+      eyes.forEach((e, i) => {
+        e.pill.scale.set(wide, open, 1);
+        // effort tilts the tops of the eyes inwards: a determined frown
+        e.pill.rotation.z = (i === 0 ? -1 : 1) * face.strain * 0.45;
+        e.pill.visible = open > 0.02;
+        e.arc.scale.set(1, shut, 1);
+        e.arc.rotation.z = content > happy ? Math.PI : 0;
+        e.arc.visible = shut > 0.02;
+        e.cross.scale.set(1, dazed, 1);
+        e.cross.visible = dazed > 0.02;
+      });
     },
   });
 }

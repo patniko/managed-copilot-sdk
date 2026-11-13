@@ -116,6 +116,7 @@ export class GameSession {
     p.events = {
       onLaunch: () => {
         this.tracker.start(p);
+        this.player.launched(p.air);
         this.prevSpin = 0;
         this.prevFlip = 0;
       },
@@ -127,6 +128,8 @@ export class GameSession {
         this.cam.punch(clamp(res.impact / 11, 0, 1));
         this.fx.landing(p, clamp(res.impact / 10, 0.2, 1));
         this.stats.airTime += air.time;
+        // the rider soaks up the landing, then celebrates it (the combo it landed in, before this landing builds it)
+        this.player.landed(res, rep, this.combo);
         if (res.ok && res.sketchy && !rep) this.ui.message('Sketchy save!', 'info');
         if (rep) {
           const gained = Math.round(rep.total * this.combo);
@@ -136,7 +139,6 @@ export class GameSession {
           if (!this.stats.bestTrick || gained > this.stats.bestTrick.points) this.stats.bestTrick = { title: rep.title, points: gained };
           this.ui.trick(rep, this.combo, gained);
           this.audio?.playTrickLanded(gained, this.combo, rep.perfect);
-          if (rep.total >= 800) this.player.celebrate = 1;
           if (rep.multiplier > 1 || rep.tricks.length > 1 || rep.total >= 500) {
             this.combo = Math.min(5, this.combo + 1);
             this.comboTimer = 5;
@@ -201,6 +203,7 @@ export class GameSession {
     this.respawnPoint = { x: st.x, z: st.z, heading: st.heading };
     if (this.player.crashed) this.player.endCrash();
     this.player.physics.reset(st.x, st.z, st.heading, 0);
+    this.player.choreo.reset();
     this.state = 'intro';
     // restarts skip the establishing swoop: just a 3-2-1 countdown from the chase camera
     this.introT = this.introDur - 3.05;
@@ -221,6 +224,7 @@ export class GameSession {
       }
     }
     this.player.physics.reset(sp.x, sp.z, sp.heading, RESPAWN_SPEED);
+    this.player.choreo.reset();
     this.safe = this.safe.filter((s) => s.t < this.clock - 1.5);
     this.state = 'riding';
     this.cam.snap(this.player.physics, this.world.ground);
@@ -335,6 +339,7 @@ export class GameSession {
       this.state = 'finished';
       this.stats.time = this.runTime;
       this.stats.score = this.score;
+      this.player.finished();
       this.audio?.playFinish();
       this.ui.finish({ ...this.stats });
       return;
