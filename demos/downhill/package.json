@@ -29,5 +29,12 @@
     "typescript": "^5.9.3",
     "vite": "^8.3.4",
     "vitest": "^4.0.0"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.10.0",
+    "@opentelemetry/core": "^3.1.0",
+    "@opentelemetry/otlp-transformer": "^0.301.0",
+    "@opentelemetry/resources": "^3.1.0",
+    "@opentelemetry/sdk-logs": "^3.1.0"
   }
 }

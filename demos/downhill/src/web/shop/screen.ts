@@ -52,6 +52,8 @@ export interface ShopHandlers {
   changed(state: ShopState): void;
   /** Open support (Contoso Outdoors' AI agent, in Help Desk) with what happened at checkout. */
   support(request: Omit<SupportRequest, 'ticketId'>): void;
+  /** A look went into the cart. */
+  added?(sku: string): void;
   click(): void;
 }
 
@@ -419,7 +421,17 @@ export class ShopScreen {
       }
       row.append(b);
     };
-    if (status === 'for-sale') act('Add to cart', 'btn small lime', (storefront) => storefront && (this.checkout = addToCart(storefront, this.checkout, item)), true);
+    if (status === 'for-sale')
+      act(
+        'Add to cart',
+        'btn small lime',
+        (storefront) => {
+          if (!storefront) return;
+          this.checkout = addToCart(storefront, this.checkout, item);
+          this.on.added?.(item.sku);
+        },
+        true,
+      );
     else if (status === 'in-cart') act('Remove from cart', 'btn small ghost', (storefront) => storefront && (this.checkout = removeFromCart(storefront, this.checkout, item.sku)), true);
     else if (status === 'owned') act(item.slot === 'bike' ? 'Use this paint' : 'Wear it', 'btn small lime', () => this.update(equip(this.state, item.sku)));
     else act(item.slot === 'bike' ? 'Back to stock paint' : 'Take it off', 'btn small ghost', () => this.update(unequip(this.state, item.slot)));

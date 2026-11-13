@@ -5,10 +5,13 @@ import { DownhillShop } from "./downhill.js";
 import { createRequestHandler, type Middleware } from "./http.js";
 import { log } from "./log.js";
 import { HelpDesk } from "./support.js";
+import { createTelemetry } from "./telemetry.js";
 
 const config = loadConfig();
+// First, so the startup lines below stream to Incident Commander too.
+const telemetry = createTelemetry({ incidentUrl: config.incidentUrl, secret: config.incidentAlertSecret, version: config.version });
 const support = new HelpDesk(config.helpDeskUrl, config.helpDeskPublicUrl);
-const shop = new DownhillShop(config);
+const shop = new DownhillShop(config, { telemetry });
 
 const server = createServer();
 let ui: Middleware | undefined;
@@ -37,6 +40,7 @@ log.info(`Downhill: http://localhost:${config.port}${config.dev ? " (dev)" : ""}
   storefront: `v${storefront.version}${storefront.deploy ? ` (deployed from ${storefront.deploy.incident})` : ""}`,
   helpDesk: config.helpDeskUrl ?? "not connected (set HELP_DESK_URL)",
   incidentCommander: config.incidentUrl ?? "not connected (set INCIDENT_URL)",
+  telemetry: telemetry.status().endpoint ?? "off",
   data: config.dataDir,
 });
 shop.logConfiguration();
@@ -47,7 +51,9 @@ function shutdown(signal: string): void {
   stopping = true;
   log.info("Shutting down", { signal });
   server.closeAllConnections();
-  server.close(() => process.exit(0));
+  // The last records (this one included) get up to 3 seconds to reach Incident Commander.
+  const flushed = Promise.race([telemetry.shutdown(), new Promise((resolve) => setTimeout(resolve, 3_000).unref())]);
+  server.close(() => void flushed.finally(() => process.exit(0)));
 }
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => shutdown(signal));

@@ -6,6 +6,7 @@ import type { DownhillConfig } from "./config.js";
 import { MAX_DEPLOY_BYTES, SIGNATURE_HEADER } from "./deploys.js";
 import type { DownhillShop } from "./downhill.js";
 import { DownhillError } from "./errors.js";
+import { MAX_GAME_EVENT_BYTES } from "./game-events.js";
 import { log } from "./log.js";
 import { MAX_EVENT_BYTES } from "./shop-events.js";
 import { LIMITS, parseSupportRequest, playerTicket, type SupportDesk } from "./support.js";
@@ -128,7 +129,7 @@ function buildRoutes(ctx: ApiContext): Record<string, Partial<Record<string, Han
         const ticket = playerTicket(request, { version: config.version, userAgent: req.headers["user-agent"] });
         const { ticketId, chatUrl } = await support.openTicket(ticket);
         const reopened = ticket.ticketId === ticketId;
-        log.info(reopened ? "Reopened a support ticket in Help Desk" : "Opened a support ticket in Help Desk", { ticket: ticketId, rider: ticket.player.rider, opener: ticket.opener, code: ticket.checkout?.code, order: ticket.checkout?.order?.id });
+        log.info(reopened ? "Reopened a support ticket in Help Desk" : "Opened a support ticket in Help Desk", { event: reopened ? "support.ticket_reopened" : "support.ticket_opened", ticket: ticketId, rider: ticket.player.rider, opener: ticket.opener, code: ticket.checkout?.code, order: ticket.checkout?.order?.id });
         sendJson(res, 201, { ticketId, chatUrl } satisfies SupportTicketResponse);
       },
     },
@@ -140,6 +141,13 @@ function buildRoutes(ctx: ApiContext): Record<string, Partial<Record<string, Han
     "/api/shop/events": {
       POST: async (req, res) => {
         shop.record(await readJson(req, MAX_EVENT_BYTES));
+        res.writeHead(204, { "cache-control": "no-store" }).end();
+      },
+    },
+    // What players do in the game (rides, tricks, crashes, the shop), sent on to Incident Commander as telemetry.
+    "/api/game/events": {
+      POST: async (req, res) => {
+        shop.game(await readJson(req, MAX_GAME_EVENT_BYTES));
         res.writeHead(204, { "cache-control": "no-store" }).end();
       },
     },

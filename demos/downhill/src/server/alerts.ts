@@ -119,7 +119,7 @@ export class ShopAlerts {
     return this.#send(alert, () => {
       this.#state = { firing: true, firedAt: new Date(now).toISOString() };
       this.#save();
-      log.info("Alerted Incident Commander: the launch code is rejected at checkout", { rejected: stats.rejected, attempts: stats.attempts });
+      log.info("Alerted Incident Commander: the launch code is rejected at checkout", { event: "alert.fired", alert: ALERT_ID, rejected: stats.rejected, attempts: stats.attempts });
     });
   }
 
@@ -141,7 +141,7 @@ export class ShopAlerts {
       description: `Firing since ${firedAt ? `${utcClock(Date.parse(firedAt))} UTC` : "earlier"}; resolved at ${utcClock(now)} UTC.`,
       labels: { team: "shop", env: "production" },
     };
-    return this.#send(alert, () => log.info("Told Incident Commander the alert is resolved", { why }));
+    return this.#send(alert, () => log.info("Told Incident Commander the alert is resolved", { event: "alert.resolved", alert: ALERT_ID, why }));
   }
 
   /** Forgets the alert's state (a demo reset). */

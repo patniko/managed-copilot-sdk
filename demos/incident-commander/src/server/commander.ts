@@ -15,6 +15,7 @@ import { log } from "./log.js";
 import type { IncidentPlatform } from "./platform.js";
 import { ServiceLoadError, type ServiceCatalog, type ServiceEntry } from "./services.js";
 import type { Store } from "./store.js";
+import { OTLP_LOGS_PATH } from "./telemetry.js";
 
 /** A re-sent alert notes "fired again" at most this often. */
 const REFIRE_NOTE_MS = 10 * 60_000;
@@ -99,6 +100,7 @@ export class Commander {
       ...(lastWebhookAt ? { lastWebhookAt } : {}),
       deployConfigured: this.config.deploy !== undefined,
       factory: { configured: factory !== undefined, ...(factory ? { url: factory.publicUrl } : {}) },
+      telemetryUrl: `${this.config.publicUrl}${OTLP_LOGS_PATH}`,
     };
   }
 

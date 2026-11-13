@@ -10,6 +10,10 @@ code `trail15`, and checkout rejects it. That one failure shows up everywhere:
 - The failed sales reach [Data Desk](../data-desk/README.md), where a chart of promo sales shows the drop starting when
   the banner went live.
 
+Everything the player does streams into Incident Commander as it happens: the server's logs, every checkout, and each
+drop-in, trick, crash, and finish go out as OpenTelemetry logs, so the rejected code shows up in Incident Commander's
+**Live telemetry** moments before the incident it causes.
+
 When a person approves Incident Commander's fix, it deploys to Downhill, and the same code works in the shop without
 reloading the game. The game itself runs no agents: it's a stock Vite and Three.js app with a small Node server.
 
@@ -56,11 +60,13 @@ aspire run          # the platform and the demos; open the "downhill" resource
 Downhill opens at <http://localhost:7455>. To demo launch day:
 
 1. **Ride.** Click **RIDE**, pick **Mona**, and **DROP IN**. Ride a little: the shop is the second act, not the first.
+   With Incident Commander open beside the game, its **Live telemetry** shows the drop-in, each trick, and each crash
+   as they happen.
 2. **Open the shop.** Press **Esc** and click **Shop**. It's also on the title screen and on the results screen after a
    run.
 3. **Pick a look.** Click **Neon Mona**: she appears in the live preview in hot pink. Click **Add to cart**.
-4. **Try the launch code.** Click **Apply code** on the launch-week banner. Checkout says **Invalid code.**, and the
-   shop's alert fires in Incident Commander.
+4. **Try the launch code.** Click **Apply code** on the launch-week banner. Checkout says **Invalid code.**, a WARN
+   `shop.promo_rejected` line streams into Incident Commander, and the shop's alert fires there.
 5. **Ask support.** Click **Support**, or **Code not working? Contact support** under checkout's message.
    - Contoso Outdoors' AI agent greets you in a panel over the shop.
    - Type *My discount code isn't working*.
@@ -87,7 +93,7 @@ browser session in `sessionStorage`.
 **Without the other demos** (just `pnpm --filter @managed-copilot/demo-downhill dev`, or `start` after a build):
 - The game, the shop, and the sales ledger all work.
 - Support says *Support isn't connected. Start Help Desk with `aspire run`, or set HELP_DESK_URL.*
-- The server logs once that alerts and deploys are off.
+- The server logs once that alerts, deploys, and telemetry are off.
 
 The [`happy-path`](scripts/happy-path.ts) script plays the flow above in Microsoft Edge on a fresh profile:
 1. It rides as Mona, opens the shop from the pause menu, and checks that checkout rejects `trail15` with "Invalid
@@ -354,6 +360,34 @@ x-incident-commander-signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<bo
 
 The server never imports or runs deployed code: it only serves it to the browser, where checkout imports it.
 
+### Telemetry, to Incident Commander
+
+With the alert's two settings (`INCIDENT_URL` and `INCIDENT_ALERT_SECRET`), the server streams OpenTelemetry logs to
+Incident Commander's `POST {INCIDENT_URL}/api/otlp/v1/logs`, the OTLP/HTTP endpoint any OpenTelemetry SDK or Collector
+can export to, with the alert secret as the bearer token ([`src/server/telemetry.ts`](src/server/telemetry.ts)):
+
+- **The pipeline is OpenTelemetry's.** The stock logs SDK (`LoggerProvider`, a batch processor every half second)
+  makes the records, under a resource with `service.name` `downhill-shop` and the game's `service.version`, and
+  OpenTelemetry's JSON serializer writes the OTLP body. Downhill posts it itself, with only the bearer header: the stock
+  OTLP exporter adds `OTEL_EXPORTER_OTLP_HEADERS` from the environment, where Aspire puts its dashboard's API key.
+- **What's sent**, each with a sentence as its body and attributes for queries:
+
+  | Event name | From | Body, for example |
+  | --- | --- | --- |
+  | `ride.started`, `ride.checkpoint`, `ride.trick`, `ride.crash`, `ride.finished` | the game | *Mona landed Backflip for 1,880 points (perfect landing)* |
+  | `shop.opened`, `shop.cart_added` | the game | *Mona added Neon Mona to the cart ($4.99)* |
+  | `shop.promo_applied`, `shop.promo_rejected` (WARN), `shop.purchase` | checkout (`/api/shop/events`) | *Checkout rejected code trail15 for Mona: Invalid code.* |
+  | `alert.fired`, `alert.resolved`, `deploy.completed`, `support.ticket_opened`, `demo.reset` | the server | *Alerted Incident Commander: the launch code is rejected at checkout* |
+  | (none) | the server's other log lines | *Downhill: http://localhost:7455* |
+
+- **The game's events.** The game batches them (rides) or sends them at once (the shop) to `POST /api/game/events`:
+  `{ events: [{ type, rider, at, world?, worldName?, bot?, ... }] }`, 1 to 25 at a time, 16 KB at most. The server
+  checks each one (names and prices come from the catalog, numbers are bounded, a time more than a minute off is
+  replaced by the server's), answers 204, and sends them on. Autopilot rides are marked `bot=true`.
+- **Never in the way.** Without the settings nothing is sent and `/api/status` says why. When Incident Commander
+  can't be reached, the server logs that once, in plain words, and the game carries on; the next batch tries again.
+  Log lines are redacted as they are on the console. Shutting down gives the last records up to 3 seconds.
+
 ### Reset
 
 `POST /api/demo/reset` comes from the game's own page or server to server. It clears live sales, deployed versions, and
@@ -383,7 +417,7 @@ Launch day lasts a day. When it's more than a day old, the server starts it over
     Each report is checked, capped, and sent fire and forget.
   - The server keeps those live events in the data directory, next to launch day's simulation
     ([`src/server/ledger.ts`](src/server/ledger.ts)).
-  - The sales, the service's log, and the alert's rule all read the same ledger.
+  - The sales, the service's log, the alert's rule, and the telemetry all read the same events.
 - **The shop.** [`src/web/shop`](src/web/shop) holds:
   - the catalog;
   - the shop's state and checkout: pure functions over a storefront version, unit tested;
@@ -413,8 +447,8 @@ Launch day lasts a day. When it's more than a day old, the server starts it over
 | `HOST` | `127.0.0.1` | Interface to listen on (`0.0.0.0` in a container, together with `DOWNHILL_ALLOWED_HOSTS`) |
 | `HELP_DESK_URL` | none (the root AppHost sets it) | Help Desk's API, which Downhill's server calls to open tickets. Unset: Support says support isn't connected |
 | `HELP_DESK_PUBLIC_URL` | `HELP_DESK_URL` | Help Desk's address in the player's browser: the chat panel opens there |
-| `INCIDENT_URL` | none (the root AppHost sets it) | Incident Commander's address, for the shop's alert. Unset: no alerts |
-| `INCIDENT_ALERT_SECRET` | none | The bearer secret for alerts: Incident Commander's `INCIDENT_ALERT_SECRET`. Unset: no alerts |
+| `INCIDENT_URL` | none (the root AppHost sets it) | Incident Commander's address, for the shop's alert and the server's telemetry. Unset: no alerts, no telemetry |
+| `INCIDENT_ALERT_SECRET` | none | The bearer secret for alerts and telemetry: Incident Commander's `INCIDENT_ALERT_SECRET`. Unset: no alerts, no telemetry |
 | `DOWNHILL_DEPLOY_SECRET` | none | The secret Incident Commander signs deploys with (its `INCIDENT_DEPLOY_SECRET`). Unset: deploys are refused (503) |
 | `DOWNHILL_DATA_DIR` | `.data` in the package (`/data` in the container) | Launch day's start time, live sales, the alert's state, and deployed storefront versions |
 | `DOWNHILL_STOREFRONT_DIR` | `../help-desk/storefront` | The storefront as it shipped, served read-only |
@@ -443,15 +477,15 @@ The game reads these URL parameters:
 | Path | Contents |
 | --- | --- |
 | `apphost.mts` | AppHost fragment: the app resource (no environments) |
-| `src/server` | The server: static files and request checks, support and the Help Desk client, storefront versions, the sales ledger and launch day's simulation, the alert, deploys, and Incident Commander's view of the service |
-| `src/shared` | What the server and the browser share: the catalog, the shop's events and sales, and the support contract |
+| `src/server` | The server: static files and request checks, support and the Help Desk client, storefront versions, the sales ledger and launch day's simulation, the alert, deploys, Incident Commander's view of the service, and telemetry (the game's events and OpenTelemetry) |
+| `src/shared` | What the server and the browser share: the catalog, the shop's events and sales, the game's events, and the support contract |
 | `src/web` | The game: app shell and main loop, input, procedural audio, bike physics, tricks, camera, riders, worlds, post-processing, menus and HUD |
 | `src/web/shop` | The Downhill Shop: catalog, state and checkout, the screen, the live preview, and the runtime storefront loader |
 | `src/web/support` | The support panel, its API client (the session's ticket), and the Support button's icon |
 | `src/web/dev` | Standalone preview pages for the characters and the audio engine (`pnpm dev`, then `/dev/characters.html` or `/dev/audio.html`) |
 | `src/web/public/thumbs` | Select-screen thumbnails, rendered from the game itself |
 | `scripts` | The happy path, and the game's headless-Edge playtest, screenshot, and keyboard UI test scripts |
-| `test` | Unit tests: the server, support, the shop's API (storefront versions, sales, the service, deploys, reset), the ledger, the alert, the fragment, the shop, and the game's physics, tricks, characters, and camera |
+| `test` | Unit tests: the server, support, the shop's API (storefront versions, sales, the service, deploys, reset), the ledger, the alert, telemetry, the fragment, the shop, and the game's physics, tricks, characters, and camera |
 | `Dockerfile` | The container `aspire deploy` publishes, with the storefront's original files |
 
 ## Worlds

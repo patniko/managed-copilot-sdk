@@ -9,6 +9,7 @@ import { log } from "./log.js";
 import { Platform } from "./platform.js";
 import { ServiceCatalog } from "./services.js";
 import { Store } from "./store.js";
+import { OTLP_LOGS_PATH, TelemetryFeed } from "./telemetry.js";
 
 let config: AppConfig;
 try {
@@ -23,6 +24,7 @@ const platform = new Platform(config);
 const catalog = new ServiceCatalog(config.demoServicesDir, config.servicesDir, { remote: config.remoteServices ?? [] });
 const commander = new Commander(config, platform, store, catalog, hub);
 commander.start();
+const telemetry = new TelemetryFeed(hub);
 
 const server = createServer();
 let ui: Middleware | undefined;
@@ -31,7 +33,7 @@ if (config.dev) {
   const vite = await createVite({ configFile: join(config.packageRoot, "vite.config.ts"), server: { middlewareMode: true, hmr: { server } }, appType: "spa" });
   ui = vite.middlewares as unknown as Middleware;
 }
-server.on("request", createRequestHandler({ commander, hub }, config.webRoot, ui));
+server.on("request", createRequestHandler({ commander, hub, telemetry }, config.webRoot, ui));
 
 await new Promise<void>((resolve, reject) => {
   server.once("error", reject);
@@ -45,6 +47,7 @@ platform.start();
 log.info(`Incident Commander: http://localhost:${config.port}${config.dev ? " (dev)" : ""}`, {
   environment: config.environment,
   alerts: config.alertSecret ? "on" : "off (set INCIDENT_ALERT_SECRET)",
+  telemetry: config.alertSecret ? `${config.publicUrl}${OTLP_LOGS_PATH}` : "off (set INCIDENT_ALERT_SECRET)",
   webhook: config.webhookSecret ? "on" : "off (set INCIDENT_WEBHOOK_SECRET)",
   deploys: config.deploy ? "your pipeline" : "demo only",
   services: config.remoteServices?.map((service) => service.name).join(", ") || "none over HTTP (set INCIDENT_SERVICE_URLS)",

@@ -4,7 +4,7 @@ type Level = "debug" | "info" | "warn" | "error";
 type Fields = Record<string, unknown>;
 
 const TOKEN_PATTERNS = [/\bgh[opusr]_[A-Za-z0-9]{20,}\b/g, /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi];
-const SECRET_KEYS = /token|secret|password|authorization|cookie|signature/i;
+export const SECRET_KEYS = /token|secret|password|authorization|cookie|signature/i;
 
 export function redact(text: string): string {
   return TOKEN_PATTERNS.reduce((value, pattern) => value.replace(pattern, "***"), text);

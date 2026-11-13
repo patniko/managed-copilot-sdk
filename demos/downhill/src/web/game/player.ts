@@ -49,6 +49,8 @@ export class Player {
   private seated = 1;
   celebrate = 0;
   private time = 0;
+  /** How far the visuals stand above the physics' ground (the trail's ribbon), m. */
+  private lift = 0;
   private readonly velocity = new THREE.Vector3();
 
   constructor(
@@ -155,6 +157,10 @@ export class Player {
       return;
     }
     this.root.position.copy(p.pos);
+    // the wheels stand on the ground as drawn: on a trail its ribbon sits a little above the physics' ground. In the air
+    // the lift holds, and settles again on landing.
+    if (p.grounded) this.lift = damp(this.lift, this.ground.drawnHeightAt(p.pos.x, p.pos.z) - this.ground.heightAt(p.pos.x, p.pos.z), 20, dt);
+    this.root.position.y += this.lift;
     p.orientation(this.euler);
     this.root.rotation.copy(this.euler);
     const fs = p.forwardSpeed;

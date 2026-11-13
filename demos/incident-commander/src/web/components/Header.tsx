@@ -159,6 +159,18 @@ function AlertsButton() {
           <pre className="mt-2 overflow-x-auto rounded-md bg-canvas-inset p-2 font-mono text-[11px] leading-4">{example}</pre>
         </details>
       </div>
+      <div className="flex flex-col gap-2 border-t border-line-muted p-4 text-sm">
+        <div>
+          <div className="font-semibold">Stream your logs</div>
+          <div className="text-fg-muted">OpenTelemetry logs (OTLP/HTTP, JSON), with the same secret. They show live on the board and on each incident.</div>
+        </div>
+        <div className="flex items-center gap-1 rounded-md border border-line bg-canvas-inset py-1 pr-1 pl-2">
+          <code className="min-w-0 flex-1 truncate font-mono text-xs" title={integrations.telemetryUrl}>
+            POST {integrations.telemetryUrl}
+          </code>
+          <CopyButton text={integrations.telemetryUrl} label="Copy the OpenTelemetry logs URL" />
+        </div>
+      </div>
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-t border-line-muted px-4 py-3 text-xs">
         <dt className="text-fg-muted">Platform webhook</dt>
         <dd className="text-right">{integrations.webhookConfigured ? (integrations.lastWebhookAt ? `Last delivery ${ago(integrations.lastWebhookAt, now)}` : "Waiting for a delivery") : "Off"}</dd>

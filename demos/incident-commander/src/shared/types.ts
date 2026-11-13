@@ -269,6 +269,29 @@ export interface IntegrationsView {
   readonly deployConfigured: boolean;
   /** `SOFTWARE_FACTORY_URL` is set, so fixes can go to Software Factory. `url` is its address for people. */
   readonly factory: { readonly configured: boolean; readonly url?: string };
+  /** Where services send OpenTelemetry logs (OTLP/HTTP, JSON), with the alert secret. */
+  readonly telemetryUrl: string;
+}
+
+/** How bad a telemetry record is: its OpenTelemetry severity, by range. */
+export type TelemetrySeverity = "trace" | "debug" | "info" | "warn" | "error" | "fatal";
+
+/** One OpenTelemetry log record a service sent, as the UI shows it. */
+export interface TelemetryRecord {
+  /** Unique while the app runs; records arrive in this order. */
+  readonly id: string;
+  /** When it happened (the record's time, or when it was observed or received). */
+  readonly at: string;
+  /** `service.name` of the record's resource, normalized like alerts' service names. */
+  readonly service: string;
+  readonly severity: TelemetrySeverity;
+  /** The record's event name (`eventName`, or its `event.name` attribute), such as `shop.promo_rejected`. */
+  readonly event?: string;
+  /** The record's body, as text. */
+  readonly body: string;
+  /** Its attributes, as text. */
+  readonly attributes: Readonly<Record<string, string>>;
+  readonly traceId?: string;
 }
 
 export interface AppSettings {
@@ -290,7 +313,9 @@ export type ServerEvent =
   | { readonly type: "settings"; readonly settings: AppSettings }
   | { readonly type: "incidents"; readonly incidents: readonly IncidentSummary[] }
   | { readonly type: "incident"; readonly incident: IncidentView }
-  | { readonly type: "removed"; readonly id: string };
+  | { readonly type: "removed"; readonly id: string }
+  /** New telemetry records, oldest first. `reset`: these are all the recent ones (the stream just opened). */
+  | { readonly type: "telemetry"; readonly records: readonly TelemetryRecord[]; readonly reset?: boolean };
 
 export interface ApiErrorBody {
   readonly error: { readonly code: string; readonly message: string };

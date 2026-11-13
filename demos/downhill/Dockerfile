@@ -5,9 +5,10 @@
 #   docker buildx build -f demos/downhill/Dockerfile --platform linux/amd64 \
 #     --build-arg NPM_REGISTRY="$(npm config get registry)" -t managed-copilot-downhill .
 #
-# The game is static files and a small Node server with no dependencies. The server serves the game; passes players'
-# support tickets to Help Desk (HELP_DESK_URL, and HELP_DESK_PUBLIC_URL for the player's browser); keeps the shop's
-# sales ledger for Data Desk; alerts Incident Commander (INCIDENT_URL, INCIDENT_ALERT_SECRET); and takes its approved
+# The game is static files and a small Node server whose only dependencies are OpenTelemetry's. The server serves the
+# game; passes players' support tickets to Help Desk (HELP_DESK_URL, and HELP_DESK_PUBLIC_URL for the player's browser);
+# keeps the shop's sales ledger for Data Desk; alerts Incident Commander (INCIDENT_URL, INCIDENT_ALERT_SECRET) and streams
+# its logs and players' game events there as OpenTelemetry logs; and takes its approved
 # deploys (DOWNHILL_DEPLOY_SECRET). The shop's checkout imports Contoso Outdoors' storefront code at runtime: the server
 # serves the original files from demos/help-desk/storefront (copied into the image) and deployed fixes from its data
 # directory (DOWNHILL_DATA_DIR, default /data), and never runs either. The entrypoint is the lease supervisor from
@@ -39,12 +40,18 @@ RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/demo-down
 RUN mkdir -p /out-azure \
  && cp deployments/azure/package.json /out-azure/ && cp -r deployments/azure/dist /out-azure/ \
  && find /out-azure -name '*.map' -delete
-# The server has no runtime dependencies: the built server and game, the files it locates its package root by, and the
-# storefront as it shipped (its package.json, README, code, and tests), which checkout imports and Incident Commander reads.
+# The server's runtime dependencies are OpenTelemetry's logs SDK and OTLP exporter (pure JavaScript): a production-only
+# install in its own workspace root (/out). With the built server and game go the files it locates its package root by,
+# and the storefront as it shipped (its package.json, README, code, and tests), which checkout imports and Incident
+# Commander reads.
 RUN mkdir -p /out/demos/downhill /out/demos/help-desk/storefront \
+ && cp package.json pnpm-lock.yaml /out/ \
+ && sed '/^supportedArchitectures:/,$d' pnpm-workspace.yaml > /out/pnpm-workspace.yaml \
  && cp demos/downhill/package.json demos/downhill/apphost.mts /out/demos/downhill/ \
  && cp -r demos/downhill/dist /out/demos/downhill/ \
  && cp -r demos/help-desk/storefront/package.json demos/help-desk/storefront/README.md demos/help-desk/storefront/src demos/help-desk/storefront/test /out/demos/help-desk/storefront/ \
+ && cd /out \
+ && pnpm install --prod --offline --frozen-lockfile --ignore-scripts --filter @managed-copilot/demo-downhill \
  && find /out -name '*.map' -delete
 
 FROM ${NODE_IMAGE}
@@ -57,6 +64,7 @@ COPY --from=build /out /opt/managed-copilot/app
 COPY --from=build /out-azure /opt/managed-copilot/azure
 WORKDIR /opt/managed-copilot/app/demos/downhill
 RUN test -f dist/server/main.js && test -f dist/web/index.html && test -f dist/web/thumbs/citadel.jpg \
+ && test -d node_modules/@opentelemetry/sdk-logs \
  && test -f ../help-desk/storefront/package.json && test -f ../help-desk/storefront/src/promotions.js \
  && test -f ../help-desk/storefront/src/cart.js && test -f ../help-desk/storefront/test/promotions.test.js
 ENV NODE_ENV=production \

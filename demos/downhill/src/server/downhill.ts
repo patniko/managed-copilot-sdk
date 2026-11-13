@@ -5,11 +5,13 @@ import { ALERTS_OFF, ShopAlerts, type AlertStatus } from "./alerts.js";
 import type { DownhillConfig } from "./config.js";
 import { parseDeploy, verifySignature } from "./deploys.js";
 import { DownhillError } from "./errors.js";
+import { parseGameEvents, shopRecord } from "./game-events.js";
 import { Ledger, toCsv, type LedgerEvent } from "./ledger.js";
 import { log } from "./log.js";
 import { incidentService, type IncidentService } from "./service.js";
 import { parseShopEvent } from "./shop-events.js";
 import { Storefront, type DeployRecord } from "./storefront.js";
+import { NO_TELEMETRY, TELEMETRY_OFF, type Telemetry, type TelemetryStatus } from "./telemetry.js";
 import { LAUNCH_DAY, loadTimeline, restartTimeline, timelineFrom } from "./timeline.js";
 
 export const DEPLOYS_OFF = "Deploys are off: set DOWNHILL_DEPLOY_SECRET to the secret Incident Commander signs deploys with (its INCIDENT_DEPLOY_SECRET).";
@@ -22,6 +24,7 @@ export interface DeployAnswer {
 export interface ShopStatus {
   readonly alerts: AlertStatus;
   readonly deploys: { readonly configured: boolean; readonly message?: string };
+  readonly telemetry: TelemetryStatus;
   readonly storefront: StorefrontInfo;
   readonly timeline: { readonly startedAt: string; readonly launchAt: string; readonly bannerAt: string };
   readonly liveEvents: number;
@@ -35,12 +38,15 @@ export class DownhillShop {
   readonly ledger: Ledger;
   readonly storefront: Storefront;
   readonly alerts: ShopAlerts;
+  /** Logs, checkouts, and game events as OpenTelemetry log records, to Incident Commander. */
+  readonly telemetry: Telemetry;
   readonly #config: ShopConfig;
   readonly #now: () => number;
 
-  constructor(config: ShopConfig, options: { now?: () => number; fetcher?: typeof fetch } = {}) {
+  constructor(config: ShopConfig, options: { now?: () => number; fetcher?: typeof fetch; telemetry?: Telemetry } = {}) {
     this.#config = config;
     this.#now = options.now ?? Date.now;
+    this.telemetry = options.telemetry ?? NO_TELEMETRY;
     this.storefront = new Storefront(config.storefrontDir, config.dataDir);
     this.ledger = new Ledger(config.dataDir, loadTimeline(config.dataDir, this.#now()), () => this.storefront.fixedAt());
     this.alerts = new ShopAlerts({
@@ -71,8 +77,16 @@ export class DownhillShop {
     this.#launchDay(now);
     const event = parseShopEvent(body, now);
     this.ledger.record(event);
+    this.telemetry.emit(shopRecord(event));
     if (event.type === "promo_rejected") void this.alerts.onLiveRejection(now);
     return event;
+  }
+
+  /** What a player did in the game (rides, tricks, the shop), sent on as telemetry. Returns how many events. */
+  game(body: unknown): number {
+    const records = parseGameEvents(body, this.#now());
+    for (const record of records) this.telemetry.emit(record);
+    return records.length;
   }
 
   sales(): SalesRow[] {
@@ -111,7 +125,7 @@ export class DownhillShop {
     const deploy = parseDeploy(parsed);
     const now = this.#now();
     const record = this.storefront.activate({ ...deploy, ...(key ? { idempotencyKey: key } : {}) }, now);
-    log.info("Deployed a storefront fix: checkout runs it now", { version: record.version, incident: record.incident, approvedBy: record.approvedBy, files: record.files.length });
+    log.info("Deployed a storefront fix: checkout runs it now", { event: "deploy.completed", version: record.version, incident: record.incident, approvedBy: record.approvedBy, files: record.files.length });
     void this.alerts.resolve(now, `Checkout takes the launch code again: Downhill's shop runs storefront v${record.version}, deployed from ${record.incident}.`);
     return answer(record);
   }
@@ -126,7 +140,7 @@ export class DownhillShop {
     this.alerts.clear();
     if (options.restartTimeline) this.ledger.timeline = restartTimeline(this.#config.dataDir, now);
     const version = this.storefront.originalVersion();
-    log.info("Reset the demo", { storefront: version, timeline: options.restartTimeline ? "restarted" : "kept" });
+    log.info("Reset the demo", { event: "demo.reset", storefront: version, timeline: options.restartTimeline ? "restarted" : "kept" });
     return {
       message: `Demo reset: live sales, deployed fixes, and the alert are cleared, and checkout runs storefront v${version} again${options.restartTimeline ? "; launch day starts over (launch three hours ago)" : ""}.`,
     };
@@ -139,6 +153,7 @@ export class DownhillShop {
     return {
       alerts: this.alerts.status(),
       deploys: { configured: Boolean(this.#config.deploySecret), ...(this.#config.deploySecret ? {} : { message: DEPLOYS_OFF }) },
+      telemetry: this.telemetry.status(),
       storefront: this.storefront.info(),
       timeline: { startedAt: iso(startedAt), launchAt: iso(launchAt), bannerAt: iso(bannerAt) },
       liveEvents: this.ledger.liveCount,
@@ -149,5 +164,6 @@ export class DownhillShop {
   logConfiguration(): void {
     if (!this.alerts.configured) log.info(ALERTS_OFF);
     if (!this.#config.deploySecret) log.info(DEPLOYS_OFF);
+    if (!this.telemetry.configured) log.info(TELEMETRY_OFF);
   }
 }

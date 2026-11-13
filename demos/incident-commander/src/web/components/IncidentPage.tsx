@@ -23,6 +23,7 @@ import { Approval } from "./Approval.js";
 import { Findings, Postmortem } from "./Report.js";
 import { ResponseMap } from "./ResponseMap.js";
 import { Timeline } from "./Timeline.js";
+import { LiveTelemetry } from "./Telemetry.js";
 import { FACTORY_STATUS_LABEL, OpenInFactory, Popover, SeverityBadge, Spinner, STATUS_LABEL, STATUS_TEXT, Tooltip, waitingForFactory } from "./ui.js";
 
 const STEPS: readonly IncidentStatus[] = ["investigating", "mitigating", "resolved"];
@@ -334,6 +335,7 @@ export function IncidentPage({ id }: { readonly id: string }) {
           <Findings incident={incident} />
         </div>
         <div className="flex min-w-0 flex-col gap-3">
+          <LiveTelemetry service={incident.service} listClassName="max-h-72" />
           <Timeline entries={incident.timeline} />
           {incident.status !== "resolved" ? <NoteComposer incident={incident} /> : null}
         </div>

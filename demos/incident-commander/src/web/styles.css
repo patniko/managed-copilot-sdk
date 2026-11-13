@@ -30,6 +30,14 @@
   }
 }
 
+/* A telemetry record that just arrived: an accent flash that fades into its row. */
+@keyframes telemetry-fresh {
+  from {
+    background-color: var(--bgColor-accent-muted);
+    box-shadow: inset 3px 0 0 var(--fgColor-accent);
+  }
+}
+
 @layer components {
   /* An arrow between two columns of the map; `data-active` makes it flow. */
   .link {
@@ -129,5 +137,15 @@
   .needs-you {
     border-color: var(--borderColor-attention-emphasis);
     animation: needs-you 2s ease-out infinite;
+  }
+
+  .telemetry-fresh {
+    animation: telemetry-fresh 1.6s ease-out;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .telemetry-fresh {
+      animation: none;
+    }
   }
 }
