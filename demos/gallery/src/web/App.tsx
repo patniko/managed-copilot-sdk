@@ -8,10 +8,11 @@ import {
   CommentDiscussionIcon,
   DeviceDesktopIcon,
   DotFillIcon,
+  HomeIcon,
   LinkExternalIcon,
   MarkGithubIcon,
+  PulseIcon,
   ShieldIcon,
-  StackIcon,
   SyncIcon,
   TerminalIcon,
   TriangleDownIcon,
@@ -378,6 +379,71 @@ function ReadmeLink({ href, name }: { readonly href: string; readonly name: stri
   );
 }
 
+/**
+ * The operator console, the hero's main button. It opens the first gateway whose console answers (local first), with a
+ * second button for the other gateway when both are known. A deployed gallery copies the command instead: the console
+ * signs each operator in with their own GitHub account, from their terminal.
+ */
+function ConsoleButtons({ state }: { readonly state?: GalleryState }) {
+  if (state?.hosted) {
+    const gatewayUrl = state.cloud.gatewayUrl;
+    if (!gatewayUrl) return null;
+    const command = `npx managed-copilot console --url ${gatewayUrl}`;
+    return (
+      <CopyButton
+        className="btn-primary"
+        text={command}
+        label="Copy the command that opens the operator console"
+        tooltip={
+          <span className="font-mono">
+            {command}
+            <span className="mt-1 block font-sans text-fg-on-emphasis/70">Each operator runs it to sign in with their own GitHub account</span>
+          </span>
+        }
+      >
+        Operator console
+      </CopyButton>
+    );
+  }
+  const links = (["local", "cloud"] as const).flatMap((target) => {
+    const link = state?.[target]?.links[CONSOLE.id];
+    return link ? [{ target, link }] : [];
+  });
+  const [main, other] = [...links].sort((a, b) => Number(b.link.health === "online") - Number(a.link.health === "online"));
+  if (!main) {
+    return (
+      <Tooltip content={state ? "No gateway found. Start the platform with aspire run." : "Checking the gateways…"}>
+        <button type="button" className="btn btn-primary" aria-disabled="true">
+          <PulseIcon size={16} />
+          Operator console
+        </button>
+      </Tooltip>
+    );
+  }
+  const OtherGlyph = other ? TARGET_ICON[other.target] : undefined;
+  return (
+    <div className="flex items-center gap-2">
+      <Tooltip content={`${TARGET_NAME[main.target]}: ${linkTitle(main.target, main.link, state?.[main.target], false)}`}>
+        <a className="btn btn-primary" href={main.link.url} target="_blank" rel="noreferrer" aria-label={`Open the operator console (${TARGET_NAME[main.target]}, ${HEALTH_TEXT[main.link.health].toLowerCase()})`}>
+          <PulseIcon size={16} />
+          Operator console
+          {main.link.health === "online" ? null : <StatusDot tone={LINK_TONE[main.link.health]} />}
+        </a>
+      </Tooltip>
+      {other && OtherGlyph ? (
+        <Tooltip content={`${TARGET_NAME[other.target]}: ${linkTitle(other.target, other.link, state?.[other.target], false)}`}>
+          <a className="btn" href={other.link.url} target="_blank" rel="noreferrer" aria-label={`Open the operator console (${TARGET_NAME[other.target]}, ${HEALTH_TEXT[other.link.health].toLowerCase()})`}>
+            <OtherGlyph size={16} />
+            {TARGET_NAME[other.target]}
+            <StatusDot tone={LINK_TONE[other.link.health]} />
+          </a>
+        </Tooltip>
+      ) : null}
+      <ReadmeLink href={`${state?.repoUrl ?? ""}${CONSOLE.readme}`} name={CONSOLE.title} />
+    </div>
+  );
+}
+
 function PatternMarkers({ app, patterns }: { readonly app: AppEntry; readonly patterns: readonly Pattern[] }) {
   if (app.id === COMPARE_APP_ID) {
     return (
@@ -418,16 +484,7 @@ function AppActions({ app, state }: { readonly app: AppEntry; readonly state?: G
   return (
     <div className="flex items-center gap-2">
       {hosted ? null : <OpenButton app={app} target="local" link={local} state={state?.local} hosted={hosted} />}
-      {hosted && app.id === CONSOLE.id ? (
-        // The console signs each operator in with their own GitHub account, from their terminal.
-        state?.cloud.gatewayUrl ? (
-          <CopyButton text={`npx managed-copilot console --url ${state.cloud.gatewayUrl}`} label="Copy the command that opens the console">
-            Copy command
-          </CopyButton>
-        ) : null
-      ) : noCloud ? null : (
-        <OpenButton app={app} target="cloud" link={cloud} state={state?.cloud} hosted={hosted} />
-      )}
+      {noCloud ? null : <OpenButton app={app} target="cloud" link={cloud} state={state?.cloud} hosted={hosted} />}
       <span className="ml-auto">
         <ReadmeLink href={`${state?.repoUrl ?? ""}${app.readme}`} name={app.title} />
       </span>
@@ -462,7 +519,7 @@ function AppCard({ app, patterns, state }: { readonly app: AppEntry; readonly pa
 }
 
 /**
- * One app on the Connected demos map. `tall` (the storefront and the factory, which span the map's height) stacks its
+ * One app on the Downhill Launch map. `tall` (the storefront and the factory, which span the map's height) stacks its
  * screenshot over its text; `wide` (the apps between them) puts its screenshot beside it. Downhill's has the shop switch.
  */
 function FlowNode({ app, layout, sends, patterns, state }: { readonly app: AppEntry; readonly layout: NodeLayout; readonly sends: readonly Send[]; readonly patterns: readonly Pattern[]; readonly state?: GalleryState }) {
@@ -602,8 +659,8 @@ function WalkthroughList({ walkthroughs, state }: { readonly walkthroughs: reado
 // ------------------------------------------------------------------------------------------------ Hack the Harness
 
 /**
- * Hack the Harness's stages, one row each, to flip between architectures during a talk. Each opens the local app at
- * that stage; every stage runs side by side, so switching needs no rebuild or restart.
+ * Hack the Harness: the app itself, then a card per stage, to flip between architectures during a talk. Each opens the
+ * local app at that stage; every stage runs side by side, so switching needs no rebuild or restart.
  */
 function HarnessStages({ apps, patterns, state }: { readonly apps: readonly AppEntry[]; readonly patterns: readonly Pattern[]; readonly state?: GalleryState }) {
   const app = apps.find((entry) => entry.id === HARNESS_APP_ID);
@@ -611,58 +668,90 @@ function HarnessStages({ apps, patterns, state }: { readonly apps: readonly AppE
   if (!app || state?.hosted) return null;
   const link = state?.local?.links[app.id];
   const online = link?.health === "online";
+  const waiting = link && !online ? (state?.local?.gateway === "online" ? "Starting…" : "Needs aspire run") : undefined;
   return (
-    <section id="hack-the-harness" className="scroll-mt-4" aria-labelledby="harness-heading">
-      <div className="Subhead">
-        <h2 id="harness-heading" className="Subhead-heading inline-flex items-center gap-2">
-          {app.title} stages <span className="Counter">{HARNESS_STAGES.length}</span>
-        </h2>
-        <div className="Subhead-actions flex items-center gap-2">
-          {link && !online ? <span className="text-xs text-fg-muted">{state?.local?.gateway === "online" ? "Starting…" : "Needs aspire run"}</span> : null}
-          <ReadmeLink href={`${state?.repoUrl ?? ""}${app.readme}`} name={app.title} />
+    <section id="hack-the-harness" className="flex scroll-mt-4 flex-col gap-6" aria-labelledby="harness-heading">
+      <article className="harness-hero Box grid overflow-hidden md:grid-cols-[3fr_2fr]">
+        <Shot app={app} href={online ? link.url : undefined} />
+        <div className="flex flex-col gap-3 p-5">
+          <h2 id="harness-heading" className="text-xl font-semibold">
+            {app.title}
+          </h2>
+          <p className="text-base text-fg-muted">{app.tagline}</p>
+          <p className="text-sm">{app.description}</p>
+          <p className="text-sm text-fg-muted">
+            <span className="font-semibold text-fg">Try</span> {app.tryIt}
+          </p>
+          <div className="mt-auto flex items-center gap-2 pt-2">
+            {link ? (
+              <a className={cx("btn", online && "btn-primary")} href={harnessStageUrl(link.url, HARNESS_STAGES[0]!.id)} target="_blank" rel="noreferrer">
+                <DeviceDesktopIcon size={16} />
+                Open the office
+              </a>
+            ) : (
+              <button type="button" className="btn" disabled>
+                <DeviceDesktopIcon size={16} />
+                Open the office
+              </button>
+            )}
+            {waiting ? <span className="text-xs text-fg-muted">{waiting}</span> : null}
+            <span className="ml-auto">
+              <ReadmeLink href={`${state?.repoUrl ?? ""}${app.readme}`} name={app.title} />
+            </span>
+          </div>
         </div>
+      </article>
+
+      <div>
+        <div className="Subhead">
+          <h3 className="Subhead-heading inline-flex items-center gap-2">
+            Stages <span className="Counter">{HARNESS_STAGES.length}</span>
+          </h3>
+        </div>
+        <p className="mb-4 text-sm text-fg-muted">
+          The same staff assistant on six architectures, all running at once. Each stage has its own chats, so open one, start a new chat, and flip to the next.
+        </p>
+        <ol className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {HARNESS_STAGES.map((stage, index) => {
+            const pattern = patterns.find((entry) => entry.id === stage.pattern);
+            const href = link ? harnessStageUrl(link.url, stage.id) : undefined;
+            return (
+              <li key={stage.id} id={`harness-${stage.id}`} className="stage-card Box flex scroll-mt-4 flex-col gap-3 p-4">
+                <header className="flex items-center gap-2">
+                  <span className="walkthrough-id" aria-hidden>
+                    {index + 1}
+                  </span>
+                  <h4 className="text-base font-semibold">
+                    <span className="sr-only">Stage {index + 1}: </span>
+                    {stage.title}
+                  </h4>
+                  {pattern ? (
+                    <a className="pattern-marker ml-auto" href={`#pattern-${pattern.id}`} title={`The ${pattern.title} pattern`}>
+                      {pattern.title} pattern
+                    </a>
+                  ) : null}
+                </header>
+                {pattern ? <PatternDiagram pattern={pattern} /> : null}
+                <p className="text-sm text-fg-muted">{stage.summary}</p>
+                <footer className="mt-auto flex items-center border-t border-line-muted pt-3">
+                  {href ? (
+                    <a className={cx("btn btn-sm", online && "btn-primary")} href={href} target="_blank" rel="noreferrer" aria-label={`Open stage ${index + 1}, ${stage.title}`}>
+                      <DeviceDesktopIcon size={16} />
+                      Open stage
+                    </a>
+                  ) : (
+                    <button type="button" className="btn btn-sm" disabled aria-label={`Stage ${index + 1}, ${stage.title}: the local platform isn't running`}>
+                      <DeviceDesktopIcon size={16} />
+                      Open stage
+                    </button>
+                  )}
+                  <code className="inline-code ml-auto text-xs text-fg-muted">?stage={stage.id}</code>
+                </footer>
+              </li>
+            );
+          })}
+        </ol>
       </div>
-      <p className="mb-3 text-sm text-fg-muted">
-        The same staff assistant on six architectures, all running at once. Each stage has its own chats, so open one, start a new chat, and flip to the next.
-      </p>
-      <ol className="Box">
-        {HARNESS_STAGES.map((stage, index) => {
-          const pattern = patterns.find((entry) => entry.id === stage.pattern);
-          const href = link ? harnessStageUrl(link.url, stage.id) : undefined;
-          return (
-            <li key={stage.id} id={`harness-${stage.id}`} className="walkthrough Box-row flex scroll-mt-4 items-center gap-3">
-              <span className="walkthrough-id" aria-hidden>
-                {index + 1}
-              </span>
-              <div className="min-w-0 flex-1 md:flex md:items-baseline md:gap-4">
-                <p className="truncate font-semibold md:w-40 md:shrink-0">
-                  <span className="sr-only">Stage {index + 1}: </span>
-                  {stage.title}
-                </p>
-                <p className="truncate text-sm text-fg-muted" title={stage.summary}>
-                  {stage.summary}
-                </p>
-              </div>
-              {pattern ? (
-                <a className="Label shrink-0 max-sm:hidden" href={`#pattern-${pattern.id}`} title={`The ${pattern.title} pattern`}>
-                  {pattern.title}
-                </a>
-              ) : null}
-              {href ? (
-                <a className={cx("btn btn-sm shrink-0", online && "btn-primary")} href={href} target="_blank" rel="noreferrer" aria-label={`Open stage ${index + 1}, ${stage.title}`}>
-                  <DeviceDesktopIcon size={16} />
-                  Open
-                </a>
-              ) : (
-                <button type="button" className="btn btn-sm shrink-0" disabled aria-label={`Stage ${index + 1}, ${stage.title}: the local platform isn't running`}>
-                  <DeviceDesktopIcon size={16} />
-                  Open
-                </button>
-              )}
-            </li>
-          );
-        })}
-      </ol>
     </section>
   );
 }
@@ -754,15 +843,14 @@ export function Gallery(props: GalleryProps) {
   const connected = appsOnTab(apps, "connected", hosted);
   const more = appsOnTab(apps, "more", hosted);
   const staff = appsOnTab(apps, "staff", hosted).length > 0;
-  const tabs: readonly { readonly id: Tab; readonly label: string; readonly icon: typeof StackIcon; readonly count: number }[] = [
-    { id: "architectures", label: "Architectures", icon: StackIcon, count: patterns.length },
-    { id: "connected", label: "Connected demos", icon: WorkflowIcon, count: connected.length },
+  const tabs: readonly { readonly id: Tab; readonly label: string; readonly icon: typeof HomeIcon; readonly count?: number }[] = [
+    { id: "overview", label: "Overview", icon: HomeIcon },
+    { id: "downhill-launch", label: "Downhill Launch", icon: WorkflowIcon, count: connected.length },
     ...(staff ? [{ id: "staff-assistant" as const, label: "Staff assistant", icon: CommentDiscussionIcon, count: HARNESS_STAGES.length }] : []),
     { id: "demos", label: "More demos", icon: AppsIcon, count: more.length },
-    { id: "walkthroughs", label: "Walkthroughs", icon: TerminalIcon, count: walkthroughs.length },
   ];
   const [chosen, selectTab] = useTab();
-  const tab: Tab = tabs.some((entry) => entry.id === chosen) ? chosen : "architectures";
+  const tab: Tab = tabs.some((entry) => entry.id === chosen) ? chosen : "overview";
   return (
     <div className="min-h-screen bg-canvas text-fg">
       <header className="AppHeader">
@@ -790,10 +878,15 @@ export function Gallery(props: GalleryProps) {
 
       <section className="hero border-b border-line">
         <div className="mx-auto max-w-[1280px] px-4 pt-8 sm:px-6">
-          <h1 className="text-2xl font-semibold">Demo gallery</h1>
-          <p className="mt-1 text-base text-fg-muted">
-            {hosted ? "Six ways to run an agent, and the apps in this deployment that show them." : "Six ways to run an agent, and the apps and walkthroughs that show them."}
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="min-w-0">
+              <h1 className="text-2xl font-semibold">Demo gallery</h1>
+              <p className="mt-1 text-base text-fg-muted">
+                {hosted ? "Six ways to run an agent, and the apps in this deployment that show them." : "Six ways to run an agent, and the apps and walkthroughs that show them."}
+              </p>
+            </div>
+            <ConsoleButtons state={state} />
+          </div>
           <nav className="UnderlineNav mt-6 border-b-0" aria-label="Gallery sections">
             <div className="UnderlineNav-body" role="tablist">
               {tabs.map(({ id, label, icon: Glyph, count }) => (
@@ -812,7 +905,7 @@ export function Gallery(props: GalleryProps) {
                 >
                   <Glyph size={16} className="UnderlineNav-octicon" />
                   <span>{label}</span>
-                  <span className="Counter">{count}</span>
+                  {count === undefined ? null : <span className="Counter">{count}</span>}
                 </a>
               ))}
             </div>
@@ -875,8 +968,8 @@ export function Gallery(props: GalleryProps) {
           </div>
         ) : null}
 
-        {tab === "architectures" ? (
-          <div role="tabpanel" id="panel-architectures" aria-labelledby="tab-architectures">
+        {tab === "overview" ? (
+          <div role="tabpanel" id="panel-overview" aria-labelledby="tab-overview" className="flex flex-col gap-10">
             <section id="patterns" className="scroll-mt-4" aria-labelledby="patterns-heading">
               <div className="Subhead">
                 <h2 id="patterns-heading" className="Subhead-heading inline-flex items-center gap-2">
@@ -900,15 +993,16 @@ export function Gallery(props: GalleryProps) {
                 ))}
               </div>
             </section>
+            <WalkthroughList walkthroughs={walkthroughs} state={state} />
           </div>
         ) : null}
 
-        {tab === "connected" ? (
-          <div role="tabpanel" id="panel-connected" aria-labelledby="tab-connected">
+        {tab === "downhill-launch" ? (
+          <div role="tabpanel" id="panel-downhill-launch" aria-labelledby="tab-downhill-launch">
             <section id="connected-apps" aria-labelledby="connected-heading">
               <div className="Subhead">
                 <h2 id="connected-heading" className="Subhead-heading inline-flex items-center gap-2">
-                  Connected demos <span className="Counter">{connected.length}</span>
+                  Downhill Launch <span className="Counter">{connected.length}</span>
                 </h2>
               </div>
               <p className="mb-6 text-sm text-fg-muted">
@@ -930,12 +1024,6 @@ export function Gallery(props: GalleryProps) {
         {tab === "demos" ? (
           <div role="tabpanel" id="panel-demos" aria-labelledby="tab-demos">
             <AppGrid id="demos" title="More demos" intro="Each of these stands on its own: one app, one idea." apps={more} patterns={patterns} state={state} />
-          </div>
-        ) : null}
-
-        {tab === "walkthroughs" ? (
-          <div role="tabpanel" id="panel-walkthroughs" aria-labelledby="tab-walkthroughs">
-            <WalkthroughList walkthroughs={walkthroughs} state={state} />
           </div>
         ) : null}
 

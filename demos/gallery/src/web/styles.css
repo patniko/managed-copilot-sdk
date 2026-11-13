@@ -509,6 +509,7 @@
     box-shadow: var(--shadow-resting-medium);
   }
   .pattern-card:target,
+  .stage-card:target,
   .walkthrough:target {
     animation: gallery-target 2.4s ease-out;
   }
@@ -537,6 +538,26 @@
     height: 100%;
     background-image: radial-gradient(var(--borderColor-default) 1px, transparent 1px);
     background-size: 16px 16px;
+  }
+  /* Hack the Harness: the screenshot beside the app's description on wide screens. */
+  @media (min-width: 768px) {
+    .harness-hero .shot {
+      height: 100%;
+      border-right: 1px solid var(--borderColor-default);
+      border-bottom: 0;
+    }
+  }
+  .harness-hero .shot img {
+    object-position: center;
+  }
+  .stage-card {
+    transition:
+      box-shadow 150ms ease,
+      border-color 150ms ease;
+  }
+  .stage-card:hover {
+    border-color: var(--borderColor-accent-muted);
+    box-shadow: var(--shadow-resting-medium);
   }
   .shot-initials {
     display: grid;
