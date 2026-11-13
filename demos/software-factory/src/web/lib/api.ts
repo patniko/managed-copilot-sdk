@@ -5,6 +5,7 @@ import type {
   CreateRevisionRequest,
   CreateWorkOrderRequest,
   FactoryState,
+  GateDecisionRequest,
   GitHubStatus,
   IssueDetail,
   IssueSummary,
@@ -141,6 +142,7 @@ export const api = {
   reviseWorkOrder: (id: string, request: string) => json<WorkOrder>("POST", `${workOrderUrl(id)}/revisions`, { request } satisfies CreateRevisionRequest),
   refreshPullRequest: (id: string) => json<WorkOrder>("GET", `${workOrderUrl(id)}/pull-request`),
   mergePullRequest: (id: string, method: MergeRequest["method"]) => json<WorkOrder>("POST", `${workOrderUrl(id)}/merge`, { method } satisfies MergeRequest),
+  decideGate: (id: string, gateId: string, decision: GateDecisionRequest) => json<WorkOrder>("POST", `${workOrderUrl(id)}/gates/${enc(gateId)}/decision`, decision),
   github: () => json<GitHubStatus>("GET", "/api/github"),
   repositories: (query: string, signal?: AbortSignal) =>
     json<RepositorySummary[]>("GET", `/api/github/repos${query.trim() ? `?q=${enc(query.trim())}` : ""}`, undefined, signal),

@@ -148,7 +148,7 @@ Five of the demos tell one story, in the order the gallery's **Connected demos**
 3. **Data Desk:** the **Storefront checkout funnel** shows mobile shoppers with $40 to $49 carts dropping out at the
    $5.99 shipping fee, and the insight goes to the factory as an experiment to build.
 4. **Incident Commander:** checkout's v1.4.2 crashes on expired coupons. Copilot triages, routes the fix through the
-   factory, and deploys when you say so.
+   factory, and deploys when you approve it on the work order's **Deploy** gate.
 5. **Software Factory:** the bug, the insight, and the fix arrive as work orders, each showing where it came from, and
    go back as tested releases.
 

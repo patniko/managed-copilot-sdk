@@ -85,7 +85,7 @@ export interface ToolInfo {
   readonly approval: boolean;
 }
 
-export const TOOL_NAMES = ["list_my_orders", "get_order", "track_shipment", "request_refund", "cancel_order", "report_bug", "resolve_conversation"] as const;
+export const TOOL_NAMES = ["list_my_orders", "get_order", "track_shipment", "request_refund", "cancel_order", "report_bug", "report_known_issue", "resolve_conversation"] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 /** A Downhill player's tools: their checkout, a refund of their Downhill Shop order, and the store's bug report. */
@@ -149,14 +149,21 @@ export type ToolCallStatus = "running" | "asking" | "done" | "refused" | "declin
 export interface MessageItem {
   readonly kind: "message";
   readonly id: string;
-  /** `customer`: the person asking for help, a store customer or a Downhill player. */
-  readonly from: "customer" | "agent";
+  /**
+   * `customer`: the person asking for help, a store customer or a Downhill player. `team`: a support team member's note
+   * to the agent (or Help Desk's, sending a known issue's update), which the customer never sees.
+   */
+  readonly from: "customer" | "agent" | "team";
   readonly text: string;
   readonly at: string;
   /** Still being written. */
   readonly streaming?: boolean;
   /** What came with the message, for example "Checkout details" from the Downhill Shop. */
   readonly attachment?: string;
+  /** A team note's author: the team member's GitHub login, or "Help Desk". */
+  readonly author?: string;
+  /** A team note that sent a known issue's update: the known issue's ID. */
+  readonly knownIssueId?: string;
 }
 
 export interface ToolItem {
@@ -203,6 +210,82 @@ export interface MemoryProposal {
   readonly source: { readonly customerId: string; readonly name: string; readonly sessionId: string };
   /** When the agent proposed it. */
   readonly at: string;
+  /**
+   * `known-issue`: an ongoing problem a team member told the agent about (`report_known_issue`). `subject` is its title
+   * and `fact` what customers should be told; added, it becomes a known issue rather than a fact.
+   */
+  readonly kind?: "known-issue";
+  /** A known issue's: how customers describe the problem, which the decision model matches tickets against. */
+  readonly symptoms?: string;
+}
+
+/**
+ * An ongoing problem the whole desk knows about: an agent proposed it from a team member's note, and a team member
+ * recorded it. Every session created or reopened afterwards is told it, and **Answer matching tickets** sends its update
+ * to the open tickets the decision model matches with it. It stays until a team member resolves it.
+ */
+export interface KnownIssue {
+  readonly id: string;
+  /** A few words, for example "Launch code trail15 rejected at checkout". */
+  readonly title: string;
+  /** How customers describe it: what the decision model matches tickets against. */
+  readonly symptoms: string;
+  /** What customers are told, for example "It's being fixed; type TRAIL15 in capitals meanwhile." */
+  readonly update: string;
+  /** The conversation its agent proposed it in. */
+  readonly source: { readonly customerId: string; readonly name: string; readonly sessionId: string };
+  /** When a team member recorded it. */
+  readonly recordedAt: string;
+  /** Who recorded it: the team member's GitHub login. */
+  readonly recordedBy: string;
+  /** Its latest **Answer matching tickets**. */
+  readonly answer?: KnownIssueAnswer;
+}
+
+/**
+ * Answering a known issue's matching tickets: every open ticket is classified by the decision model as matching the
+ * issue or not, and each match's agent is sent the update to reply with. A ticket already sent the update isn't
+ * checked again.
+ */
+export interface KnownIssueAnswer {
+  readonly startedAt: string;
+  readonly startedBy: string;
+  /** Once every ticket has its outcome. */
+  readonly finishedAt?: string;
+  /** The tickets checked, in the wall's order (earlier answers' updates included). */
+  readonly tickets: readonly KnownIssueTicket[];
+}
+
+/**
+ * - `classifying`: the decision model is reading the customer's messages.
+ * - `no-match`: it's about something else.
+ * - `replying`: it matches; the update is being sent to the ticket's agent.
+ * - `replied`: the agent was sent the update, and replies to the customer with it.
+ * - `failed`: `message` says why.
+ */
+export type KnownIssueTicketState = "classifying" | "no-match" | "replying" | "replied" | "failed";
+
+export interface KnownIssueTicket {
+  readonly sessionId: string;
+  /** A simulated customer's ticket. */
+  readonly customerId?: string;
+  /** A Downhill player's ticket. */
+  readonly ticketId?: string;
+  readonly name: string;
+  readonly state: KnownIssueTicketState;
+  /** The decision model matched it with the issue. */
+  readonly matched?: boolean;
+  readonly message?: string;
+  /** When it got its outcome. */
+  readonly at?: string;
+}
+
+/** How a tile shows a ticket a known issue's answer reached. */
+export interface TicketKnownIssue {
+  readonly id: string;
+  readonly title: string;
+  readonly state: KnownIssueTicketState;
+  readonly message?: string;
 }
 
 /** A fact in the team knowledge base: an agent proposed it and a team member approved it. */
@@ -253,6 +336,8 @@ export interface Ticket {
   readonly problem?: string;
   /** Its classification, when classification is set up. */
   readonly triage?: TicketTriage;
+  /** The known issue whose update was (or is being) sent to it. */
+  readonly knownIssue?: TicketKnownIssue;
 }
 
 /** One report in a software issue: a store customer's (`customerId`), or a Downhill player's (`ticketId`). */
@@ -405,6 +490,8 @@ export interface PlayerTicket {
   readonly problem?: string;
   /** Its session is being deleted. */
   readonly ending?: boolean;
+  /** The known issue whose update was (or is being) sent to it. */
+  readonly knownIssue?: TicketKnownIssue;
 }
 
 export interface Counters {
@@ -478,6 +565,8 @@ export interface HelpDeskState {
   readonly knowledge: readonly KnowledgeEntry[];
   /** Facts agents proposed that no one has added or declined yet, oldest first. */
   readonly proposals: readonly MemoryProposal[];
+  /** Ongoing problems the desk knows about, newest first. They outlive simulations. */
+  readonly knownIssues: readonly KnownIssue[];
 }
 
 export type ServerEvent =
@@ -490,6 +579,7 @@ export type ServerEvent =
   | { readonly type: "issues"; readonly issues: readonly SoftwareIssue[] }
   | { readonly type: "counters"; readonly counters: Counters }
   | { readonly type: "knowledge"; readonly knowledge: readonly KnowledgeEntry[]; readonly proposals: readonly MemoryProposal[] }
+  | { readonly type: "known-issues"; readonly knownIssues: readonly KnownIssue[] }
   | { readonly type: "classification"; readonly classification?: ClassificationRun; readonly classifications: ClassificationRuns };
 
 export interface SimulateRequest {

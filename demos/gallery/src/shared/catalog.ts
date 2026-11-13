@@ -133,7 +133,7 @@ export const APPS: readonly AppEntry[] = [
     title: "Downhill",
     tagline: "Ride, shop, and the launch code fails at checkout",
     description:
-      "Contoso Outdoors' painterly mountain-biking game. Ride a run, then buy a new look in its shop: checkout runs the store's own code, which rejects the launch offer's code. Support opens a live Help Desk chat with the checkout attached, the failure alerts Incident Commander, and Data Desk charts the shop's live sales.",
+      "Contoso Outdoors' painterly mountain-biking game. Ride a run, then buy a new look in its shop: checkout runs the store's own code, which rejects the launch offer's code. Support opens a live Help Desk chat with the checkout attached, Data Desk charts the shop's live sales, and the failure alerts Incident Commander, which sends the fix to the factory.",
     tryIt: "Ride a run, open the Shop, press Apply code on the launch offer, then open Support and say what happened.",
     group: "connected",
     app: "downhill",

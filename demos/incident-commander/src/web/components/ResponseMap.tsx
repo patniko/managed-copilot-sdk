@@ -421,6 +421,10 @@ function ProductionCard({ incident }: { readonly incident: IncidentView }) {
           rows={[
             ["Service", incident.demo ? `${incident.service} (demo service)` : incident.service],
             ["Target", incident.demo ? "The demo's simulated production" : "Your deploy pipeline"],
+            approval?.gate && approval.gate.state !== "unavailable" && approval.gate.number !== undefined
+              ? ["Approval", `In Software Factory, on ${workOrderLabel(approval.gate.number)}`]
+              : false,
+            approval?.decidedBy ? ["Decided by", `@${approval.decidedBy}${approval.decidedIn === "software-factory" ? " in Software Factory" : ""}`] : false,
             deploy ? ["Result", deploy.message] : false,
           ]}
         />

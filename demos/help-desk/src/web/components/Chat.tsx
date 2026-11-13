@@ -80,6 +80,8 @@ export function ChatWidget({
           ) : null}
           {items.map((item) => {
             if (item.kind === "message") {
+              // The team's notes to the agent are internal: the customer never sees them.
+              if (item.from === "team") return null;
               return item.from === "customer" ? (
                 <li key={item.id} className="flex flex-col items-end gap-1">
                   <div className="max-w-[85%] rounded-xl rounded-br-sm bg-accent-emphasis px-3 py-2 text-sm whitespace-pre-wrap text-fg-on-emphasis">{item.text}</div>

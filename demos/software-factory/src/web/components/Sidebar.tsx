@@ -151,13 +151,14 @@ function WorkOrderItem({
   const Glyph = meta.icon;
   const tests = summary.tests;
   const testsLabel = tests ? `${tests.passed} passed, ${tests.failed} failed${tests.skipped ? `, ${tests.skipped} skipped` : ""}` : undefined;
+  const needsYou = summary.gates?.some((gate) => gate.state === "open") ?? false;
   return (
     <a
       href={workOrderHref(summary.id)}
       onClick={onNavigate}
       aria-current={active ? "page" : undefined}
       // Number first, so the link reads "WO-0007 CSV toolkit …" (and never starts like a work order tab).
-      aria-labelledby={`${id}-number ${id}-title ${id}-meta${tests && tests.total > 0 ? ` ${id}-tests` : ""}`}
+      aria-labelledby={`${id}-number ${id}-title ${id}-meta${needsYou ? ` ${id}-gate` : tests && tests.total > 0 ? ` ${id}-tests` : ""}`}
       className="NavList-item items-start py-2"
     >
       <Glyph size={16} className={cx("mt-0.5", meta.iconClass)} />
@@ -187,7 +188,11 @@ function WorkOrderItem({
           </span>
         </span>
       </span>
-      {tests && tests.total > 0 && testsLabel ? (
+      {needsYou ? (
+        <span id={`${id}-gate`} className="Label Label--attention mt-0.5 shrink-0" title="A deploy request waits for you">
+          Needs you
+        </span>
+      ) : tests && tests.total > 0 && testsLabel ? (
         <Tooltip content={testsLabel}>
           <span id={`${id}-tests`} className="mt-0.5 inline-flex shrink-0 items-center gap-0.5 text-xs font-normal text-fg-muted tabular-nums">
             {tests.failed > 0 ? <XIcon size={16} className="text-fg-danger" /> : <CheckIcon size={16} className="text-fg-success" />}

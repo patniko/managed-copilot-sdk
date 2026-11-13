@@ -5,16 +5,20 @@
  *   pnpm --filter @managed-copilot/demo-incident-commander happy-path --url http://localhost:9345
  *   pnpm --filter @managed-copilot/demo-incident-commander happy-path --keep           # keep the incident and its sandbox
  *   pnpm --filter @managed-copilot/demo-incident-commander happy-path --factory        # route the fix through Software Factory
+ *   pnpm --filter @managed-copilot/demo-incident-commander happy-path --factory --factory-url http://localhost:7480
  *
  * Simulates an incident, waits until Copilot's deploy request waits on the platform (the app let go of the session),
  * approves it, and waits for Resolved and the postmortem. Then deletes the incident, its session, and its sandboxes.
  * The fix is made by Copilot's workers, whatever the app's setting; with --factory, Software Factory builds it as a work
- * order (and the run takes longer). Exits 0 when the incident resolved; 1 otherwise.
+ * order (and the run takes longer), and the deploy is approved on the work order's deploy gate in Software Factory (at
+ * --factory-url, by default the address Incident Commander links to). Exits 0 when the incident resolved; 1 otherwise.
  */
 import { parseArgs } from "node:util";
 import type { ApiErrorBody, AppState, CreatedIncident, FixRoute, IncidentView, SimulateRequest } from "../shared/types.js";
 
-const { values } = parseArgs({ options: { url: { type: "string" }, keep: { type: "boolean", default: false }, factory: { type: "boolean", default: false } } });
+const { values } = parseArgs({
+  options: { url: { type: "string" }, keep: { type: "boolean", default: false }, factory: { type: "boolean", default: false }, "factory-url": { type: "string" } },
+});
 const offset = Number(process.env.MANAGED_COPILOT_PORT_OFFSET ?? 0);
 const base = (values.url ?? `http://localhost:${7445 + offset}`).replace(/\/+$/, "");
 const fixRoute: FixRoute = values.factory ? "factory" : "workers";
@@ -83,7 +87,8 @@ try {
       announcedOrder = true;
       say(`Software Factory: ${workOrder(incident.factory.number)} ${incident.factory.url}`);
     }
-    return incident.approval?.state === "waiting" && !incident.coordinator.attached && announced(incident);
+    const gate = incident.approval?.gate;
+    return incident.approval?.state === "waiting" && !incident.coordinator.attached && announced(incident) && (gate?.state !== "opening" || gate.problem !== undefined);
   };
   // Through the factory: triage, then the factory plans, builds, reviews, and releases the fix before Copilot verifies it.
   const waiting = await follow(id, values.factory ? "triaging, and while Software Factory built the fix" : "triaging and fixing", (values.factory ? 45 : 15) * 60_000, ready, printed);
@@ -102,7 +107,26 @@ try {
   say(`Mixed: ${own.commands ?? 0} commands in Copilot's own sandbox; workers ${names}${waiting.approval?.factory ? `; the fix by Software Factory (${workOrder(waiting.approval.factory.number)})` : ""}`);
   say(`The deploy request waits on the platform, and the app holds no session. Approving: ${waiting.approval!.summary}`);
 
-  await api<void>(`/api/incidents/${id}/decision`, { method: "POST", body: JSON.stringify({ approve: true }) });
+  const gate = waiting.approval?.gate;
+  if (gate?.state === "open" && gate.workOrderId && !gate.problem) {
+    // Decided on the work order's deploy gate: approve it there, as a person on the factory floor would.
+    const factoryUrl = (values["factory-url"] ?? state.integrations.factory?.url)?.replace(/\/+$/, "");
+    if (!factoryUrl) throw new Error("The deploy request waits in Software Factory, but its address isn't known. Pass --factory-url.");
+    say(`Approving in Software Factory: ${workOrder(gate.number ?? 0)}'s deploy gate`);
+    const response = await fetch(`${factoryUrl}/api/work-orders/${encodeURIComponent(gate.workOrderId)}/gates/deploy/decision`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ approve: true, requestId: waiting.approval!.id }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      const body = (await response.json().catch(() => undefined)) as ApiErrorBody | undefined;
+      throw new Error(`Software Factory didn't take the approval: ${body?.error.message ?? `HTTP ${response.status}`}`);
+    }
+  } else {
+    if (values.factory && (gate?.problem ?? gate?.reason)) say(`Approving here: ${gate?.problem ?? gate?.reason}`);
+    await api<void>(`/api/incidents/${id}/decision`, { method: "POST", body: JSON.stringify({ approve: true }) });
+  }
   const resolved = await follow(id, "deploying", 10 * 60_000, (incident) => incident.status === "resolved" && incident.postmortem !== undefined && incident.coordinator.state === "done", printed);
 
   console.log("");

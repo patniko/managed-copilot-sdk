@@ -302,6 +302,103 @@ export interface WorkOrderOrigin {
   readonly key?: string;
 }
 
+// ─── Gates ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+/** A step after the release that waits for a person in the factory, while the routing app does the work. */
+export type GateKind = "deploy";
+
+/**
+ * - `pending`: declared with the work order; waits for the routing app's request.
+ * - `open`: the routing app asked; waits for a person here.
+ * - `approved` / `declined`: a person decided here. On approval, the routing app deploys.
+ * - `deployed` / `failed`: the routing app reported how the approved deploy went.
+ * - `closed`: the routing app withdrew the request (it was answered there, or it ended).
+ */
+export type GateState = "pending" | "open" | "approved" | "declined" | "deployed" | "failed" | "closed";
+
+/** `CreateWorkOrderRequest.gates`: a gate a routed work order declares up front, so the floor shows it from the start. */
+export interface GateDeclaration {
+  readonly kind: GateKind;
+  /** What it deploys, e.g. `downhill-shop`. */
+  readonly target: string;
+  /** Its name on the floor; defaults to "Deploy <target>". */
+  readonly label?: string;
+}
+
+/** `POST /api/work-orders/:id/gates/:gateId/request`: the routing app asks a person here. */
+export interface OpenGateRequest {
+  /** The routing app's ID for this request: sending the same ID again changes nothing; a new ID replaces the request. */
+  readonly requestId: string;
+  readonly title: string;
+  /** What the change does, in a sentence or two. */
+  readonly summary: string;
+  /** Defaults to the gate's target. */
+  readonly target?: string;
+  /** The version the deploy ships, e.g. `2.3.1`. */
+  readonly version?: string;
+  /** The version that runs now. */
+  readonly previousVersion?: string;
+  /** How the change was verified, e.g. "12 tests passed". */
+  readonly tests?: string;
+  /** The files it changes. */
+  readonly files?: readonly string[];
+  /** The request in the routing app, for people. */
+  readonly url?: string;
+}
+
+export interface GateRequest extends OpenGateRequest {
+  readonly target: string;
+  readonly requestedAt: string;
+}
+
+/** `POST /api/work-orders/:id/gates/:gateId/decision`: a person in the factory. */
+export interface GateDecisionRequest {
+  readonly approve: boolean;
+  /** Why not, for a decline (the routing app passes it on). */
+  readonly reason?: string;
+  /** The request the person saw; a request that was replaced since isn't decided. */
+  readonly requestId?: string;
+}
+
+export interface GateDecision {
+  readonly requestId: string;
+  readonly approve: boolean;
+  readonly reason?: string;
+  /** The factory's signed-in account. */
+  readonly by?: string;
+  readonly at: string;
+}
+
+/** `POST /api/work-orders/:id/gates/:gateId/outcome`: the routing app reports what happened. */
+export interface GateOutcomeRequest {
+  readonly requestId: string;
+  /** `deployed` / `failed`: how the approved deploy went. `closed`: the request was answered elsewhere, or ended. */
+  readonly outcome: "deployed" | "failed" | "closed";
+  readonly message?: string;
+  /** The version that was deployed. */
+  readonly version?: string;
+}
+
+export interface GateOutcome {
+  readonly outcome: GateOutcomeRequest["outcome"];
+  readonly message?: string;
+  readonly version?: string;
+  readonly at: string;
+}
+
+export interface WorkOrderGate {
+  /** `deploy`. */
+  readonly id: string;
+  readonly kind: GateKind;
+  readonly target: string;
+  readonly label: string;
+  readonly state: GateState;
+  readonly request?: GateRequest;
+  readonly decision?: GateDecision;
+  readonly outcome?: GateOutcome;
+  readonly updatedAt: string;
+}
+
 /** A text file a routed work order brings along. */
 export interface InputFile {
   /** Relative POSIX path. */
@@ -511,9 +608,15 @@ export interface WorkOrderSummary {
   readonly github?: { readonly repository: string; readonly issue?: number; readonly pullRequest?: number; readonly pullRequestState?: PullRequestView["state"] };
   /** Set when another app routed the work order to the factory. */
   readonly origin?: WorkOrderOrigin;
+  /** Gates after the release, for lists: a gate that's `open` needs a person. */
+  readonly gates?: readonly Pick<WorkOrderGate, "id" | "kind" | "target" | "label" | "state">[];
 }
 
-export interface WorkOrder extends Omit<WorkOrderSummary, "github"> {
+/**
+ * A work order's `status` stays `completed` once its release is done; gates after it have their own state, so a
+ * routing app that follows `status` keeps working.
+ */
+export interface WorkOrder extends Omit<WorkOrderSummary, "github" | "gates"> {
   readonly brief: string;
   readonly source: WorkOrderSource;
   /** Routed work orders: the reference material and project they brought along. */
@@ -527,6 +630,8 @@ export interface WorkOrder extends Omit<WorkOrderSummary, "github"> {
   readonly workersStarted?: number;
   /** GitHub work orders (`source.kind === "github"`). */
   readonly github?: GitHubWork;
+  /** Routed work orders: steps after the release that wait for a person here (see `CreateWorkOrderRequest.gates`). */
+  readonly gates?: readonly WorkOrderGate[];
 }
 
 export interface WorkOrderTemplate {
@@ -571,6 +676,11 @@ export interface CreateWorkOrderRequest {
    * reports what changed. Not for GitHub work orders.
    */
   readonly project?: { readonly name: string; readonly files: readonly InputFile[] };
+  /**
+   * Steps after the release that wait for a person here while the routing app does the work: a `deploy` gate shows the
+   * routing app's deploy request on the work order, with Deploy and Decline. Needs `origin`; not for GitHub work orders.
+   */
+  readonly gates?: readonly GateDeclaration[];
 }
 
 /** `POST /api/work-orders/:id/revisions`: more changes to a GitHub work order's pull request. */

@@ -4,6 +4,7 @@ import type {
   ArtifactIndex,
   CreateWorkOrderRequest,
   FactoryState,
+  GateDecisionRequest,
   GitHubStatus,
   MergeRequest,
   PlatformStatus,
@@ -139,6 +140,8 @@ export function toSummary(workOrder: WorkOrder): WorkOrderSummary {
     taskCount: workOrder.taskCount,
     tests: workOrder.tests,
     error: workOrder.error,
+    origin: workOrder.origin,
+    gates: workOrder.gates?.map(({ id, kind, target, label, state }) => ({ id, kind, target, label, state })),
     github: workOrder.github
       ? {
           repository: workOrder.github.repository.fullName,
@@ -664,6 +667,13 @@ export async function refreshPullRequest(id: string): Promise<WorkOrder> {
 
 export async function mergePullRequest(id: string, method: MergeRequest["method"] = "squash"): Promise<WorkOrder> {
   const workOrder = await api.mergePullRequest(id, method);
+  applyWorkOrder(workOrder, true);
+  return workOrder;
+}
+
+/** Deploy or decline the routing app's request on a gate. */
+export async function decideGate(id: string, gateId: string, decision: GateDecisionRequest): Promise<WorkOrder> {
+  const workOrder = await api.decideGate(id, gateId, decision);
   applyWorkOrder(workOrder, true);
   return workOrder;
 }

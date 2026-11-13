@@ -8,7 +8,7 @@ const shop = () => new Shop(new Date("2026-11-03T15:00:00.000Z"));
 const invocation = (toolCallId: string) => ({ sessionId: "s", toolCallId, toolName: "t", arguments: {} });
 
 describe("the store's tools", () => {
-  it("are the seven tools the UI knows, and only refunds and cancellations need approval", () => {
+  it("are the eight tools the UI knows, and only refunds and cancellations need approval", () => {
     const tools = customerTools(shop(), "c01");
     expect(tools.map((tool) => tool.name)).toEqual([...TOOL_NAMES]);
     expect(TOOLS.map((tool) => tool.name)).toEqual([...TOOL_NAMES]);

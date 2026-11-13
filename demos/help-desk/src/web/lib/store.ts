@@ -9,6 +9,7 @@ import {
   type CustomerCard,
   type DeskInfo,
   type KnowledgeEntry,
+  type KnownIssue,
   type MemoryProposal,
   type PlatformStatus,
   type PlayerTicket,
@@ -53,6 +54,10 @@ export interface StoreState {
   readonly proposals: readonly MemoryProposal[];
   /** Facts being removed from the knowledge base from this page, by ID. */
   readonly forgetting: Readonly<Record<string, true>>;
+  /** Ongoing problems the desk knows about, newest first. */
+  readonly knownIssues: readonly KnownIssue[];
+  /** Known issues being answered or resolved from this page, by ID. */
+  readonly issueWork: Readonly<Record<string, "answer" | "resolve">>;
   /** How many customers the next simulation starts (remembered in this browser). */
   readonly size: SimulationSize;
   /** A simulation is being started or ended from this page. */
@@ -90,6 +95,8 @@ let state: StoreState = {
   knowledge: [],
   proposals: [],
   forgetting: {},
+  knownIssues: [],
+  issueWork: {},
   size: savedSize(),
   answering: {},
   routing: {},
@@ -145,6 +152,8 @@ export function reduce(current: StoreState, event: ServerEvent): StoreState {
       return { ...current, counters: event.counters };
     case "knowledge":
       return { ...current, knowledge: event.knowledge, proposals: event.proposals };
+    case "known-issues":
+      return { ...current, knownIssues: event.knownIssues };
     case "classification": {
       const { classification: _previous, ...rest } = current;
       return { ...rest, ...(event.classification ? { classification: event.classification } : {}), classifications: event.classifications };
@@ -171,6 +180,7 @@ async function loadState(): Promise<void> {
         counters: loaded.counters,
         knowledge: loaded.knowledge,
         proposals: loaded.proposals,
+        knownIssues: loaded.knownIssues,
       };
     });
   } catch (error) {
@@ -180,7 +190,7 @@ async function loadState(): Promise<void> {
 
 // ─── Server-sent events ──────────────────────────────────────────────────────────────────────────────────────
 
-const EVENT_TYPES: readonly ServerEvent["type"][] = ["platform", "run", "ticket", "players", "player", "issues", "counters", "knowledge", "classification"];
+const EVENT_TYPES: readonly ServerEvent["type"][] = ["platform", "run", "ticket", "players", "player", "issues", "counters", "knowledge", "known-issues", "classification"];
 let source: EventSource | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let backoffMs = 1_000;
@@ -358,6 +368,48 @@ export async function forget(id: string): Promise<void> {
     setState((current) => {
       const { [id]: _done, ...forgetting } = current.forgetting;
       return { ...current, forgetting };
+    });
+  }
+}
+
+/** A team member's note to a customer's agent (`ticketId`: a player's instead): the customer doesn't see it. */
+export async function sendNote(target: { readonly customerId: string } | { readonly ticketId: string }, text: string): Promise<boolean> {
+  try {
+    await ("customerId" in target ? api.note(target.customerId, text) : api.notePlayer(target.ticketId, text));
+    return true;
+  } catch (error) {
+    showToast("The note wasn't sent", errorMessage(error));
+    return false;
+  }
+}
+
+/** Has the decision model pick the open tickets about a known issue, and sends each one's agent its update. */
+export async function answerKnownIssue(id: string): Promise<void> {
+  await issueWork(id, "answer", "Couldn't answer the matching tickets", async () => {
+    const issue = await api.answerKnownIssue(id);
+    setState((current) => ({ ...current, knownIssues: current.knownIssues.map((candidate) => (candidate.id === issue.id ? issue : candidate)) }));
+  });
+}
+
+/** Resolves a known issue: new conversations aren't told it anymore. */
+export async function resolveKnownIssue(id: string): Promise<void> {
+  await issueWork(id, "resolve", "Couldn't resolve the known issue", async () => {
+    await api.resolveKnownIssue(id);
+    setState((current) => ({ ...current, knownIssues: current.knownIssues.filter((issue) => issue.id !== id) }));
+  });
+}
+
+async function issueWork(id: string, work: "answer" | "resolve", failed: string, run: () => Promise<void>): Promise<void> {
+  if (state.issueWork[id]) return;
+  setState((current) => ({ ...current, issueWork: { ...current.issueWork, [id]: work } }));
+  try {
+    await run();
+  } catch (error) {
+    showToast(failed, errorMessage(error));
+  } finally {
+    setState((current) => {
+      const { [id]: _done, ...rest } = current.issueWork;
+      return { ...current, issueWork: rest };
     });
   }
 }

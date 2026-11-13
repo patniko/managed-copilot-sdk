@@ -19,6 +19,7 @@ import { chooseSize, classify, endSimulation, simulate, useStore } from "../lib/
 import { useDismiss } from "../lib/useDismiss.js";
 import { Issues } from "./Issues.js";
 import { Knowledge } from "./Knowledge.js";
+import { KnownIssues } from "./KnownIssues.js";
 import { Stats } from "./Stats.js";
 import { GhostTile, PlayerTile, Tile } from "./Tile.js";
 import { ConfirmDialog } from "./ui/ConfirmDialog.js";
@@ -58,6 +59,7 @@ export function Wall() {
         <Stats />
       </div>
       <Issues />
+      <KnownIssues />
       {phase === "error" ? (
         <div className="blankslate mt-4 rounded-md border border-line">
           <p className="blankslate-description">{loadError ?? "Couldn't load the help desk."}</p>

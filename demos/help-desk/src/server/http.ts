@@ -7,7 +7,7 @@ import type { HelpDeskConfig } from "./config.js";
 import type { Decider } from "./decision.js";
 import type { HelpDesk } from "./desk.js";
 import { HelpDeskError } from "./errors.js";
-import { playerView, type EventHub } from "./hub.js";
+import { playerFacing, playerView, type EventHub } from "./hub.js";
 import { log } from "./log.js";
 import { authorized, complete, EndpointError } from "./triage-endpoint.js";
 
@@ -202,6 +202,12 @@ function buildRouter(ctx: ApiContext): Router {
     await desk.send(params.customerId!, body.text);
     res.writeHead(202).end();
   });
+  // A team member's note to the customer's agent; the customer doesn't see it.
+  router.add("POST", "/api/tickets/:customerId/notes", async (req, res, params) => {
+    const body = await readJson<Partial<SendRequest>>(req);
+    await desk.note(params.customerId!, body.text);
+    res.writeHead(202).end();
+  });
   router.add("POST", "/api/tickets/:customerId/approvals/:approvalId", async (req, res, params) => {
     const body = await readJson<Partial<ApprovalAnswer>>(req);
     if (typeof body.approve !== "boolean") throw new HelpDeskError("invalid_request", "Pass approve: true or false.");
@@ -224,6 +230,13 @@ function buildRouter(ctx: ApiContext): Router {
     desk.forget(params.id!);
     res.writeHead(204).end();
   });
+  // Known issues: recorded from agents' proposals (`/api/knowledge/proposals/:id`), answered, and resolved.
+  router.add("GET", "/api/known-issues", (_req, res) => sendJson(res, 200, desk.knownIssues.list()));
+  router.add("POST", "/api/known-issues/:id/answer", (_req, res, params) => sendJson(res, 202, desk.answerKnownIssue(params.id!)));
+  router.add("DELETE", "/api/known-issues/:id", (_req, res, params) => {
+    desk.resolveKnownIssue(params.id!);
+    res.writeHead(204).end();
+  });
 
   // Live players. Downhill's server opens a ticket when the player opens support in the game, server to server; the
   // player's chat page (`/chat/<ticket>`, same origin as these routes) reads it and writes in it; the wall answers and
@@ -234,7 +247,7 @@ function buildRouter(ctx: ApiContext): Router {
     const { ticket, reopened } = desk.openPlayerTicket(body);
     sendJson(res, reopened ? 200 : 201, ticket);
   });
-  router.add("GET", "/api/player-tickets/:ticketId", (_req, res, params) => sendJson(res, 200, desk.playerTicket(params.ticketId!)));
+  router.add("GET", "/api/player-tickets/:ticketId", (_req, res, params) => sendJson(res, 200, playerFacing(desk.playerTicket(params.ticketId!))));
   router.add("DELETE", "/api/player-tickets/:ticketId", async (_req, res, params) => {
     await desk.endPlayer(params.ticketId!);
     res.writeHead(204).end();
@@ -242,6 +255,11 @@ function buildRouter(ctx: ApiContext): Router {
   router.add("POST", "/api/player-tickets/:ticketId/messages", async (req, res, params) => {
     const body = await readJson<Partial<SendRequest>>(req);
     await desk.sendAsPlayer(params.ticketId!, body.text);
+    res.writeHead(202).end();
+  });
+  router.add("POST", "/api/player-tickets/:ticketId/notes", async (req, res, params) => {
+    const body = await readJson<Partial<SendRequest>>(req);
+    await desk.notePlayer(params.ticketId!, body.text);
     res.writeHead(202).end();
   });
   router.add("POST", "/api/player-tickets/:ticketId/approvals/:approvalId", async (req, res, params) => {

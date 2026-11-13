@@ -23,6 +23,7 @@ import {
   type ToolInfo,
 } from "../shared/types.js";
 import { HelpDeskError } from "./errors.js";
+import { defuseTeamNotes, teamNoteRules } from "./notes.js";
 import type { Check, ToolResult } from "./shop.js";
 import { BugInput, promotionList, RefundInput, ResolveInput, withInput } from "./tools.js";
 
@@ -221,7 +222,7 @@ const TAGS = new RegExp(`<(/?)(${BLOCK})`, "gi");
  * history, so a restarted Help Desk reads the context back. People never see the block.
  */
 export function promptFor(text: string, context?: PlayerContext): string {
-  const words = text.replace(TAGS, "‹$1$2");
+  const words = defuseTeamNotes(text.replace(TAGS, "‹$1$2"));
   if (!context) return words;
   // Escaped so nothing in the JSON can close the block.
   const json = JSON.stringify(context).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
@@ -433,6 +434,7 @@ export function playerSystemMessage(): string {
     "- If they haven't bought yet, tell them that typing the code exactly, in capitals (for example TRAIL15 for trail15), may work in the meantime. Say it plainly, without promising it will.",
     "- Your tools only see this player's checkout and their Downhill Shop order. You can't change the shop, give items, or look up orders from the store's website.",
     "- Reply in two or three short, friendly sentences of plain text: no headings, lists, tables, error codes, or stack traces.",
+    teamNoteRules("player", false),
     "- End every turn the same way: when nothing is left for the player to wait on (their question is answered, or a refund was decided), call resolve_conversation with a one-line summary, then send your reply. Only skip it when you asked them a question.",
   ].join("\n");
 }

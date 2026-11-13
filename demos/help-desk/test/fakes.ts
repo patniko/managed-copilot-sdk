@@ -34,6 +34,8 @@ export class FakeSession implements SupportSession {
   config: Config;
   disconnected = false;
   premium = 0;
+  /** Fails `send` with this error while it's set. */
+  failSend: Error | undefined;
   readonly rpc = { usage: { getMetrics: async () => ({ totalPremiumRequestCost: this.premium }) } };
 
   constructor(sessionId: string, config: Config) {
@@ -66,6 +68,7 @@ export class FakeSession implements SupportSession {
   }
 
   async send(options: MessageOptions): Promise<string> {
+    if (this.failSend) throw this.failSend;
     this.sent.push(options);
     return `${this.sessionId}-message-${this.sent.length}`;
   }
@@ -234,6 +237,13 @@ export function monaWith(changes: { readonly checkout?: Record<string, unknown> 
   const { checkout: _mona, ...base } = MONA;
   return { ...base, ...rest, ...("checkout" in changes && checkout === undefined ? {} : { checkout: { ...MONA.checkout, ...checkout } }) };
 }
+
+/** What a customer's agent proposes with `report_known_issue` once a team member tells it about the launch code. */
+export const TRAIL15_ISSUE = {
+  title: "Launch code trail15 rejected at checkout",
+  symptoms: "The promo code TRAIL15 (or trail15 from the launch banner) says 'Invalid code.' at checkout",
+  update: "Our engineers are fixing it. Meanwhile, type TRAIL15 in capitals at checkout and it works.",
+} as const;
 
 /** What Mona's agent reports with `report_bug`. */
 export const MONA_REPORT = {

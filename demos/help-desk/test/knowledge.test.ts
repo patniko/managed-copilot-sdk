@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { KnowledgeBase } from "../src/server/knowledge.js";
+import { KnownIssues } from "../src/server/known-issues.js";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -49,5 +50,33 @@ describe("the team knowledge base", () => {
     const dir = tempDir();
     writeFileSync(join(dir, "knowledge.json"), "{not json");
     expect(() => new KnowledgeBase(dir)).toThrow(/isn't valid JSON/);
+  });
+});
+
+describe("known issues", () => {
+  it("are kept across restarts with their latest answer, and an answer a restart cut short says so", () => {
+    const dir = tempDir();
+    const issues = new KnownIssues(dir);
+    expect(issues.prompt("customer")).toBe("");
+    const proposal = new KnowledgeBase(dir).propose({ ...source, kind: "known-issue", subject: "Launch code rejected", fact: "Type TRAIL15 in capitals.", symptoms: "trail15 says Invalid code" })!;
+    const issue = issues.record(proposal, "octocat");
+    issues.answer(issue.id, {
+      startedAt: "2026-11-12T17:40:00.000Z",
+      startedBy: "octocat",
+      tickets: [
+        { sessionId: "hd-run-c05", customerId: "c05", name: "Aisha Khan", state: "replied", matched: true },
+        { sessionId: "hd-run-c08", customerId: "c08", name: "Lucas Silva", state: "classifying" },
+      ],
+    });
+
+    const reopened = new KnownIssues(dir);
+    expect(reopened.list()).toEqual([expect.objectContaining({ title: "Launch code rejected", symptoms: "trail15 says Invalid code", update: "Type TRAIL15 in capitals.", recordedBy: "octocat" })]);
+    const answer = reopened.list()[0]!.answer!;
+    expect(answer.finishedAt).toEqual(expect.any(String));
+    expect(answer.tickets.map((ticket) => ticket.state)).toEqual(["replied", "failed"]);
+    expect(answer.tickets[1]!.message).toMatch(/restarted/);
+    expect(reopened.prompt("customer")).toContain("- Launch code rejected (customers describe it as: trail15 says Invalid code): Type TRAIL15 in capitals.");
+    expect(reopened.remove(issue.id)).toBe(true);
+    expect(new KnownIssues(dir).list()).toEqual([]);
   });
 });

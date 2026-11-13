@@ -1,11 +1,11 @@
 import { TagIcon, TrashIcon } from "@primer/octicons-react";
 import { useState } from "react";
 import { PRODUCT_NAME, SHOP_NAME, type PlayerTicket } from "../../shared/types.js";
-import { approvalTitle, cents, money, openerText, PLAYER_GREETING, playerLabel } from "../lib/format.js";
+import { approvalNoun, approvalTitle, cents, money, openerText, PLAYER_GREETING, playerLabel } from "../lib/format.js";
 import { wallHref } from "../lib/router.js";
-import { answerPlayer, endPlayer, sendAsPlayer, useStore } from "../lib/store.js";
+import { answerPlayer, endPlayer, sendAsPlayer, sendNote, useStore } from "../lib/store.js";
 import { ChatWidget, Composer } from "./Chat.js";
-import { Approval, BackToWall, Blank, ReportedIssue, SeesOnly, SessionDetails, ToolCalls, WhereItRuns, WIDGET } from "./Customer.js";
+import { Approval, BackToWall, Blank, ReportedIssue, SeesOnly, SessionDetails, TeamNotes, ToolCalls, WhereItRuns, WIDGET } from "./Customer.js";
 import { ConfirmDialog } from "./ui/ConfirmDialog.js";
 import { Spinner } from "./ui/Spinner.js";
 import { CustomerAvatar, LiveBadge, ProductChip, StatusLabel } from "./ui/Status.js";
@@ -92,6 +92,17 @@ function BehindTheScenes({ ticket }: { readonly ticket: PlayerTicket }) {
           title={approvalTitle(ticket.approval, name)}
           busy={busy}
           onAnswer={(approve) => void answerPlayer(ticket.ticketId, ticket.approval!.id, approve)}
+        />
+      ) : null}
+
+      {ticket.sessionId ? (
+        <TeamNotes
+          items={ticket.items}
+          knownIssue={ticket.knownIssue}
+          disabled={ending || ticket.status === "failed"}
+          onSend={(text) => sendNote({ ticketId: ticket.ticketId }, text)}
+          name={name}
+          waitingOn={ticket.approval ? approvalNoun(ticket.approval) : undefined}
         />
       ) : null}
 

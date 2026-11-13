@@ -108,6 +108,31 @@ export interface FileChange {
  */
 export type ApprovalState = "waiting" | "approved" | "declined" | "deployed" | "failed" | "expired";
 
+/**
+ * Where the deploy request is decided when Software Factory built the fix and its work order declared a deploy gate:
+ * - `opening`: Incident Commander is putting the request on the work order's deploy gate.
+ * - `open`: it waits there for a person; Incident Commander follows the work order for the decision.
+ * - `answered`: a person decided there; Incident Commander deploys (or tells Copilot why not) as usual.
+ * - `closed`: it was answered here, or ended, and the gate was closed.
+ * - `unavailable`: Software Factory can't take it (`reason`), so it's decided here.
+ */
+export type ApprovalGateState = "opening" | "open" | "answered" | "closed" | "unavailable";
+
+export interface ApprovalGateView {
+  readonly state: ApprovalGateState;
+  /** The work order whose deploy gate shows the request. */
+  readonly workOrderId?: string;
+  readonly number?: number;
+  readonly url?: string;
+  /** Why the request is decided here instead (`unavailable`). */
+  readonly reason?: string;
+  /** Software Factory can't be reached right now: decide here, or wait for it. */
+  readonly problem?: string;
+  readonly openedAt?: string;
+  /** When the deploy's outcome reached the gate. */
+  readonly reportedAt?: string;
+}
+
 export interface ApprovalView {
   /** The tool call that asked. */
   readonly id: string;
@@ -119,11 +144,15 @@ export interface ApprovalView {
   readonly problem?: string;
   /** The change is the fix Software Factory built: its work order. */
   readonly factory?: { readonly number: number; readonly url: string };
+  /** The request is decided on the work order's deploy gate in Software Factory, or why it can't be. */
+  readonly gate?: ApprovalGateView;
   readonly requestedAt: string;
   /** When the platform's webhook told this app the request was waiting. */
   readonly announcedAt?: string;
   readonly decidedAt?: string;
   readonly decidedBy?: string;
+  /** Where the person decided. */
+  readonly decidedIn?: "incident-commander" | "software-factory";
   readonly reason?: string;
 }
 
@@ -177,6 +206,8 @@ export interface FactoryWorkView {
   readonly appliedAt?: string;
   /** Software Factory can't be reached to follow the work order right now. */
   readonly problem?: string;
+  /** The work order shows a deploy gate: the deploy request is decided there. */
+  readonly deployGate?: boolean;
 }
 
 export type TimelineKind = "alert" | "note" | "sandbox" | "worker" | "factory" | "approval" | "deploy" | "postmortem" | "person" | "resolved" | "platform" | "error";

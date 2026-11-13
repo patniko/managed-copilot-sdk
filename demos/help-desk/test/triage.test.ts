@@ -21,8 +21,11 @@ import {
   type TriagePlatform,
 } from "../src/server/triage.js";
 import { CUSTOMERS } from "../src/server/seed.js";
-import type { PlatformStatus, ServerEvent } from "../src/shared/types.js";
-import { FakeFactory, FakePlatform, settle, testConfig } from "./fakes.js";
+import type { PermissionRequestResult } from "@github/copilot-sdk";
+import { playerSessionId } from "../src/server/player.js";
+import type { KnownIssueTicket, PlatformStatus, ServerEvent } from "../src/shared/types.js";
+import { sessionIdFor } from "../src/server/ticket.js";
+import { event, FakeFactory, FakePlatform, MONA, settle, testConfig, TRAIL15_ISSUE } from "./fakes.js";
 
 /** A chat completion as the stock runtime sends it for `sendAndWait(prompt, schema)` on an `openai` provider. */
 function completion(overrides: Record<string, unknown> = {}, user = "<current_datetime>2026-11-03T10:00:00Z</current_datetime>\n\nMy tent never arrived and I leave Friday!") {
@@ -455,5 +458,132 @@ describe("the wall's tickets", () => {
     await settle(50);
     expect(desk.desk().triage).toEqual({ state: "off" });
     for (const ticket of desk.state().tickets) expect(ticket.triage).toBeUndefined();
+  });
+});
+
+describe("a known issue's matching tickets", () => {
+  const desks: HelpDesk[] = [];
+  afterEach(() => {
+    for (const desk of desks.splice(0)) desk.close();
+  });
+
+  it("are the open tickets the decision model matches: only they're sent the update, resolved ones are skipped, and failures are reported per ticket", async () => {
+    const platform = new FakePlatform();
+    const triagePlatform = new FakeTriagePlatform();
+    // The decision model: a ticket is about the issue when its customer mentions the launch code. It's throttled on Lucas's.
+    triagePlatform.answer = (text) => {
+      if (/water bottles/.test(text)) throw new Error("429 Too many requests");
+      return { category: "question", urgent: false, matches: /trail15/i.test(text) };
+    };
+    const events: ServerEvent[] = [];
+    const desk = new HelpDesk(platform, testConfig(), (published) => events.push(published), new FakeFactory(), new Triage(triagePlatform, "help-desk-triage"));
+    desk.start();
+    desks.push(desk);
+    const run = await desk.simulate(25);
+    const session = (id: string) => platform.sessions.get(sessionIdFor(run.id, id))!;
+    for (let tries = 0; tries < 100 && CUSTOMERS.some((customer) => !session(customer.id)?.sent.length); tries++) await settle(5);
+
+    // Ben's conversation is resolved already: it isn't checked.
+    const ben = session("c18");
+    ben.emit(event("user.message", { content: ben.sent[0]!.prompt }));
+    ben.emit(event("tool.execution_start", { toolCallId: "done-1", toolName: "resolve_conversation", arguments: { summary: "Told him to use capitals" } }));
+    ben.emit(event("tool.execution_complete", { toolCallId: "done-1", success: true, result: { content: '{"ok":true}' } }));
+    ben.emit(event("session.idle", {}, { ephemeral: true }));
+    // Mona, live from Downhill, hit it too; her session can't take a message right now.
+    const { ticket } = desk.openPlayerTicket(MONA);
+    await desk.sendAsPlayer(ticket.ticketId, "The launch code trail15 says Invalid code.");
+    const mona = platform.sessions.get(playerSessionId(ticket.ticketId))!;
+    mona.emit(event("user.message", { content: mona.sent[0]!.prompt }));
+    mona.failSend = new Error("The runtime is busy");
+
+    // A team member tells Mateo's agent; his agent proposes the known issue, and it's recorded.
+    await desk.note("c12", "The launch banner's trail15 code is broken: tell customers to type TRAIL15 in capitals while we fix it.");
+    await session("c12").call("report_known_issue", TRAIL15_ISSUE);
+    desk.decide(desk.ticket("c12").memory!.id, true);
+    const issue = desk.knownIssues.list()[0]!;
+
+    const started = desk.answerKnownIssue(issue.id);
+    expect(started.answer?.tickets.every((entry) => entry.state === "classifying")).toBe(true);
+    expect(() => desk.answerKnownIssue(issue.id)).toThrow(/being answered already/);
+    expect(() => desk.resolveKnownIssue(issue.id)).toThrow(/being answered right now/);
+    for (let tries = 0; tries < 100 && !desk.knownIssues.get(issue.id)?.answer?.finishedAt; tries++) await settle(5);
+    const outcomes = (tickets: readonly KnownIssueTicket[]) => Object.fromEntries(tickets.map((entry) => [entry.customerId ?? entry.name, entry.state]));
+    const answer = desk.knownIssues.get(issue.id)!.answer!;
+    // Mateo's own conversation (where it was learned) and Ben's resolved one aren't checked.
+    expect(outcomes(answer.tickets)).toEqual({
+      Mona: "failed",
+      ...Object.fromEntries(CUSTOMERS.filter((customer) => !["c12", "c18"].includes(customer.id)).map((customer) => [customer.id, customer.id === "c05" ? "replied" : customer.id === "c08" ? "failed" : "no-match"])),
+    });
+    expect(answer.tickets.find((entry) => entry.name === "Mona")).toMatchObject({ ticketId: ticket.ticketId, matched: true, message: expect.stringMatching(/wasn't delivered: The runtime is busy/) });
+    expect(answer.tickets.find((entry) => entry.customerId === "c08")).toMatchObject({ message: expect.stringMatching(/decision model couldn't answer: 429/) });
+    expect(events.filter((published) => published.type === "known-issues").length).toBeGreaterThan(answer.tickets.length);
+
+    // The decision model was asked about the issue, on sessions of their own, deleted afterwards.
+    const batch = triagePlatform.sessions.filter((candidate) => JSON.parse((candidate.config.systemMessage as { content: string }).content)["matches"]);
+    expect(batch.length).toBeGreaterThan(0);
+    expect((batch[0]!.config.systemMessage as { content: string }).content).toContain(TRAIL15_ISSUE.title);
+    expect(batch.flatMap((candidate) => candidate.prompts)).toContain(CUSTOMERS.find((customer) => customer.id === "c05")!.opening);
+    // A player's ticket is classified with what happened at checkout, not just their words.
+    expect(batch.flatMap((candidate) => candidate.prompts)).toContain(
+      'At checkout for Neon Mona, I entered the promo code trail15 and got "Invalid code.", so I paid full price.\n\nThe launch code trail15 says Invalid code.',
+    );
+    await settle();
+    for (const candidate of batch) expect(triagePlatform.deleted).toContain(candidate.sessionId);
+
+    // Only Aisha's agent was sent the update, as a team note naming the issue.
+    const aisha = session("c05");
+    expect(aisha.sent.at(-1)!.prompt).toMatch(new RegExp(`^<team_note author="Help Desk" known_issue="${issue.id}">`));
+    expect(aisha.sent.at(-1)!.prompt).toContain(TRAIL15_ISSUE.update);
+    for (const customer of CUSTOMERS.filter((candidate) => !["c05", "c12"].includes(candidate.id))) expect(session(customer.id).sent, customer.name).toHaveLength(1);
+    expect(desk.ticket("c05").knownIssue).toEqual({ id: issue.id, title: TRAIL15_ISSUE.title, state: "replied" });
+    expect(desk.ticket("c01").knownIssue).toBeUndefined();
+    expect(desk.playerTicket(ticket.ticketId).knownIssue).toMatchObject({ state: "failed" });
+
+    // Answering her, the agent asks to refund what the code should have taken off: a person still decides.
+    const refund = aisha.ask({ kind: "custom-tool", toolName: "request_refund", toolCallId: "r1", args: { orderId: "CO-48224", amount: 28.35, reason: "TRAIL15 rejected" } }) as Promise<PermissionRequestResult>;
+    let decided = false;
+    void refund.then(() => (decided = true));
+    await settle(20);
+    expect(desk.ticket("c05")).toMatchObject({ status: "approval", approval: { id: "r1", action: "refund", amount: 28.35 } });
+    expect(decided).toBe(false);
+    desk.answer("c05", "r1", false);
+    expect(await refund).toMatchObject({ kind: "reject" });
+
+    // Answering again checks the others again, and doesn't send Aisha the update twice.
+    desk.answerKnownIssue(issue.id);
+    for (let tries = 0; tries < 100 && !desk.knownIssues.get(issue.id)?.answer?.finishedAt; tries++) await settle(5);
+    expect(aisha.sent.filter((sent) => sent.prompt.includes("known_issue="))).toHaveLength(1);
+    expect(desk.knownIssues.get(issue.id)!.answer!.tickets.find((entry) => entry.customerId === "c05")?.state).toBe("replied");
+  });
+
+  it("says when a matching ticket's update is queued behind a request waiting for a person", async () => {
+    const platform = new FakePlatform();
+    const triagePlatform = new FakeTriagePlatform();
+    triagePlatform.answer = (text) => ({ category: "question", urgent: false, matches: /trail15/i.test(text) });
+    const desk = new HelpDesk(platform, testConfig(), () => {}, new FakeFactory(), new Triage(triagePlatform, "help-desk-triage"));
+    desk.start();
+    desks.push(desk);
+    const run = await desk.simulate(25);
+    const session = (id: string) => platform.sessions.get(sessionIdFor(run.id, id))!;
+    for (let tries = 0; tries < 100 && CUSTOMERS.some((customer) => !session(customer.id)?.sent.length); tries++) await settle(5);
+
+    // Aisha's agent is waiting on her refund when the update goes out.
+    const aisha = session("c05");
+    void aisha.ask({ kind: "custom-tool", toolName: "request_refund", toolCallId: "r1", args: { orderId: "CO-48224", amount: 28.35, reason: "TRAIL15 rejected" } });
+    await settle(20);
+    expect(desk.ticket("c05").status).toBe("approval");
+
+    await desk.note("c12", "The launch banner's trail15 code is broken: tell customers to type TRAIL15 in capitals while we fix it.");
+    await session("c12").call("report_known_issue", TRAIL15_ISSUE);
+    desk.decide(desk.ticket("c12").memory!.id, true);
+    const issue = desk.knownIssues.list()[0]!;
+    desk.answerKnownIssue(issue.id);
+    for (let tries = 0; tries < 100 && !desk.knownIssues.get(issue.id)?.answer?.finishedAt; tries++) await settle(5);
+
+    expect(desk.knownIssues.get(issue.id)!.answer!.tickets.find((entry) => entry.customerId === "c05")).toMatchObject({
+      state: "replied",
+      message: expect.stringMatching(/^Queued: the agent replies once you answer/),
+    });
+    desk.answer("c05", "r1", false);
   });
 });

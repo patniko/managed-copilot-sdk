@@ -17,6 +17,9 @@ export interface NewKnowledge {
   readonly customerId: string;
   readonly customerName: string;
   readonly sessionId: string;
+  /** A known issue (`report_known_issue`) rather than a fact: `subject` is its title, `fact` what customers are told. */
+  readonly kind?: "known-issue";
+  readonly symptoms?: string;
 }
 
 const MAX_ENTRIES = 200;
@@ -97,6 +100,7 @@ export class KnowledgeBase {
     if (known) return undefined;
     const citations = clip(memory.citations, 300);
     const reason = clip(memory.reason, 300);
+    const symptoms = clip(memory.symptoms, 500);
     const proposal: MemoryProposal = {
       id: randomUUID(),
       subject,
@@ -105,8 +109,16 @@ export class KnowledgeBase {
       ...(reason ? { reason } : {}),
       source: { customerId: memory.customerId, name: memory.customerName, sessionId: memory.sessionId },
       at: now.toISOString(),
+      ...(memory.kind === "known-issue" ? { kind: memory.kind, ...(symptoms ? { symptoms } : {}) } : {}),
     };
     this.#save(this.#entries, [...this.#proposals, proposal].slice(-MAX_PROPOSALS));
+    return proposal;
+  }
+
+  /** Takes a proposal out of the waiting list without adding it (a known issue, which the desk records elsewhere). */
+  withdraw(id: string): MemoryProposal | undefined {
+    const proposal = this.proposal(id);
+    if (proposal) this.#save(this.#entries, this.#proposals.filter((candidate) => candidate.id !== id));
     return proposal;
   }
 
