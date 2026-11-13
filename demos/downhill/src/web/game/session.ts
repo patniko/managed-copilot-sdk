@@ -127,6 +127,7 @@ export class GameSession {
         this.cam.punch(clamp(res.impact / 11, 0, 1));
         this.fx.landing(p, clamp(res.impact / 10, 0.2, 1));
         this.stats.airTime += air.time;
+        if (res.ok && res.sketchy && !rep) this.ui.message('Sketchy save!', 'info');
         if (rep) {
           const gained = Math.round(rep.total * this.combo);
           this.score += gained;

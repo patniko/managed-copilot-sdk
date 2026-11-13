@@ -182,6 +182,48 @@ describe('bike physics', () => {
     expect(report!.tricks.map((t) => t.name)).toContain('Backflip');
   });
 
+  it('holding up to pedal through the lip does not throw a frontflip', () => {
+    const { ground } = makeWorld('large');
+    const b = new BikePhysics(ground);
+    b.reset(0, -100 + 25, 0, 14.5);
+    let pitchErr = Number.NaN;
+    let crashed = '';
+    b.events = { onLand: (res) => (pitchErr = res.ok ? res.pitchErr : Number.NaN), onCrash: (r) => (crashed = r) };
+    // the keyboard's up key is both throttle and flip
+    ride(b, 6, () => ({ throttle: 1, flip: 1 }));
+    expect(crashed).toBe('');
+    expect(Math.abs(pitchErr)).toBeLessThan(0.5);
+  });
+
+  it('a half spin lands backwards and reverts out as a scored Fakie Revert', () => {
+    const { ground } = makeWorld('hero');
+    const b = new BikePhysics(ground);
+    const tracker = new TrickTracker();
+    b.reset(0, -100 + 25, 0, 18);
+    let report: AirReport | null = null;
+    let fakie = false;
+    let crashed = '';
+    b.events = {
+      onLaunch: () => tracker.start(b),
+      onLand: (res, a) => {
+        fakie = res.ok && res.fakie;
+        report = tracker.finish(res, a, b);
+      },
+      onCrash: (r) => (crashed = r),
+    };
+    ride(b, 7, (_t, bb) => {
+      tracker.update(1 / 120, bb);
+      if (bb.grounded) return { throttle: bb.speed < 18 ? 0.6 : 0 };
+      return { spin: Math.abs(bb.air.spin) < Math.PI - 0.6 ? 1 : 0 };
+    });
+    expect(crashed).toBe('');
+    expect(fakie).toBe(true);
+    expect(report!.tricks.map((t) => t.name)).toEqual(expect.arrayContaining(['180', 'Fakie Revert']));
+    // the bike rides away forwards once the revert swings round
+    expect(b.forwardSpeed).toBeGreaterThan(5);
+    expect(Math.abs(b.revert)).toBeLessThan(0.1);
+  });
+
   it('bails when still holding a grab at touchdown', () => {
     const { ground } = makeWorld('large');
     const b = new BikePhysics(ground);

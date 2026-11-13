@@ -530,6 +530,11 @@ landing within five seconds of the previous trick builds a combo (up to ×5), an
 bonus. Release grabs and finish whips before touching down, or you bail. A gentle landing assist (toggle in Settings)
 helps line up near-misses.
 
+**Handling:** flips wind up, so a tap only tips the bike and a hold commits to the rotation. A flip or spin key held
+through takeoff (pedalling or steering off the lip) does nothing until you let go and press it again. Landings are
+forgiving: rear wheel first (nose high) is fine, a sloppy touchdown is a *sketchy save* that scrubs speed, and a half
+spin lands backwards and reverts out as a *Fakie Revert*. The suspension and frame spring and rebound on every landing.
+
 **Pace:** runs drop in already rolling, pedalling gets you up to speed in a couple of seconds, and every clean trick
 landing surges the bike forward. Bigger tricks and perfect landings surge harder.
 
