@@ -23,6 +23,7 @@ import { UI, type Settings } from './ui/ui';
 import { applyPost } from './viewer';
 import { clamp, damp } from './core/math';
 import { ShopScreen, type PreviewLook } from './shop/screen';
+import { watchShop } from './shop/availability';
 import { browserStorage } from './shop/shop';
 import { ShopStage } from './shop/stage';
 import { SupportPanel } from './support/panel';
@@ -158,6 +159,14 @@ export async function startApp(params: URLSearchParams) {
     click: () => audio?.playUiClick(),
   });
   let stage: ShopStage | null = null;
+  // Whether the shop is open: a presenter rolls it out from the demo gallery. Hidden until the server answers.
+  let shopOpen = false;
+  ui.root.classList.add('shop-closed');
+  const shopWatch = watchShop((open) => {
+    shopOpen = open;
+    ui.root.classList.toggle('shop-closed', !open);
+    if (!open && shop.isOpen) void goTitle();
+  });
   support.onChange = (open) => {
     shop.el.classList.toggle('support-open', open);
     input.suspend(open || shop.isOpen);
@@ -308,7 +317,7 @@ export async function startApp(params: URLSearchParams) {
 
   /** The Downhill Shop, over the world: a run in progress ends, and the preview stands where the riders line up. */
   async function goShop() {
-    if (state === 'shop' || state === 'loading') return;
+    if (!shopOpen || state === 'shop' || state === 'loading') return;
     state = 'shop';
     if (!world) await loadWorld(env);
     session?.dispose();
@@ -506,8 +515,10 @@ export async function startApp(params: URLSearchParams) {
   await loadWorld(env);
   if (params.has('play')) await startRun(char.id, env.id);
   else if (params.has('select')) await goSelect();
-  else if (params.has('shop')) await goShop();
-  else await goTitle();
+  else if (params.has('shop')) {
+    await shopWatch.ready;
+    await (shopOpen ? goShop() : goTitle());
+  } else await goTitle();
   requestAnimationFrame(frame);
   setTimeout(() => ((window as unknown as { __ready: boolean }).__ready = true), Number(params.get('readyMs') ?? 2500));
   (window as unknown as Record<string, unknown>).__probe = () => {

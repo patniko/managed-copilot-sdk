@@ -1,7 +1,7 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
-import type { GalleryState, TargetState } from "../shared/catalog.js";
+import { SHOP_APP_ID, type GalleryState, type TargetState } from "../shared/catalog.js";
 import { checkTarget, cloudUrls, localUrls } from "./targets.js";
 
 export interface CloudLookup {
@@ -42,6 +42,7 @@ const MIME: Record<string, string> = {
 };
 
 const CACHE_MS = 4_000;
+const SHOP_TIMEOUT_MS = 10_000;
 
 function serveFile(root: string, pathname: string, res: ServerResponse, fallback?: string): boolean {
   const base = resolve(root);
@@ -116,6 +117,55 @@ export function createGallery(options: GalleryOptions): (req: IncomingMessage, r
     };
   }
 
+  /**
+   * Downhill's shop switch, for a presenter: `GET` says whether the shop is open on a target, `PUT { open }` rolls it
+   * out or takes it down there. The gallery calls Downhill server to server (hosted, by its name in the environment).
+   */
+  async function downhillShop(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+    if (req.method !== "GET" && req.method !== "PUT") return json(res, 405, { error: "Use GET or PUT." });
+    const target = url.searchParams.get("target") === "cloud" ? "cloud" : "local";
+    if (hosted && target === "local") return json(res, 400, { error: "This gallery shows the Azure deployment only." });
+    let base: string | undefined;
+    if (target === "local") base = local.apps[SHOP_APP_ID];
+    else if (hosted) base = `http://${SHOP_APP_ID}`;
+    else {
+      const gatewayUrl = (await options.cloud).url;
+      base = gatewayUrl ? cloudUrls(gatewayUrl).apps[SHOP_APP_ID] : undefined;
+    }
+    if (!base) return json(res, 404, { error: "No Azure deployment, so there's no Downhill there." });
+    let body: string | undefined;
+    if (req.method === "PUT") {
+      // Only the gallery's own page may change it: a present Origin must match the Host.
+      const origin = req.headers.origin;
+      let sameSite = true;
+      try {
+        if (origin) sameSite = new URL(origin).host === req.headers.host;
+      } catch {
+        sameSite = false;
+      }
+      if (!sameSite) return json(res, 403, { error: "Cross-site requests aren't allowed." });
+      if (!/^application\/json\b/i.test(req.headers["content-type"] ?? "")) return json(res, 415, { error: "Send the body as application/json." });
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      body = Buffer.concat(chunks).toString("utf8").slice(0, 1024);
+    }
+    try {
+      const response = await fetch(`${base}/api/shop`, {
+        method: req.method,
+        headers: body === undefined ? {} : { "content-type": "application/json" },
+        ...(body === undefined ? {} : { body }),
+        redirect: "error",
+        signal: AbortSignal.timeout(SHOP_TIMEOUT_MS),
+      });
+      const answer = (await response.json().catch(() => undefined)) as { error?: { message?: unknown } } | undefined;
+      if (response.status === 404) return json(res, 502, { error: "This Downhill has no shop switch yet. Rebuild and restart it." });
+      if (!response.ok) return json(res, 502, { error: typeof answer?.error?.message === "string" ? answer.error.message : `Downhill answered with an error (${response.status}).` });
+      return json(res, 200, answer);
+    } catch {
+      return json(res, 502, { error: target === "local" ? "Downhill isn't answering. Start the platform with aspire run." : "Downhill in Azure isn't answering." });
+    }
+  }
+
   return (req, res) => {
     void (async () => {
       // Only this machine's own addresses (and, hosted, the deployment's names): refuses DNS-rebinding pages, which
@@ -127,6 +177,7 @@ export function createGallery(options: GalleryOptions): (req: IncomingMessage, r
         return res.end("Open the gallery at http://localhost.");
       }
       const url = new URL(req.url ?? "/", "http://gallery.local");
+      if (url.pathname === "/api/downhill/shop") return downhillShop(req, res, url);
       if (req.method !== "GET" && req.method !== "HEAD") return json(res, 405, { error: "Only GET is supported." });
 
       if (url.pathname === "/api/health") return json(res, 200, { ok: true });

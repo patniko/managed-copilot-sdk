@@ -2,6 +2,15 @@
 // for the sales ledger. Data Desk reads the ledger as CSV; Incident Commander reads its log and deploys fixes.
 import type { RiderId } from "./support.js";
 
+/** Whether the Downhill Shop is open: `GET /api/shop`, and `PUT /api/shop` with `{ "open": boolean }` to roll it out or take it down. */
+export interface ShopAvailability {
+  readonly open: boolean;
+  /** When it last opened or closed; absent when it never changed (open, as it shipped). */
+  readonly changedAt?: string;
+  /** What changed, in words: on a `PUT`. */
+  readonly message?: string;
+}
+
 /** The storefront code the shop runs now: `GET /api/storefront`. */
 export interface StorefrontInfo {
   readonly version: string;

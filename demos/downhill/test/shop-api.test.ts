@@ -19,7 +19,7 @@ async function setup(options: { secret?: string } = {}) {
   const config = testConfig(options.secret ? { deploySecret: options.secret } : {});
   const shop = testShop(config, clock);
   const url = await start({ config, shop });
-  return { clock, shop, url };
+  return { clock, shop, url, config };
 }
 
 const info = async (url: string) => (await (await fetch(`${url}/api/storefront`)).json()) as StorefrontInfo;
@@ -117,6 +117,38 @@ describe("the sales ledger's API", () => {
     expect(await bad({ ...event, type: "promo_applied", discountCents: 900 })).toBe("Send discountCents as a whole number of cents from 0 to 499.");
     expect((await postJson(url, "/api/shop/events", event, { origin: "https://attacker.example" })).status).toBe(403);
     expect((await postJson(url, "/api/shop/events", { ...event, padding: "x".repeat(9_000) })).status).toBe(413);
+  });
+});
+
+describe("rolling out the shop", () => {
+  const put = (url: string, body: unknown) => fetch(`${url}/api/shop`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const event = { type: "promo_rejected", rider: "mona", skus: ["mona-neon"], subtotalCents: 499, code: "trail15", source: "banner", error: "Invalid code." };
+  const rows = async (url: string) => ((await (await fetch(`${url}/api/sales`)).json()) as { rows: SalesRow[] }).rows;
+
+  it("closed, takes no checkouts and shows no sales or shop log; opened, starts launch day over; and remembers which across restarts", async () => {
+    const { url, clock, config } = await setup();
+    expect(await (await fetch(`${url}/api/shop`)).json()).toEqual({ open: true });
+
+    const closed = await put(url, { open: false });
+    expect(closed.status).toBe(200);
+    expect(await closed.json()).toMatchObject({ open: false, changedAt: new Date(START).toISOString(), message: expect.stringContaining("closed") });
+    const refused = await postJson(url, "/api/shop/events", event);
+    expect(refused.status).toBe(409);
+    expect((await errorOf(refused)).code).toBe("shop_closed");
+    expect(await rows(url)).toEqual([]);
+    expect((await service(url)).files.find((file) => file.path === "logs/shop.log")?.content).toBe("");
+
+    // The same data directory, as after a restart: still closed.
+    expect(testShop(config, clock).availability().open).toBe(false);
+
+    clock.now += 2 * 60 * MINUTE;
+    const opened = (await (await put(url, { open: true })).json()) as { open: boolean };
+    expect(opened.open).toBe(true);
+    const status = (await (await fetch(`${url}/api/status`)).json()) as { timeline: { launchAt: string } };
+    expect(Date.parse(status.timeline.launchAt)).toBe(clock.now - 3 * 60 * MINUTE);
+    expect((await rows(url)).length).toBeGreaterThan(0);
+    expect((await postJson(url, "/api/shop/events", event)).status).toBe(204);
+    expect((await put(url, { open: "yes" })).status).toBe(400);
   });
 });
 

@@ -26,6 +26,7 @@ import {
   HARNESS_STAGES,
   harnessStageUrl,
   PATTERNS,
+  SHOP_APP_ID,
   shotFile,
   WALKTHROUGHS,
   type AppEntry,
@@ -41,6 +42,7 @@ import {
 import { AGENT_SKETCHES, appHref, appsOnTab, COMPARE_APP_ID, compareApp, patternsOf, tabForHash, walkthroughCommand, type Shell, type Tab } from "./model.js";
 import { ConnectedMap, type NodeLayout, type Send } from "./ConnectedMap.js";
 import { AgentSketchView, PatternDiagram } from "./PatternDiagram.js";
+import { ShopSwitch } from "./ShopSwitch.js";
 import { CopyButton, cx, Spinner, Tooltip, useDismiss } from "./ui.js";
 
 const POLL_MS = 15_000;
@@ -460,8 +462,8 @@ function AppCard({ app, patterns, state }: { readonly app: AppEntry; readonly pa
 }
 
 /**
- * One app on the Connected demos map. `tall` (the storefront and the factory, which span the map's height) shows its
- * whole description and what to try; `wide` (the apps between them) puts its screenshot beside its tagline.
+ * One app on the Connected demos map. `tall` (the storefront and the factory, which span the map's height) stacks its
+ * screenshot over its text; `wide` (the apps between them) puts its screenshot beside it. Downhill's has the shop switch.
  */
 function FlowNode({ app, layout, sends, patterns, state }: { readonly app: AppEntry; readonly layout: NodeLayout; readonly sends: readonly Send[]; readonly patterns: readonly Pattern[]; readonly state?: GalleryState }) {
   const best = [state?.local?.links[app.id], state?.cloud.links[app.id]].find((link) => link?.health === "online");
@@ -469,26 +471,22 @@ function FlowNode({ app, layout, sends, patterns, state }: { readonly app: AppEn
     <article className={cx("flow-node app-card Box", `flow-node-${layout}`)} aria-label={app.title}>
       <Shot app={app} href={best?.url} />
       <div className="flow-node-body">
-        <Tooltip block content={layout === "tall" ? null : app.description}>
+        <Tooltip block content={app.description}>
           <h4 className="flex min-w-0 items-center gap-2 text-base font-semibold leading-snug">
             <span className="truncate">{app.title}</span>
             {app.public ? <span className="Label Label--success shrink-0">Public</span> : null}
           </h4>
-          {layout === "tall" ? (
-            <>
-              <p className="flow-tall-tagline text-sm text-fg-muted">{app.tagline}</p>
-              <p className="flow-tall-description text-sm text-fg-muted">{app.description}</p>
-            </>
-          ) : (
-            <p className="truncate text-sm text-fg-muted">{app.tagline}</p>
-          )}
+          <p className={cx("text-sm text-fg-muted", layout === "wide" && "truncate")}>{app.tagline}</p>
         </Tooltip>
         <AgentSketchView sketch={AGENT_SKETCHES[app.id]} />
-        <PatternMarkers app={app} patterns={patterns} />
-        {layout === "tall" ? (
-          <p className="text-xs text-fg-muted">
-            <span className="font-semibold text-fg">Try</span> {app.tryIt}
-          </p>
+        {/* The factory alone keeps its patterns and what to try: it shows several patterns, and the others say one in their sketch. */}
+        {layout === "tall" && AGENT_SKETCHES[app.id] ? (
+          <>
+            <PatternMarkers app={app} patterns={patterns} />
+            <p className="text-xs text-fg-muted">
+              <span className="font-semibold text-fg">Try</span> {app.tryIt}
+            </p>
+          </>
         ) : null}
         {sends.length ? (
           <ul className="flow-sends" aria-label={`What ${app.title} sends`}>
@@ -503,12 +501,20 @@ function FlowNode({ app, layout, sends, patterns, state }: { readonly app: AppEn
             ))}
           </ul>
         ) : null}
-        <div className="mt-auto pt-1">
+        <div className="mt-auto flex flex-col gap-2 pt-1">
+          {app.id === SHOP_APP_ID ? <ShopSwitch {...shopTarget(app, state)} /> : null}
           <AppActions app={app} state={state} />
         </div>
       </div>
     </article>
   );
+}
+
+/** Where the map's shop switch acts: the deployed Downhill on a hosted gallery, otherwise the first that answers (local first). */
+function shopTarget(app: AppEntry, state?: GalleryState): { readonly target?: Target; readonly targetName?: string } {
+  const targets: readonly Target[] = state?.hosted ? ["cloud"] : ["local", "cloud"];
+  const target = targets.find((entry) => (entry === "local" ? state?.local : state?.cloud)?.links[app.id]?.health === "online");
+  return target ? { target, targetName: TARGET_NAME[target] } : {};
 }
 
 // ------------------------------------------------------------------------------------------------ Walkthroughs

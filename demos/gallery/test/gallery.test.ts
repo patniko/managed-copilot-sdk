@@ -277,6 +277,34 @@ describe("gallery server", () => {
     );
   }
 
+  it("rolls Downhill's shop out and back through a same-site switch, and says so when Downhill isn't up", async () => {
+    const url = await gallery();
+    const put = (open: boolean, headers: Record<string, string> = {}) =>
+      fetch(`${url}/api/downhill/shop?target=local`, { method: "PUT", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ open }) });
+    expect(await (await fetch(`${url}/api/downhill/shop?target=local`)).json()).toEqual({ error: "Downhill isn't answering. Start the platform with aspire run." });
+
+    // Downhill on its local port at the gallery's offset (7455 + 40000).
+    let open = false;
+    const received: string[] = [];
+    const downhill = createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+      req.on("end", () => {
+        received.push(`${req.method} ${req.url} ${body}`);
+        if (req.method === "PUT") open = (JSON.parse(body) as { open: boolean }).open;
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ open }));
+      });
+    });
+    servers.push(downhill);
+    await new Promise<void>((resolve) => downhill.listen(47_455, resolve));
+
+    expect(await (await fetch(`${url}/api/downhill/shop?target=local`)).json()).toEqual({ open: false });
+    expect(await (await put(true, { origin: url })).json()).toEqual({ open: true });
+    expect((await put(false, { origin: "https://attacker.example" })).status).toBe(403);
+    expect((await fetch(`${url}/api/downhill/shop?target=local`, { method: "POST" })).status).toBe(405);
+    expect(received).toEqual(["GET /api/shop ", 'PUT /api/shop {"open":true}']);
+  });
+
   it("serves the page, screenshots, and state", async () => {
     const url = await gallery();
     expect(await (await fetch(`${url}/`)).text()).toContain("gallery");

@@ -721,3 +721,9 @@
   gap: 8px;
   pointer-events: auto;
 }
+
+/* The shop isn't rolled out yet (GET /api/shop): no way in. */
+.shop-closed .shop-entry {
+  display: none !important;
+}
+

@@ -22,14 +22,13 @@ export interface Send {
 interface Zone {
   readonly id: keyof typeof CONNECTED_COLUMNS;
   readonly title: string;
-  readonly subtitle: string;
   readonly column: number;
 }
 
 const ZONES: readonly Zone[] = [
-  { id: "storefront", title: "Storefront", subtitle: "Contoso Outdoors' game and shop", column: 1 },
-  { id: "responders", title: "Support and operations", subtitle: "Each app runs its own agents", column: 3 },
-  { id: "engineering", title: "Engineering", subtitle: "Work orders in, releases out", column: 5 },
+  { id: "storefront", title: "Storefront", column: 1 },
+  { id: "responders", title: "Support and operations", column: 3 },
+  { id: "engineering", title: "Engineering", column: 5 },
 ];
 
 const LEGEND_TILES: readonly { readonly place: Place; readonly agent?: boolean; readonly title: string; readonly text: string }[] = [
@@ -211,7 +210,6 @@ export function ConnectedMap({ apps, renderNode }: { readonly apps: readonly App
         return [
           <h3 key={`${zone.id}-title`} className="flow-zone-title" style={{ gridColumn: zone.column, gridRow: 1 }}>
             <span className="flow-zone-name">{zone.title}</span>
-            <span className="flow-zone-subtitle">{zone.subtitle}</span>
           </h3>,
           ...members.map((app, index) => node(app, zone.id === "responders" ? "wide" : "tall", zone.id === "responders" ? { gridColumn: 3, gridRow: 2 + index } : { gridColumn: zone.column, ...tall })),
         ];
@@ -241,7 +239,6 @@ export function ConnectedMap({ apps, renderNode }: { readonly apps: readonly App
       <div ref={platform} className="flow-platform" style={{ gridRow: rows + 3 }}>
         <div className="flow-zone-title">
           <span className="flow-zone-name">Managed Copilot platform</span>
-          <span className="flow-zone-subtitle">One gateway hosts every agent above</span>
         </div>
         <ul className="flow-platform-tiles">
           {LEGEND_TILES.map((tile) => (

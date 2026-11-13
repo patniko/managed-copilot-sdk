@@ -402,6 +402,20 @@ path's `--reset` do. **Reset demo** also clears the browser's purchases and supp
 Launch day lasts a day. When it's more than a day old, the server starts it over by itself, so the story stays
 "launched three hours ago" and the sales stay a day's worth (Data Desk reads files up to 5 MB).
 
+### Rolling out the shop
+
+The shop is open as it ships. To roll it out during a talk, close it beforehand and open it on stage, with the
+**Downhill Shop** switch under Downhill on the [demo gallery](../gallery/README.md)'s Connected demos map, or with
+`PUT /api/shop` and `{ "open": false }` or `{ "open": true }`. `GET /api/shop` answers `{ "open", "changedAt" }`.
+
+- **Closed:** the game hides every Shop button within a few seconds (it checks `GET /api/shop` every 3 seconds, and
+  waits for the first answer before showing one), and an open shop goes back to the title. Checkout events get `409
+  shop_closed`, `/api/sales` has no rows, and `logs/shop.log` in Incident Commander's view of the service is empty, so
+  nothing can fire the alert. Closing resolves the alert if it's firing. Rides still stream their telemetry.
+- **Opened:** the same as **Reset demo** with a fresh launch day: launch three hours ago, simulated sales since then, no
+  live sales, deployed fixes, or alert. Open games show the Shop without a reload.
+- It's kept in `shop.json` in the data directory, so a restart keeps it.
+
 ## How it works
 
 - **No agents here.** [`apphost.mts`](apphost.mts) declares just the app, with no environments. Downhill doesn't call

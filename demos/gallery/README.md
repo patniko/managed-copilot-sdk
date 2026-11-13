@@ -42,6 +42,10 @@ Below the header and a one-line hero, five tabs split the page. Each tab has its
   connections. Below 70rem the map becomes a list in story order, each node saying what it sends where. The
   connections are `FLOWS` in `src/web/model.ts`, and the tests check them against the URLs the root AppHost gives each
   app (`HELP_DESK_URL`, `SOFTWARE_FACTORY_URL`, `INCIDENT_URL`, `DOWNHILL_URL`, `INCIDENT_DEPLOY_URL`).
+  - **The Downhill Shop** switch, under Downhill, rolls the shop out or takes it down for a talk
+    ([rolling out the shop](../downhill/README.md#rolling-out-the-shop)). It acts on the Downhill that answers, local
+    first (a deployed gallery: Azure's), through the gallery server (`GET` and same-site `PUT /api/downhill/shop?target=`),
+    and checks it every 5 seconds.
 - **Staff assistant** tab: Hack the Harness's six stages (shared, isolated, promotable, direct, workers, and mixed),
   one row each with **Open**, which opens the local app at that stage (`?stage=<id>`). Every stage runs at once, so
   you can flip between them during a talk. Local only, so a deployed gallery leaves the tab out.

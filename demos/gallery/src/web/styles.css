@@ -226,6 +226,17 @@
       6px 6px 0 0 var(--borderColor-success-muted);
   }
 
+  /* ----------------------------------------------------------------------------------- Shop switch */
+  .shop-switch {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid var(--borderColor-default);
+    border-radius: var(--borderRadius-medium);
+    background-color: var(--bgColor-muted);
+  }
+
   /* ------------------------------------------------------------------------------- Connected map */
   /* Narrow: a list in story order. Wide (70rem, ConnectedMap's WIDE): zones, a grid, and connectors. */
   .flow-map {
@@ -254,11 +265,6 @@
     line-height: 1.2;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    color: var(--fgColor-muted);
-  }
-  .flow-zone-subtitle {
-    font-size: 0.75rem;
-    font-weight: var(--base-text-weight-normal);
     color: var(--fgColor-muted);
   }
   .flow-cell {
@@ -293,10 +299,6 @@
   .flow-sends li {
     display: flex;
     gap: 0.375rem;
-  }
-  /* A storefront or factory node: its tagline in the list, its whole description on the map. */
-  .flow-tall-description {
-    display: none;
   }
   .flow-platform {
     display: flex;
@@ -421,12 +423,8 @@
     .flow-node-wide > .shot {
       width: 8.5rem;
     }
-    .flow-sends,
-    .flow-tall-tagline {
+    .flow-sends {
       display: none;
-    }
-    .flow-tall-description {
-      display: block;
     }
     .flow-legend {
       order: 0;

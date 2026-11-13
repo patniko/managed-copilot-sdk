@@ -31,9 +31,6 @@ export function AgentSketchView({ sketch }: { readonly sketch?: AgentSketch }) {
   if (!sketch) {
     return (
       <div className="sketch">
-        <span className="sketch-tiles" aria-hidden>
-          <Tile place="app" />
-        </span>
         <span className="sketch-caption">No agents: a stock web game that calls the other apps</span>
       </div>
     );
