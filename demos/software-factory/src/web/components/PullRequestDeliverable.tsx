@@ -24,7 +24,6 @@ import { mergePullRequest, refreshPullRequest, reviseWorkOrder } from "../lib/st
 import { useNow } from "../lib/time.js";
 import { toast } from "../lib/toast.js";
 import { Button, buttonClass, IconButton } from "./ui/Button.js";
-import { Callout } from "./ui/Feedback.js";
 import { MarkdownView } from "./viewers/MarkdownView.js";
 
 const STATE_META: Readonly<Record<PullRequestView["state"], { readonly label: string; readonly className: string; readonly icon: typeof GitPullRequestIcon }>> = {

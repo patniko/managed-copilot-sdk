@@ -112,6 +112,7 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | Gateway | `services/gateway` | Node service | Auth, admission, routing, ledger, REST, events, schedules, webhooks, operator API |
 | Console | `services/console` | static files served by the gateway | Operator console at `/console`: health, deployed state, sessions, harness configuration, guarded actions |
 | GitHub theme | `libraries/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
+| Demo logger | `libraries/demo-log` | private library | The demos' server logger: level from each demo's `*_LOG_LEVEL`, one line per entry, GitHub tokens and bearer credentials redacted from messages and fields, secret-named fields masked; each demo's `src/server/log.ts` configures it (prefix, level variable, extra secret field names, Downhill's telemetry sink, the assistant's scoped loggers) and each demo image copies it in |
 | Sandbox | `services/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
 | Egress | `services/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
 | Demos | `demos/*` | apps | AI software factory, long-running assistant, Dispatch, Research Swarm, Pattern Race, Data Desk, Repo Doctor, Help Desk, Downhill, Incident Commander, Front Desk, Hack the Harness, and the gallery |
@@ -270,7 +271,7 @@ denies configuration RPCs it does not understand.
 ### Apps and Azure AI Foundry
 
 As built (spec section 2, "Your app's own users", and section 15; decisions 5 and 41-43). Gateway `modules/core/apps.ts`,
-`modules/foundry/**`, the Foundry parts of `modules/core/sessions.ts` and `modules/sandbox/broker.ts`; protocol
+`modules/foundry/**`, the inference routing in `modules/core/sessions/inference.ts` and `modules/sandbox/broker.ts`; protocol
 `apps.ts`; SDK `identity.ts`.
 
 - **App keys.** The normalized config carries `apps: { <app>: { environments, anyGitHubUser?, key: { secretEnv } } }`.
@@ -529,7 +530,7 @@ As built (`services/gateway/src/modules/sandbox`, `services/sandbox`; contracts 
 `managed.exec`, `managed.sandboxes.create`, and the sandbox service's `exec` API (spec section 18; the proposal
 [direct execution](design/direct-execution.md)). Code: `services/sandbox/src/sandboxd/execs.ts`,
 `services/gateway/src/modules/sandbox/execs.ts` (with `store.ts`, `routes.ts`, `service.ts`), core's workspace-only
-session kind in `core/sessions.ts`, `libraries/sdk/src/features/exec.ts`, and `libraries/cli/src/commands/exec.ts`.
+session kind in `core/sessions/manager.ts`, `libraries/sdk/src/features/exec.ts`, and `libraries/cli/src/commands/exec.ts`.
 
 - **sandboxd command journal.** `POST /v1/exec` (`SandboxExecRequest { id, command, timeoutMs?, stdin? }`) runs
   `bash -c <command>` through `asWorkload` (uid/gid 10001, `no_new_privs`, empty capability sets) in `/workspace` with
@@ -1261,8 +1262,8 @@ and quickstart snippet 14).
   exercised only locally.
 - **Execution styles (direct and mixed).** `EnvironmentConfig.execution` (`delegate` default, `direct`, `mixed`) and
   `subagents` (`shared` default, `own`) on orchestrators (protocol validation: `direct` names exactly one worker
-  environment; `subagents` only with direct or mixed). Code: `orchestrator/hands.ts` (the tools), the hands section of
-  `orchestrator/service.ts` (sandboxes), admission (`core/admission.ts`), and `test/orchestrator-direct.test.ts`,
+  environment; `subagents` only with direct or mixed). Code: `orchestrator/hands.ts` (the tools), the hands sandboxes in
+  `orchestrator/sandboxes.ts`, admission (`core/admission.ts`), and `test/orchestrator-direct.test.ts`,
   `test/hands.docker.test.ts` (opt-in, runs the helper commands in a real sandbox container).
   - *Tools.* The worker tools apply unless the style is `direct`; the ten hands tools (`HANDS_TOOLS`: `bash`,
     `read_bash`, `write_bash`, `stop_bash`, `list_bash`, `view`, `create`, `edit`, `glob`, `grep`) are platform tools
@@ -1575,7 +1576,7 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   the client's retry queued behind it). The bounded steps are `session.create`, `session.resume` (client resumes,
   restores, and a cutover's destination), the sandbox handle's `initialize` and `sessionOpened`,
   `session.options.update`, `session.tools.set`, and a restore's turn checks. Every 60 s without the answer
-  (`upstreamTimings` in `sessions.ts`), the connection is probed with `ping` (10 s). A connection that answers is still
+  (`upstreamTimings` in `core/sessions/support.ts`), the connection is probed with `ping` (10 s). A connection that answers is still
   working on the step, which may yet apply, so core keeps waiting and sends it nothing else for the session. Giving up
   then would let the step land after whatever comes next, such as a resume withdrawing hooks after the reconcile that
   restored them. A connection that does not answer is closed, so nothing it carried can apply later: a sandbox runtime
@@ -2125,6 +2126,6 @@ Where each area of the platform lives.
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `libraries/protocol/src/workers.ts`, CLI `workers` command | orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
 | **azure** | `deployments/azure/**`, `libraries/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `services/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
 | **operator** | gateway `modules/operator/**`, `src/{metrics,redaction}.ts`, core `operator.ts`/`harness.ts`, `services/console/**`, `libraries/protocol/src/operator.ts`, CLI `commands/operator.ts` (each module keeps its own `operator*` views) | Spec section 16: operator API, console, operator CLI commands, audit log |
-| **foundry** | gateway `modules/foundry/**`, `modules/core/apps.ts`, `libraries/protocol/src/apps.ts`, SDK `identity.ts`, `libraries/aspire/src/publish/foundry.ts`; the routing itself is in core's `sessions.ts` and the sandbox broker | Spec section 2 "Your app's own users" and section 15: app keys and app users, `anyGitHubUser` admission, the Azure AI Foundry inference route |
+| **foundry** | gateway `modules/foundry/**`, `modules/core/apps.ts`, `libraries/protocol/src/apps.ts`, SDK `identity.ts`, `libraries/aspire/src/publish/foundry.ts`; the routing itself is in core's `sessions/inference.ts` and the sandbox broker | Spec section 2 "Your app's own users" and section 15: app keys and app users, `anyGitHubUser` admission, the Azure AI Foundry inference route |
 | **design** | `libraries/github-theme/**`, the tour slides' styles (`docs/tutorial/source/slides.html`) | The GitHub look and feel shared by the console and the demos; the apps build their screens from it |
 | **guides** | `docs/README.md`, `docs/concepts/**`, `walkthroughs/**`, their images in `docs/images/` | Start here, the visual concept pages, and the walkthroughs with runnable samples; they summarize the spec and this document, which stay the sources of truth |

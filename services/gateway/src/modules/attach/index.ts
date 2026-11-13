@@ -9,7 +9,7 @@ import { ATTACH_CLOSE_CODES, ManagedCopilotError, ROUTES, parseWebSocketProtocol
 import { WebSocketServer, type WebSocket } from "ws";
 import type { GatewayApp, GatewayModule } from "../../app.js";
 import { isGitHubPrincipal, type Principal } from "../../http.js";
-import { pathScrubber } from "../core/sessions.js";
+import { pathScrubber } from "../core/sessions/index.js";
 import type { PromotionParticipant } from "../promotion/contract.js";
 import { AhpHosts } from "./hosts.js";
 import { uriAwareScrubber } from "./policy.js";

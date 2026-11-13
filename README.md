@@ -190,7 +190,7 @@ include a single gateway replica and no warm sandbox pools; see [live qualificat
 
 | Path | Contents |
 | --- | --- |
-| `libraries/` | The SDK, Aspire integration, CLI, shared protocol, and UI theme |
+| `libraries/` | The SDK, Aspire integration, CLI, shared protocol, UI theme, and the demos' shared logger |
 | `services/` | The gateway, operator console, sandbox image, and egress proxy |
 | `deployments/azure` | The Azure target for `aspire deploy` (AWS is a [roadmap](deployments/aws/README.md)) |
 | `environments/` | Per-environment agents, skills, and instructions for the root AppHost |

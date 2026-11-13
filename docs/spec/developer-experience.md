@@ -2050,10 +2050,10 @@ not silent fallbacks. Diagnostic output must be redacted and scoped to the owner
 
 ## Review disposition
 
-Two independent model reviews of the earlier draft shaped this plan; the last seven rows come from their review of the
-proposed connectors (2026-10-26). The changes below incorporate their findings, and the Qualification column names the
-gates whose [results](#gate-results) cover each. The same reviewers also reviewed every implementation milestone and
-the final integration; their findings were fixed before merge.
+Design review of the earlier draft shaped this plan; the last seven rows come from the review of the proposed
+connectors (2026-10-26). The changes below incorporate its findings, and the Qualification column names the gates
+whose [results](#gate-results) cover each. Every implementation milestone and the final integration were reviewed the
+same way, and their findings were fixed before merge.
 
 | Finding | Plan response | Qualification |
 | --- | --- | --- |

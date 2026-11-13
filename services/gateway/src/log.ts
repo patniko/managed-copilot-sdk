@@ -7,8 +7,23 @@ export type Level = keyof typeof LEVELS;
  */
 const SENSITIVE_KEY = /token|secret|authorization|password|passwd|cookie|credential|^value$|^values$|^headers$|placeholder|private|^apikey$|^api_key$|^key$|accesskey|access_key|signingkey|signing_key|platformkey|platform_key/i;
 
-/** Masks values whose keys look sensitive. Logs must never carry credentials, placeholders, or vault values. */
+/** Well-known credential shapes inside free text (linear-time patterns: they run over every log line). */
+const TOKEN_IN_TEXT =
+  /(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|xox[abposr]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*|(?:mcc|mcct|mcrt|mcv|mcsk)_[A-Za-z0-9_-]{8,})/g;
+const AUTH_SCHEME_IN_TEXT = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
+const URL_USERINFO_IN_TEXT = /\b([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s"'<>`/@]+@/gi;
+
+/** Free text with credential-shaped words, authorization values, and URL user information masked. */
+export function maskSecrets(text: string): string {
+  return text.replace(TOKEN_IN_TEXT, "[redacted]").replace(AUTH_SCHEME_IN_TEXT, "$1 [redacted]").replace(URL_USERINFO_IN_TEXT, "$1***@");
+}
+
+/**
+ * Masks values whose keys look sensitive, and credential shapes inside other strings. Logs must never carry
+ * credentials, placeholders, or vault values.
+ */
 export function redact(value: unknown, depth = 0, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (typeof value === "string") return maskSecrets(value);
   if (typeof value === "bigint") return value.toString();
   if (depth > 6 || value === null || typeof value !== "object") return value;
   if (seen.has(value)) return "[circular]";
@@ -113,8 +128,9 @@ export interface Logger {
 
 export function createLogger(name: string, level: string = process.env.LOG_LEVEL ?? "info"): Logger {
   const threshold = LEVELS[(level as Level) in LEVELS ? (level as Level) : "info"];
-  const write = (at: Level, message: string, fields?: Record<string, unknown>) => {
+  const write = (at: Level, text: string, fields?: Record<string, unknown>) => {
     if (LEVELS[at] < threshold) return;
+    const message = maskSecrets(text);
     const hasFields = fields !== undefined && Object.keys(fields).length > 0;
     const suffix = hasFields ? ` ${stringify(fields)}` : "";
     const time = new Date().toISOString();

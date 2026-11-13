@@ -1,6 +1,6 @@
 import { AlertIcon, CopilotIcon, HourglassIcon, TerminalIcon } from "@primer/octicons-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { Blueprint, ChatMessage, ConversationView } from "../../shared/types.js";
+import type { ChatMessage, ConversationView } from "../../shared/types.js";
 import { handlingTime } from "../lib/conversation.js";
 import { cx } from "../lib/cx.js";
 import { between, formatClock, formatDuration } from "../lib/format.js";
@@ -17,7 +17,7 @@ import { Tooltip } from "./ui/Tooltip.js";
 
 const NO_OUTGOING: readonly Outgoing[] = [];
 
-export function Chat({ view, blueprints }: { readonly view: ConversationView; readonly blueprints: readonly Blueprint[] }) {
+export function Chat({ view }: { readonly view: ConversationView }) {
   const outgoing = useStore((state) => state.outgoing[view.id] ?? NO_OUTGOING);
   const live = view.busy || view.approvals.length > 0 || outgoing.length > 0;
   const now = useNow(live);

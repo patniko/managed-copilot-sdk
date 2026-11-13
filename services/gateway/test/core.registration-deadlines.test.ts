@@ -4,8 +4,8 @@
 // answers pings is still working on the step, which may yet apply: it is waited for, with nothing else sent meanwhile.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
-import type { SessionManager } from "../src/modules/core/sessions.js";
-import { upstreamTimings } from "../src/modules/core/sessions.js";
+import type { SessionManager } from "../src/modules/core/sessions/index.js";
+import { upstreamTimings } from "../src/modules/core/sessions/index.js";
 import { FakeRuntime, FakeSandboxes, RawClient, startGitHubStub, startTestGateway, type TestGateway } from "./harness.js";
 
 const ALICE = "alice-token";

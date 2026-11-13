@@ -21,8 +21,12 @@ import { promisify } from "node:util";
 
 const root = new URL("../../../", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 const sdk = await import(pathToFileURL(root + "/libraries/sdk/node_modules/@github/copilot-sdk/dist/index.js").href);
-const ENDPOINT = (process.env.FOUNDRY_ENDPOINT ?? "https://mc-foundry-dev.openai.azure.com/openai/v1").replace(/\/+$/, "");
-const MODEL = process.env.FOUNDRY_MODEL ?? "grok-4.7";
+const ENDPOINT = process.env.FOUNDRY_ENDPOINT?.replace(/\/+$/, "");
+const MODEL = process.env.FOUNDRY_MODEL;
+if (!ENDPOINT || !MODEL) {
+  console.error('Set FOUNDRY_ENDPOINT ("https://<account>.openai.azure.com/openai/v1") and FOUNDRY_MODEL ("<deployment>") first.');
+  process.exit(2);
+}
 const PLACEHOLDER = "mcft_probe_placeholder";
 
 async function entraToken() {

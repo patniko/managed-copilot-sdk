@@ -71,7 +71,7 @@ export class RideDynamics {
       return;
     }
     // bike velocity (world)
-    let v = _s;
+    const v = _s;
     if (bikeWorld) _p.setFromMatrixPosition(bikeWorld);
     if (velocity) v.copy(velocity);
     else if (bikeWorld && this.hasPrev) v.copy(_p).sub(this.prevPos).divideScalar(dt);

@@ -339,7 +339,6 @@ export class Cloth {
    * @param speed riding speed (m/s), scales the flutter frequency
    */
   update(dt: number, rootWorld: THREE.Matrix4, bones: THREE.Object3D[], wind: THREE.Vector3, speed: number, time: number): void {
-    const n = this.n;
     this.updateSkin(rootWorld, bones);
     // previous-frame collider positions for sub-step interpolation
     this.colA0.set(this.colA);

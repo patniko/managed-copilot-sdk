@@ -7,7 +7,6 @@ import type {
   GateDecisionRequest,
   GateOutcomeRequest,
   GateRequest,
-  OpenGateRequest,
   WorkOrderGate,
 } from "../../shared/types.js";
 import { StationError } from "./errors.js";

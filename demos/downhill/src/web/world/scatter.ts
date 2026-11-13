@@ -48,7 +48,6 @@ function displace(g: THREE.BufferGeometry, amp: number, freq: number, seed: numb
     const x = p.getX(i),
       y = p.getY(i),
       z = p.getZ(i);
-    const l = Math.hypot(x, y, z) || 1;
     const d = 1 + amp * noise.noise3(x * freq + seed, y * freq, z * freq - seed);
     p.setXYZ(i, x * d, y * d, z * d);
   }
@@ -64,10 +63,6 @@ function blob(r: number, detail: number, seed: number, squash = 0.8) {
   displace(g, 0.22, 2.2 / r, seed);
   g.scale(1, squash, 1);
   return g;
-}
-
-function mix3(a: THREE.Color, b: THREE.Color, t: number): [number, number, number] {
-  return [a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t];
 }
 
 function shadeFoliage(g: THREE.BufferGeometry, base: THREE.Color, top: number, bottom: number, height: number) {

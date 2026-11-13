@@ -16,7 +16,7 @@ pnpm qa azure --url https://copilot.<environment-domain> --apps-domain <environm
 
 | Tier | Command | What runs | Needs | When |
 | --- | --- | --- | --- | --- |
-| `ci` | `pnpm qa` | `ci.build`, `ci.typecheck`, and `ci.test`: every package's tests, with fakes | `pnpm install` | Every pull request (CI runs the same three) |
+| `ci` | `pnpm qa` | `ci.build`, `ci.typecheck`, `ci.lint`, and `ci.test`: every package's tests, with fakes | `pnpm install` | Every pull request (CI runs the same four) |
 | `e2e` | `pnpm qa e2e` | The opt-in end-to-end, Docker, and live tests. Each starts its own gateway on a free port, with real models and real Docker sandboxes | Docker, a GitHub account with Copilot | Before merging a change to the gateway, sandbox, egress proxy, or SDK |
 | `local` | `pnpm qa local` | Every spec snippet, walkthrough, and demo script against the running local platform, and the checks to do by hand | `aspire run --non-interactive` (all demos up), a GitHub account with Copilot, `npx managed-copilot login` for schedules | Before a release, and after merging a batch of work |
 | `azure` | `pnpm qa azure --url <gateway>` | The spec snippets and demo scripts against a deployment, the isolated-compute qualification, and the Azure checks to do by hand | A deployment, `--apps-domain` for the demos, `--isolated-env` for the qualification | After every deploy |
@@ -241,6 +241,7 @@ What CI runs on every pull request: build, type checks, and every package's test
 | --- | --- | --- | --- |
 | `ci.build` | Build every package | - | - |
 | `ci.typecheck` | Type-check every package | - | - |
+| `ci.lint` | Lint every package (ESLint) | - | - |
 | `ci.test` | Every package's tests, with fakes (opt-in end-to-end tests stay skipped) | - | - |
 
 ### `e2e`

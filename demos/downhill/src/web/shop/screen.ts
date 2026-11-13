@@ -4,7 +4,7 @@ import type { SupportOpener, SupportRequest } from '../../shared/support';
 import type { BikePaint, CharacterId, RiderColors } from '../game/rider/types';
 import { forgetSupportTicket } from '../support/api';
 import { CHAT_ICON } from '../support/icon';
-import { findItem, formatCents, ITEMS, LAUNCH_OFFER, type ShopItem, type Slot } from './catalog';
+import { findItem, formatCents, ITEMS, LAUNCH_OFFER, type Slot } from './catalog';
 import {
   addToCart,
   applyCode,

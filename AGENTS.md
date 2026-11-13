@@ -30,13 +30,14 @@ Aspire, or in your Azure subscription. The [README](README.md) has the quickstar
   on x64 and arm64, and in Linux containers.
 - Respect the configured npm registry (`npm config get registry`). Never hardcode `registry.npmjs.org`; Docker builds
   take the host's registry as `--build-arg NPM_REGISTRY=...`.
-- Keep `pnpm build` and `pnpm test` green on every commit.
+- Keep `pnpm build`, `pnpm -r run typecheck`, `pnpm lint`, and `pnpm test` green on every commit.
 
 ## Commands
 
 ```powershell
 pnpm install
 pnpm build                                  # every workspace package, in dependency order
+pnpm lint                                   # ESLint over the whole repository (eslint.config.js)
 pnpm test                                   # every package's vitest suite
 pnpm --filter @managed-copilot/gateway test # one package
 aspire run                                  # the platform and demos locally

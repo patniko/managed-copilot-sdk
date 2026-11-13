@@ -24,7 +24,7 @@ import type { ResolvedEnvironment } from "./contracts.js";
 import type { Environments } from "./environments.js";
 import { RpcEndpoint, unsupportedMethod, webSocketTransport, type IncomingRequestContext } from "./rpc.js";
 import { MAX_PROTOCOL_VERSION, type SharedRuntime } from "./runtime.js";
-import type { ClientPeer, SessionManager } from "./sessions.js";
+import type { ClientPeer, SessionManager } from "./sessions/index.js";
 
 export class ClientConnection implements ClientPeer {
   readonly id = `conn_${randomUUID()}`;

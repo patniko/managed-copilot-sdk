@@ -126,6 +126,7 @@ function ciCheck(id: string, title: string, args: readonly string[], timeoutMinu
 const ci: AutomatedCheck[] = [
   ciCheck("ci.build", "Build every package", ["build"], 20),
   ciCheck("ci.typecheck", "Type-check every package", ["-r", "run", "typecheck"], 20),
+  ciCheck("ci.lint", "Lint every package (ESLint)", ["lint"], 10),
   ciCheck("ci.test", "Every package's tests, with fakes (opt-in end-to-end tests stay skipped)", ["test"], 30),
 ];
 

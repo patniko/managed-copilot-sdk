@@ -248,6 +248,7 @@ function DatasetGrid({ analysisId, dataset }: { readonly analysisId: string; rea
   // Once per dataset: the component is keyed by it.
   useEffect(() => {
     void load(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs on mount only; the parent remounts per dataset
   }, []);
   // "The current view" sends the rows the grid has loaded.
   useEffect(() => {

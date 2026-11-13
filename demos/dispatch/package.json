@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@github/copilot-sdk": "1.0.31",
+    "@managed-copilot/demo-log": "workspace:*",
     "@managed-copilot/protocol": "workspace:*",
     "@managed-copilot/sdk": "workspace:*"
   },

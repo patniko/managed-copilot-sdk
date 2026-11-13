@@ -275,7 +275,7 @@ guard the review could name. The residual risks below are defense-in-depth gaps 
 
 Controls the review traced in code, by boundary: GitHub-token auth on every non-opt-out route
 (`services/gateway/src/http.ts:159`, `modules/core/auth.ts:105-145`); account-ID ownership with a per-session
-incarnation counter (`modules/core/sessions.ts:555-625`); a JSON-RPC allowlist (`modules/core/router.ts:151-156`);
+incarnation counter (`modules/core/sessions/manager.ts:50-102`); a JSON-RPC allowlist (`modules/core/router.ts:151-156`);
 an admission allowlist that refuses cwd, plugins, BYOK, and local MCP servers (`modules/core/admission.ts:350-593`);
 HMAC action capabilities compared in constant time (`modules/durable/actions/capability.ts:37-62`); hashed single-use
 attach tickets (`modules/attach/tickets.ts:72-103`); an SDK relay that binds loopback and checks the CLI is the owner

@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ManagedCopilotError, type PlatformEvent } from "@managed-copilot/protocol";
-import type { SessionManager } from "../src/modules/core/sessions.js";
+import type { SessionManager } from "../src/modules/core/sessions/index.js";
 import { FakeRuntime, FakeSandboxes, RawClient, sleep, startGitHubStub, startTestGateway, type TestGateway } from "./harness.js";
 
 const ALICE = "alice-token";
