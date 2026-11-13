@@ -489,7 +489,7 @@ The game reads these URL parameters:
 | `src/web/dev` | Standalone preview pages for the characters and the audio engine (`pnpm dev`, then `/dev/characters.html` or `/dev/audio.html`) |
 | `src/web/public/thumbs` | Select-screen thumbnails, rendered from the game itself |
 | `scripts` | The happy path, and the game's headless-Edge playtest, screenshot, and keyboard UI test scripts |
-| `test` | Unit tests: the server, support, the shop's API (storefront versions, sales, the service, deploys, reset), the ledger, the alert, telemetry, the fragment, the shop, and the game's physics, tricks, characters, and camera |
+| `test` | Unit tests: the server, support, the shop's API (storefront versions, sales, the service, deploys, reset), the ledger, the alert, telemetry, the fragment, the shop, and the game's physics, tricks, rider choreography, characters, and camera |
 | `Dockerfile` | The container `aspire deploy` publishes, with the storefront's original files |
 
 ## Worlds
@@ -582,6 +582,17 @@ the trail ahead).
   ([`copilot.ts`](src/web/game/characters/copilot.ts)) is the pilot-robot mascot.
 - **Ride dynamics** ([`dynamics.ts`](src/web/game/characters/dynamics.ts)): spring-damper "limb suspension" driven by
   the bike's accelerations and terrain chatter, so riders absorb landings and bumps; Mona also gets a jelly squash.
+- **Jumps** ([`choreography.ts`](src/web/game/choreography.ts)): riders act out every jump. They crouch to load it,
+  explode off the lip, pull the bike up into a tuck, throw their heads back with a whoop on big air, and look down to
+  spot the landing as it comes up. Then they sink into it, elbows out, and spring back up; harder landings sink deeper.
+- **Emotes** ([`characters/emotes.ts`](src/web/game/characters/emotes.ts)): landed tricks are celebrated in character
+  with fist pumps, both arms up in a V, a point to the sky, a wave, or Copilot's pilot salute. A sketchy save gets a
+  wobble and a wipe of the brow. Bigger tricks get bigger celebrations, the finish line gets the biggest, and taking
+  off again cuts a celebration short. Faces join in: Mona's and Copilot's eyes close into happy arcs, widen, narrow
+  with effort, or go dizzy in a crash, and mouths open for the whoops.
+- **Previews:** `/dev/characters.html` plays them with `?pose=jump` (the whole jump), `?pose=emotes` (every emote in
+  turn), or a single emote (`?pose=pump`, `victory`, `point`, `wave`, `salute`, `nod`, `phew`); `&view=face` frames
+  the faces.
 
 ## Testing
 

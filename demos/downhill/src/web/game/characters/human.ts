@@ -21,7 +21,7 @@ import {
   transformed,
   type LocalSdf,
 } from './sdf';
-import { enableShadows, outfit, v3 } from './util';
+import { ellipsoid, enableShadows, merge, outfit, v3 } from './util';
 
 /**
  * The human rider from the reference video, built for close-up chase shots:
@@ -73,7 +73,7 @@ export const RIDER_SPEC: HumanoidSpec = {
   reachMax: 0.95,
   reachMin: 0.7,
   attackReach: 0.84,
-  celebrateHand: new THREE.Vector3(0.12, 0.5, -0.08),
+  emote: { splay: 0.05, headCenter: new THREE.Vector3(0, 0.15, -0.01), headRadius: 0.1 },
 };
 
 /* ------------------------------------------------------------------ skeleton */
@@ -1112,6 +1112,19 @@ export function preloadHumanRider(): Promise<void> {
 
 /* ------------------------------------------------------------------ rider */
 
+let _mouth: { geo: THREE.BufferGeometry; mat: THREE.MeshLambertMaterial } | null = null;
+
+/** The open mouth (a dark opening under the top teeth), built around the upper lip so it opens by scaling down. */
+function mouth(): NonNullable<typeof _mouth> {
+  return (_mouth ??= {
+    geo: merge([
+      ellipsoid(0.017, 0.0105, 0.009, v3(0, -0.004, 0.002), '#3a1714', 14, 10),
+      ellipsoid(0.012, 0.0032, 0.0055, v3(0, 0.0025, -0.002), '#e9e2d6', 12, 6),
+    ]),
+    mat: paintMaterial({ vertexColors: true }),
+  });
+}
+
 const _jerseys = new Map<string, { body: THREE.BufferGeometry; cloth: ClothBuild }>();
 
 /**
@@ -1178,6 +1191,13 @@ export function createHumanRider(colors?: RiderColors): RiderRig {
   const head = new THREE.Mesh(A.head, A.skinMat);
   head.name = 'head';
   bones[B.head].add(head);
+  // a whoop, a shout, a gasp: the mouth opens from the upper lip
+  const M = mouth();
+  const shout = new THREE.Mesh(M.geo, M.mat);
+  shout.name = 'mouth';
+  shout.position.set(0, 0.11, -0.095);
+  shout.visible = false;
+  bones[B.head].add(shout);
   for (const f of [B.footL, B.footR]) {
     const shoe = new THREE.Mesh(A.shoe, A.skinMat);
     shoe.name = 'shoe';
@@ -1189,7 +1209,9 @@ export function createHumanRider(colors?: RiderColors): RiderRig {
   enableShadows(rig.root);
 
   const wind = new THREE.Vector3();
-  body.tick = (time, dt, pose) => {
+  body.tick = (time, dt, pose, face) => {
+    shout.visible = face.mouth > 0.04;
+    shout.scale.set(0.85 + 0.3 * face.joy, face.mouth, 1);
     for (const b of bones) b.updateMatrix();
     rig.root.updateWorldMatrix(true, false);
     const mw = rig.root.matrixWorld;
