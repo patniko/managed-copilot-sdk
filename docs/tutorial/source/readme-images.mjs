@@ -1,5 +1,6 @@
-// Renders the README's images from the tutorial slides: the architecture diagram with every component shown
-// (docs/images/architecture.png) and the video tour's thumbnail (docs/images/tour.png).
+// Renders the README's images: the architecture diagram (architecture.html) in GitHub's light and dark themes on a
+// transparent background (docs/images/architecture-light.png and architecture.png), and the video tour's thumbnail from
+// the tutorial slides (docs/images/tour.png).
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,13 +9,19 @@ import { chromium, REPO, SRC } from "./common.mjs";
 const images = join(REPO, "docs", "images");
 mkdirSync(images, { recursive: true });
 const browser = await chromium.launch({ channel: "msedge", headless: true });
+
+for (const [colorScheme, file] of [["light", "architecture-light.png"], ["dark", "architecture.png"]]) {
+  const context = await browser.newContext({ viewport: { width: 1200, height: 800 }, deviceScaleFactor: 2, colorScheme });
+  const diagram = await context.newPage();
+  await diagram.goto(pathToFileURL(join(SRC, "architecture.html")).href);
+  await diagram.waitForFunction(() => window.drawn === true);
+  await diagram.locator("#diagram").screenshot({ path: join(images, file), omitBackground: true });
+  await context.close();
+}
+
 const page = await (await browser.newContext({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 })).newPage();
 await page.goto(pathToFileURL(join(SRC, "slides.html")).href);
 await page.evaluate(() => document.fonts.ready);
-
-// The diagram without the slide's heading.
-await page.evaluate(() => window.show("arch-0"));
-await page.screenshot({ path: join(images, "architecture.png"), clip: { x: 90, y: 212, width: 1740, height: 636 } });
 
 // The title slide as a play-button thumbnail.
 await page.evaluate(() => {
@@ -28,4 +35,4 @@ await page.evaluate(() => {
 });
 await page.screenshot({ path: join(images, "tour.png") });
 await browser.close();
-console.log(`wrote ${join(images, "architecture.png")} and tour.png`);
+console.log(`wrote architecture.png, architecture-light.png, and tour.png to ${images}`);

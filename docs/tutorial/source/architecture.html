@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Managed Copilot architecture</title>
+<!--
+  The root README's architecture diagram. readme-images.mjs renders it in GitHub light and dark, with a transparent
+  background, to docs/images/architecture-light.png and architecture.png. Icons are Octicons (MIT).
+-->
+<style>
+  @font-face {
+    font-family: "Mona Sans";
+    src: url("../../../libraries/github-theme/node_modules/@fontsource-variable/mona-sans/files/mona-sans-latin-wdth-normal.woff2") format("woff2-variations");
+    font-weight: 200 900;
+    font-stretch: 75% 125%;
+    font-display: block;
+  }
+  :root {
+    --fg: #1f2328; --muted: #59636e; --card: #ffffff; --border: #d1d9e0; --group: #f6f8fa; --line: #818b98;
+    --shadow: 0 1px 3px rgba(31, 35, 40, 0.08);
+    --neutral-bg: #eff2f5; --neutral-fg: #59636e;
+    --purple-bg: #fbefff; --purple-fg: #8250df;
+    --green-bg: #dafbe1; --green-fg: #1a7f37;
+    --blue-bg: #ddf4ff; --blue-fg: #0969da;
+    --amber-bg: #fff8c5; --amber-fg: #9a6700;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --fg: #f0f6fc; --muted: #9198a1; --card: #0d1117; --border: #3d444d; --group: #151b23; --line: #656c76;
+      --shadow: none;
+      --neutral-bg: #212830; --neutral-fg: #9198a1;
+      --purple-bg: rgba(171, 125, 248, 0.15); --purple-fg: #ab7df8;
+      --green-bg: rgba(46, 160, 67, 0.15); --green-fg: #3fb950;
+      --blue-bg: rgba(56, 139, 253, 0.15); --blue-fg: #4493f8;
+      --amber-bg: rgba(187, 128, 9, 0.15); --amber-fg: #d29922;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; }
+  body { font-family: "Mona Sans", -apple-system, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; color: var(--fg); }
+
+  #diagram {
+    position: relative; display: inline-grid; padding: 4px 4px 24px 24px;
+    grid-template-columns: 200px 32px 200px 32px 200px 56px 200px;
+    grid-template-rows: auto 56px auto 40px auto;
+  }
+  #app { grid-column: 1 / 4; grid-row: 1; }
+  #gateway { grid-column: 1 / 4; grid-row: 3; align-self: center; }
+  #models { grid-column: 7; grid-row: 3; align-self: center; }
+  #runtime { grid-column: 1; grid-row: 5; }
+  #sandboxes { grid-column: 3; grid-row: 5; }
+  #egress { grid-column: 5; grid-row: 5; }
+  #internet { grid-column: 7; grid-row: 5; }
+
+  .card { position: relative; z-index: 2; background: var(--card); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); }
+  .card.wide { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+  .card.small { display: grid; grid-template-columns: 28px 1fr; gap: 8px 10px; align-items: center; align-content: start; padding: 14px 16px 15px; }
+  .card.small .desc { grid-column: 1 / -1; }
+  .icon { width: 28px; height: 28px; flex: none; border-radius: 8px; display: grid; place-items: center; }
+  .icon svg { width: 16px; height: 16px; fill: currentColor; }
+  .neutral { background: var(--neutral-bg); color: var(--neutral-fg); }
+  .purple { background: var(--purple-bg); color: var(--purple-fg); }
+  .green { background: var(--green-bg); color: var(--green-fg); }
+  .blue { background: var(--blue-bg); color: var(--blue-fg); }
+  .amber { background: var(--amber-bg); color: var(--amber-fg); }
+  .name { font-size: 16px; font-weight: 600; line-height: 22px; }
+  .desc { font-size: 14px; line-height: 20px; color: var(--muted); }
+
+  #group { position: absolute; z-index: 0; border: 1.5px dashed var(--border); border-radius: 16px; background: var(--group); }
+  #group-label { position: absolute; z-index: 1; font-size: 13px; font-weight: 500; line-height: 16px; color: var(--muted); white-space: nowrap; }
+  #wires { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; overflow: visible; }
+  #wires path.wire { fill: none; stroke: var(--line); stroke-width: 1.5; }
+  #wires path.head { fill: var(--line); }
+</style>
+</head>
+<body>
+<div id="diagram">
+  <div id="group"></div>
+  <div id="group-label">Your platform, locally or on Azure</div>
+  <svg id="wires" aria-hidden="true"></svg>
+
+  <div class="card wide" id="app">
+    <span class="icon neutral"><svg viewBox="0 0 24 24"><path d="M15.22 4.97a.75.75 0 0 1 1.06 0l6.5 6.5a.75.75 0 0 1 0 1.06l-6.5 6.5a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734L21.19 12l-5.97-5.97a.75.75 0 0 1 0-1.06Zm-6.44 0a.75.75 0 0 1 0 1.06L2.81 12l5.97 5.97a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215l-6.5-6.5a.75.75 0 0 1 0-1.06l6.5-6.5a.75.75 0 0 1 1.06 0Z"/></svg></span>
+    <div><div class="name">Your app</div><div class="desc">The stock Copilot SDK, and your own tools</div></div>
+  </div>
+
+  <div class="card wide" id="gateway">
+    <span class="icon purple"><svg viewBox="0 0 24 24"><path d="M10.75 6.5a.75.75 0 0 0 0 1.5h6.5a.75.75 0 0 0 0-1.5h-6.5ZM6 7.25a.75.75 0 0 1 .75-.75h.5a.75.75 0 0 1 0 1.5h-.5A.75.75 0 0 1 6 7.25Zm4 9a.75.75 0 0 1 .75-.75h6.5a.75.75 0 0 1 0 1.5h-6.5a.75.75 0 0 1-.75-.75Zm-3.25-.75a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5h-.5Z"/><path d="M3.25 2h17.5c.966 0 1.75.784 1.75 1.75v7c0 .372-.116.716-.314 1 .198.284.314.628.314 1v7a1.75 1.75 0 0 1-1.75 1.75H3.25a1.75 1.75 0 0 1-1.75-1.75v-7c0-.358.109-.707.314-1a1.741 1.741 0 0 1-.314-1v-7C1.5 2.784 2.284 2 3.25 2Zm0 10.5a.25.25 0 0 0-.25.25v7c0 .138.112.25.25.25h17.5a.25.25 0 0 0 .25-.25v-7a.25.25 0 0 0-.25-.25Zm0-1.5h17.5a.25.25 0 0 0 .25-.25v-7a.25.25 0 0 0-.25-.25H3.25a.25.25 0 0 0-.25.25v7c0 .138.112.25.25.25Z"/></svg></span>
+    <div><div class="name">Gateway</div><div class="desc">GitHub sign-in, routing, policy, durable tool calls</div></div>
+  </div>
+
+  <div class="card small" id="models">
+    <span class="icon neutral"><svg viewBox="0 0 24 24"><path d="M23.922 16.992c-.861 1.495-5.859 5.023-11.922 5.023-6.063 0-11.061-3.528-11.922-5.023A.641.641 0 0 1 0 16.736v-2.869a.841.841 0 0 1 .053-.22c.372-.935 1.347-2.292 2.605-2.656.167-.429.414-1.055.644-1.517a10.195 10.195 0 0 1-.052-1.086c0-1.331.282-2.499 1.132-3.368.397-.406.89-.717 1.474-.952 1.399-1.136 3.392-2.093 6.122-2.093 2.731 0 4.767.957 6.166 2.093.584.235 1.077.546 1.474.952.85.869 1.132 2.037 1.132 3.368 0 .368-.014.733-.052 1.086.23.462.477 1.088.644 1.517 1.258.364 2.233 1.721 2.605 2.656a.832.832 0 0 1 .053.22v2.869a.641.641 0 0 1-.078.256ZM12.172 11h-.344a4.323 4.323 0 0 1-.355.508C10.703 12.455 9.555 13 7.965 13c-1.725 0-2.989-.359-3.782-1.259a2.005 2.005 0 0 1-.085-.104L4 11.741v6.585c1.435.779 4.514 2.179 8 2.179 3.486 0 6.565-1.4 8-2.179v-6.585l-.098-.104s-.033.045-.085.104c-.793.9-2.057 1.259-3.782 1.259-1.59 0-2.738-.545-3.508-1.492a4.323 4.323 0 0 1-.355-.508h-.016.016Zm.641-2.935c.136 1.057.403 1.913.878 2.497.442.544 1.134.938 2.344.938 1.573 0 2.292-.337 2.657-.751.384-.435.558-1.15.558-2.361 0-1.14-.243-1.847-.705-2.319-.477-.488-1.319-.862-2.824-1.025-1.487-.161-2.192.138-2.533.529-.269.307-.437.808-.438 1.578v.021c0 .265.021.562.063.893Zm-1.626 0c.042-.331.063-.628.063-.894v-.02c-.001-.77-.169-1.271-.438-1.578-.341-.391-1.046-.69-2.533-.529-1.505.163-2.347.537-2.824 1.025-.462.472-.705 1.179-.705 2.319 0 1.211.175 1.926.558 2.361.365.414 1.084.751 2.657.751 1.21 0 1.902-.394 2.344-.938.475-.584.742-1.44.878-2.497Z"/><path d="M14.5 14.25a1 1 0 0 1 1 1v2a1 1 0 0 1-2 0v-2a1 1 0 0 1 1-1Zm-5 0a1 1 0 0 1 1 1v2a1 1 0 0 1-2 0v-2a1 1 0 0 1 1-1Z"/></svg></span>
+    <div class="name">Copilot models</div>
+    <div class="desc">On each caller's own Copilot plan</div>
+  </div>
+
+  <div class="card small" id="runtime">
+    <span class="icon green"><svg viewBox="0 0 24 24"><path d="M8.75 8h6.5a.75.75 0 0 1 .75.75v6.5a.75.75 0 0 1-.75.75h-6.5a.75.75 0 0 1-.75-.75v-6.5A.75.75 0 0 1 8.75 8Zm.75 6.5h5v-5h-5Z"/><path d="M15.25 1a.75.75 0 0 1 .75.75V4h2.25c.966 0 1.75.784 1.75 1.75V8h2.25a.75.75 0 0 1 0 1.5H20v5h2.25a.75.75 0 0 1 0 1.5H20v2.25A1.75 1.75 0 0 1 18.25 20H16v2.25a.75.75 0 0 1-1.5 0V20h-5v2.25a.75.75 0 0 1-1.5 0V20H5.75A1.75 1.75 0 0 1 4 18.25V16H1.75a.75.75 0 0 1 0-1.5H4v-5H1.75a.75.75 0 0 1 0-1.5H4V5.75C4 4.784 4.784 4 5.75 4H8V1.75a.75.75 0 0 1 1.5 0V4h5V1.75a.75.75 0 0 1 .75-.75Zm3 17.5a.25.25 0 0 0 .25-.25V5.75a.25.25 0 0 0-.25-.25H5.75a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25Z"/></svg></span>
+    <div class="name">Shared runtime</div>
+    <div class="desc">Many chat sessions in one runtime</div>
+  </div>
+
+  <div class="card small" id="sandboxes">
+    <span class="icon blue"><svg viewBox="0 0 24 24"><path d="M12.876.64V.639l8.25 4.763c.541.313.875.89.875 1.515v9.525a1.75 1.75 0 0 1-.875 1.516l-8.25 4.762a1.748 1.748 0 0 1-1.75 0l-8.25-4.763a1.75 1.75 0 0 1-.875-1.515V6.917c0-.625.334-1.202.875-1.515L11.126.64a1.748 1.748 0 0 1 1.75 0Zm-1 1.298L4.251 6.34l7.75 4.474 7.75-4.474-7.625-4.402a.248.248 0 0 0-.25 0Zm.875 19.123 7.625-4.402a.25.25 0 0 0 .125-.216V7.639l-7.75 4.474ZM3.501 7.64v8.803c0 .09.048.172.125.216l7.625 4.402v-8.947Z"/></svg></span>
+    <div class="name">Sandboxes</div>
+    <div class="desc">One per session, with no GitHub token inside</div>
+  </div>
+
+  <div class="card small" id="egress">
+    <span class="icon amber"><svg viewBox="0 0 24 24"><path d="M16.53 9.78a.75.75 0 0 0-1.06-1.06L11 13.19l-1.97-1.97a.75.75 0 0 0-1.06 1.06l2.5 2.5a.75.75 0 0 0 1.06 0l5-5Z"/><path d="m12.54.637 8.25 2.675A1.75 1.75 0 0 1 22 4.976V10c0 6.19-3.771 10.704-9.401 12.83a1.704 1.704 0 0 1-1.198 0C5.77 20.705 2 16.19 2 10V4.976c0-.758.489-1.43 1.21-1.664L11.46.637a1.748 1.748 0 0 1 1.08 0Zm-.617 1.426-8.25 2.676a.249.249 0 0 0-.173.237V10c0 5.46 3.28 9.483 8.43 11.426a.199.199 0 0 0 .14 0C17.22 19.483 20.5 15.461 20.5 10V4.976a.25.25 0 0 0-.173-.237l-8.25-2.676a.253.253 0 0 0-.154 0Z"/></svg></span>
+    <div class="name">Egress proxy</div>
+    <div class="desc">Allowlists, and secrets added at the edge</div>
+  </div>
+
+  <div class="card small" id="internet">
+    <span class="icon neutral"><svg viewBox="0 0 24 24"><path d="M12 1c6.075 0 11 4.925 11 11s-4.925 11-11 11S1 18.075 1 12 5.925 1 12 1Zm3.241 10.5v-.001c-.1-2.708-.992-4.904-1.89-6.452a13.919 13.919 0 0 0-1.304-1.88L12 3.11l-.047.059c-.354.425-.828 1.06-1.304 1.88-.898 1.547-1.79 3.743-1.89 6.451Zm-12.728 0h4.745c.1-3.037 1.1-5.49 2.093-7.204.39-.672.78-1.233 1.119-1.673C6.11 3.329 2.746 7 2.513 11.5Zm18.974 0C21.254 7 17.89 3.329 13.53 2.623c.339.44.729 1.001 1.119 1.673.993 1.714 1.993 4.167 2.093 7.204ZM8.787 13c.182 2.478 1.02 4.5 1.862 5.953.382.661.818 1.29 1.304 1.88l.047.057.047-.059c.354-.425.828-1.06 1.304-1.88.842-1.451 1.679-3.471 1.862-5.951Zm-1.504 0H2.552a9.505 9.505 0 0 0 7.918 8.377 15.773 15.773 0 0 1-1.119-1.673C8.413 18.085 7.47 15.807 7.283 13Zm9.434 0c-.186 2.807-1.13 5.085-2.068 6.704-.39.672-.78 1.233-1.118 1.673A9.506 9.506 0 0 0 21.447 13Z"/></svg></span>
+    <div class="name">Internet</div>
+    <div class="desc">Only the hosts you allow</div>
+  </div>
+</div>
+
+<script>
+  // Every connector is a straight line between box edges, measured after layout, so they always meet the boxes.
+  function draw() {
+    const diagram = document.getElementById("diagram");
+    const origin = diagram.getBoundingClientRect();
+    const box = (id) => {
+      const r = document.getElementById(id).getBoundingClientRect();
+      return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top,
+        cx: (r.left + r.right) / 2 - origin.left, cy: (r.top + r.bottom) / 2 - origin.top };
+    };
+    const [app, gateway, models, runtime, sandboxes, egress, internet] =
+      ["app", "gateway", "models", "runtime", "sandboxes", "egress", "internet"].map(box);
+
+    const group = { l: runtime.l - 20, r: egress.r + 20, t: gateway.t - 36, b: Math.max(runtime.b, sandboxes.b, egress.b) + 20 };
+    Object.assign(document.getElementById("group").style,
+      { left: `${group.l}px`, top: `${group.t}px`, width: `${group.r - group.l}px`, height: `${group.b - group.t}px` });
+    Object.assign(document.getElementById("group-label").style, { left: `${group.l + 16}px`, top: `${group.t + 11}px` });
+
+    // A line from (x1, y1) to (x2, y2), ending in a small arrowhead that touches the target box.
+    const arrow = (x1, y1, x2, y2) => {
+      const len = Math.hypot(x2 - x1, y2 - y1), ux = (x2 - x1) / len, uy = (y2 - y1) / len, size = 7;
+      const bx = x2 - ux * size, by = y2 - uy * size;
+      const head = `M${x2} ${y2} L${bx - uy * size * 0.55} ${by + ux * size * 0.55} L${bx + uy * size * 0.55} ${by - ux * size * 0.55} Z`;
+      return `<path class="wire" d="M${x1} ${y1} L${bx} ${by}"/><path class="head" d="${head}"/>`;
+    };
+    document.getElementById("wires").innerHTML = [
+      arrow(app.cx, app.b, app.cx, gateway.t),
+      arrow(runtime.cx, gateway.b, runtime.cx, runtime.t),
+      arrow(sandboxes.cx, gateway.b, sandboxes.cx, sandboxes.t),
+      arrow(gateway.r, gateway.cy, models.l, gateway.cy),
+      arrow(sandboxes.r, sandboxes.cy, egress.l, sandboxes.cy),
+      arrow(egress.r, egress.cy, internet.l, egress.cy),
+    ].join("");
+    window.drawn = true;
+  }
+  document.fonts.ready.then(draw);
+</script>
+</body>
+</html>
