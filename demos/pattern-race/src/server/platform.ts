@@ -2,8 +2,9 @@
 // the race reads sessions and workers with. Everything here is the public SDK.
 import type { AssistantMessageEvent, CopilotClient, MessageOptions, ModelInfo, SessionConfig, SessionEvent, UsageGetMetricsResult } from "@github/copilot-sdk";
 import { isManagedCopilotError, ManagedCopilot, type DeploymentInfo, type PlatformEvent, type SessionInfo, type WorkerInfo } from "@managed-copilot/sdk";
+import { SANDBOX_SIZES } from "@managed-copilot/protocol";
 import { LANES, laneById, type LaneId } from "../shared/lanes.js";
-import type { LaneAvailability, PlatformStatus } from "../shared/types.js";
+import type { LaneAvailability, PlatformStatus, SandboxUsage } from "../shared/types.js";
 import type { RaceConfig } from "./config.js";
 import { RaceError } from "./errors.js";
 import { log } from "./log.js";
@@ -33,11 +34,46 @@ export interface RacePlatform {
   deleteSession(lane: LaneId, sessionId: string): Promise<void>;
   sessionInfo(sessionId: string): Promise<SessionInfo>;
   workers(sessionId: string): Promise<WorkerInfo[]>;
+  /** What a sandbox of `environment` is given (its size), as the deployment declares it. */
+  sandboxSize(environment: string): SandboxSize | undefined;
+  /** Whether `managed.exec` works in `environment`'s sandboxes, so their usage can be read. */
+  measurable(environment: string): boolean;
+  /** What a session's sandbox used so far, from its own cgroup; undefined when its counters aren't readable. */
+  sandboxUsage(sessionId: string): Promise<SandboxUsage | undefined>;
   /** Deletes the account's sessions in the lanes' environments whose IDs start with `prefix` (a race cut short). */
   deleteLeftovers(prefix: string): Promise<number>;
 }
 
 const EVENTS = ["session.promoted", "worker.started", "worker.idle", "worker.failed", "worker.stopped"] as const;
+
+/** What a sandbox is given: its vCPUs and memory. */
+export interface SandboxSize {
+  readonly cpus: number;
+  readonly memoryBytes: number;
+}
+
+/**
+ * Prints a sandbox's own cgroup counters (cgroup v2, else v1): CPU time since it started and its peak and current
+ * memory. Every process in the sandbox counts (setup, its runtime, the agent's commands); this read costs a few ms.
+ */
+const USAGE_PROBE = [
+  "c=/sys/fs/cgroup",
+  'if [ -r "$c/cpu.stat" ]; then while read -r k v; do [ "$k" = usage_usec ] && echo "cpu_us $v"; done < "$c/cpu.stat"; echo "peak $(cat "$c/memory.peak" 2>/dev/null)"; echo "now $(cat "$c/memory.current" 2>/dev/null)"',
+  'else echo "cpu_ns $(cat "$c/cpuacct/cpuacct.usage" 2>/dev/null)"; echo "peak $(cat "$c/memory/memory.max_usage_in_bytes" 2>/dev/null)"; echo "now $(cat "$c/memory/memory.usage_in_bytes" 2>/dev/null)"; fi',
+].join("; ");
+
+/** Reads `USAGE_PROBE`'s output; undefined without a CPU reading. */
+export function parseUsage(output: string): SandboxUsage | undefined {
+  const values = new Map<string, number>();
+  for (const line of output.split("\n")) {
+    const [key, value] = line.trim().split(/\s+/);
+    const number = Number(value);
+    if (key && value && Number.isFinite(number) && number >= 0) values.set(key, number);
+  }
+  const cpuMs = values.has("cpu_us") ? values.get("cpu_us")! / 1000 : values.has("cpu_ns") ? values.get("cpu_ns")! / 1e6 : undefined;
+  if (cpuMs === undefined) return undefined;
+  return { cpuMs, peakMemoryBytes: Math.max(values.get("peak") ?? 0, values.get("now") ?? 0) };
+}
 
 /** Retry delay after the `attempt`-th consecutive failure: exponential to 30 s, then 50–100 % of that (jitter). */
 export function reconnectDelay(attempt: number, random: () => number = Math.random): number {
@@ -167,6 +203,22 @@ export class Platform implements RacePlatform {
 
   workers(sessionId: string): Promise<WorkerInfo[]> {
     return this.#requireManaged().workers(sessionId).list();
+  }
+
+  sandboxSize(environment: string): SandboxSize | undefined {
+    const declared = this.#managed?.info.environments.find((candidate) => candidate.name === environment);
+    const size = declared?.size ? SANDBOX_SIZES[declared.size] : undefined;
+    return size ? { cpus: size.cpus, memoryBytes: size.memoryMiB * 1024 ** 2 } : undefined;
+  }
+
+  measurable(environment: string): boolean {
+    const declared = this.#managed?.info.environments.find((candidate) => candidate.name === environment);
+    return declared !== undefined && declared.exec !== false;
+  }
+
+  async sandboxUsage(sessionId: string): Promise<SandboxUsage | undefined> {
+    const result = await this.#requireManaged().exec(sessionId, USAGE_PROBE, { timeoutMs: 15_000 });
+    return result.exitCode === 0 ? parseUsage(result.output) : undefined;
   }
 
   async deleteLeftovers(prefix: string): Promise<number> {

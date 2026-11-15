@@ -1,6 +1,6 @@
 import { ManagedCopilotError, type DeploymentInfo, type EnvironmentInfo } from "@managed-copilot/sdk";
 import { describe, expect, it } from "vitest";
-import { describeConnectError, describeLanes, reconnectDelay } from "../src/server/platform.js";
+import { describeConnectError, describeLanes, parseUsage, reconnectDelay } from "../src/server/platform.js";
 
 const network = { access: "all", allowedDomains: [] } as unknown as EnvironmentInfo["network"];
 const env = (fields: Partial<EnvironmentInfo> & Pick<EnvironmentInfo, "name" | "type">): EnvironmentInfo => ({ network, scheduling: false, agents: [], ...fields });
@@ -80,5 +80,14 @@ describe("connecting", () => {
     expect(reconnectDelay(1, () => 1)).toBe(1_000);
     expect(reconnectDelay(4, () => 0)).toBe(4_000);
     expect(reconnectDelay(20, () => 1)).toBe(30_000);
+  });
+});
+
+describe("a sandbox's usage", () => {
+  it("reads its cgroup counters: CPU time and the higher of its peak and current memory", () => {
+    expect(parseUsage("cpu_us 1886519\npeak 71176192\nnow 52289536\n")).toEqual({ cpuMs: 1886.519, peakMemoryBytes: 71_176_192 });
+    // cgroup v1 counts CPU in nanoseconds; a kernel without memory.peak still has the current reading.
+    expect(parseUsage("cpu_ns 2500000000\npeak \nnow 1048576\n")).toEqual({ cpuMs: 2500, peakMemoryBytes: 1_048_576 });
+    expect(parseUsage("cpu_ns \npeak \nnow \n")).toBeUndefined();
   });
 });

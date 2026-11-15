@@ -43,12 +43,36 @@ export type LaneStatus = "ready" | "starting" | "thinking" | "working" | "done" 
 export type SandboxKind = "own" | "hands" | "worker";
 export type SandboxState = "starting" | "working" | "idle" | "failed" | "stopped";
 
+/** What a sandbox used, read from its own cgroup with `managed.exec`: the last reading before it was deleted. */
+export interface SandboxUsage {
+  /** CPU time every process in it used since it started (setup, its runtime, the agent's commands), in milliseconds. */
+  readonly cpuMs: number;
+  /** The most memory it held at once, in bytes. */
+  readonly peakMemoryBytes: number;
+}
+
 export interface SandboxToken {
   readonly id: string;
   readonly kind: SandboxKind;
   readonly name: string;
   readonly state: SandboxState;
   readonly environment: string;
+  /** What it was given: its environment's size. */
+  readonly cpus?: number;
+  readonly memoryBytes?: number;
+  /** Epoch milliseconds when it appeared (asked for), was ready (no longer starting), and was deleted. */
+  readonly appearedAt?: number;
+  readonly readyAt?: number;
+  readonly endedAt?: number;
+  readonly usage?: SandboxUsage;
+}
+
+/** Tokens a session's model calls used. */
+export interface Tokens {
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number;
+  readonly cacheWrite: number;
 }
 
 export interface Premium {
@@ -81,6 +105,12 @@ export interface LaneRun {
   readonly premium: Premium;
   /** Model calls its own session made (sub-agents included; workers are sessions of their own). */
   readonly modelCalls: number;
+  /** Tokens its own session's model calls used (sub-agents included; workers are sessions of their own). */
+  readonly tokens?: Tokens;
+  /** Time its own session spent in model calls (sub-agents included), in milliseconds. */
+  readonly modelMs?: number;
+  /** Tool calls in its own session (sub-agents included). */
+  readonly toolCalls?: number;
   /** Permission requests answered automatically. */
   readonly approvals: number;
   readonly answer?: string;

@@ -2,7 +2,7 @@
 
 One job, six patterns, side by side. Pattern Race sends the same prompt to six real sessions at once, one in each
 pattern's environment of the root AppHost, and races them: where each agent thinks and acts, how long it takes, how many
-sandboxes and agents it uses, and how many premium requests it spends. The code in every lane is the same stock
+sandboxes and agents it uses, how many premium requests it spends, and the CPU time, memory, and tokens it burns. The code in every lane is the same stock
 `CopilotClient`; the only thing that differs is the environment name passed to `managed.client(...)`.
 
 ![A finished "Split the work" race: Mixed won in 12.0 s with one sandbox; Delegate used three sandboxes, four agents, and four premium requests; Shared had no shell](docs/screenshots/race-finished.png)
@@ -23,7 +23,13 @@ has no shell, so it started sub-agents looking for one and answered that it coul
   a worker per part. Sandboxes turn dashed when the lane's session (and every sandbox it had) is deleted at the end.
 - **An honest scorecard.** Every answer is checked against values the server computes itself (a SHA-256 digest,
   prime counts, a Collatz count), so a fast wrong answer doesn't win. Places go to correct answers in the order they
-  arrived. The best time, fewest sandboxes, and fewest premium requests among correct lanes are highlighted.
+  arrived. The best time, fewest sandboxes, fewest premium requests, and least CPU time, memory, and tokens among
+  correct lanes are highlighted.
+- **What each shape really costs.** Each lane counts the CPU time and peak memory its sandboxes used, read from each
+  sandbox's own counters while it runs, and the tokens and model time its own session spent. A brain inside a sandbox
+  costs that sandbox the agent's memory; a worker per part costs a sandbox per part; a lane with no sandbox costs none
+  but may burn tokens looking for a shell. Its details add the vCPU-seconds its sandboxes held (busy or idle) and how
+  long it waited for sandboxes to start.
 - **True trade-offs, not a rigged race.** The shared lane can't run code, and says so. Delegation pays for a new agent
   and sandbox per part, which wins when parts are big and loses when they're small. A coordinator retyping a worker's
   report can even drop a character (it happened: one run's Delegate lane missed the last digit of the hash). Results
@@ -71,7 +77,12 @@ Pattern Race opens at <http://localhost:7420>.
 3. Press **Race again** with **Split the work**: three independent parts. Compare Delegate (a worker and sandbox per
    part, more premium requests) with Direct and Mixed (one sandbox).
 4. Open any lane's **Details** (the chevron) for its full answer, the values it was checked against, its sandboxes
-   with their IDs, and its usage.
+   with their IDs, sizes, start-up times, and what each used, and its compute and usage.
+
+One measured "Split the work" race (local, Claude Sonnet 5): Isolated won in 13.8 s with 3.5 s of sandbox CPU and a
+298 MiB peak (its agent lives in that sandbox); Direct used 3.5 s and 193 MiB in a sandbox with no agent in it;
+Delegate's three workers used 7.9 s and 361 MiB; Shared used no sandbox at all, but 262k tokens and eleven sub-agents
+looking for a shell.
 
 Each job costs about one premium request per lane, plus one per message each worker receives: the quick answer costs
 six in all, and the run-code and split races we measured cost eight to thirteen. Measured live on a local deployment:
@@ -129,6 +140,16 @@ pnpm dev                                       # server and UI with live reload 
   session of its own that the race never attaches to, so it counts one premium request per message the worker
   received, its task included, at its model's multiplier (from `client.listModels()`, else the rate its coordinator
   measured).
+- **Compute is measured in each sandbox.** While a lane runs, the server reads each of its sandboxes' own cgroup
+  counters (`cpu.stat` and `memory.peak`, cgroup v1 where v2 isn't there) with `managed.exec`: the lane's session for
+  its own sandbox, the worker's ID for a worker or hands sandbox. Both counters only grow, so the last reading before
+  the sandbox is deleted is what it used: setup, any agent inside it, and every command, plus a few milliseconds for
+  the read itself. A sandbox deleted before its first reading (a worker stopped early) leaves the totals marked `+`;
+  an environment with `exec: false` isn't measured. The shared runtime is shared by every shared session, so a brain
+  there isn't counted. A sandbox's size (from `/v1/info`) and when it appeared, was ready, and was deleted give the
+  vCPU-seconds it held and the time the lane waited for sandboxes. Tokens and model time are its own session's
+  `getMetrics()` (sub-agents included); each worker is a session of its own the race never attaches to, so a
+  coordinator's tokens are marked `+`.
 - **A lane ends when its answer arrives.** Its stopwatch stops at `sendAndWait`'s answer, the answer is checked, and
   then its session is deleted, which deletes its sandbox, hands sandboxes, and workers. A failed lane says why in plain
   words; **Stop** cancels every running lane (`session.abort()`) and deletes their sessions.

@@ -4,12 +4,12 @@ import { approveAll, type PermissionHandler, type SessionEvent, type UsageGetMet
 import { isManagedCopilotError, type PlatformEvent, type WorkerEventData, type WorkerInfo } from "@managed-copilot/sdk";
 import { jobById, type Check, type JobId } from "../shared/jobs.js";
 import { LANES, type Lane, type LaneId } from "../shared/lanes.js";
-import type { LaneRun, RaceSnapshot, SandboxState, SandboxToken } from "../shared/types.js";
+import type { LaneRun, RaceSnapshot, SandboxState, SandboxToken, SandboxUsage } from "../shared/types.js";
 import { expectedValue, judge } from "./checks.js";
 import type { RaceConfig } from "./config.js";
 import { errorText, RaceError } from "./errors.js";
 import { log } from "./log.js";
-import type { LaneSession, RacePlatform } from "./platform.js";
+import type { LaneSession, RacePlatform, SandboxSize } from "./platform.js";
 import type { RaceStore } from "./store.js";
 
 /** Every lane session's ID starts with this, so sessions a crash left behind are found and deleted. */
@@ -85,7 +85,16 @@ function describeFailure(error: unknown, timeoutMs: number): string {
 
 const WORKER_STATES: Readonly<Record<string, SandboxState>> = { starting: "starting", working: "working", idle: "idle", failed: "failed", stopped: "stopped" };
 
-type Usage = Pick<UsageGetMetricsResult, "totalPremiumRequestCost" | "totalUserRequests" | "modelMetrics">;
+type Usage = Pick<UsageGetMetricsResult, "totalPremiumRequestCost" | "totalUserRequests" | "modelMetrics" | "totalApiDurationMs">;
+
+interface LaneRunnerOptions {
+  /** The environment its own sandbox comes from (isolated: its own; promotable: its `promoteTo`). */
+  readonly sandboxEnvironment: string | undefined;
+  readonly changed: () => void;
+  readonly now: () => number;
+  /** What a sandbox of an environment is given. */
+  readonly size: (environment: string) => SandboxSize | undefined;
+}
 
 /** One lane of one race: its session, what it does, and what it uses. */
 class LaneRunner {
@@ -94,6 +103,8 @@ class LaneRunner {
   readonly #sandboxEnvironment: string;
   readonly #run: Mutable<LaneRun>;
   readonly #changed: () => void;
+  readonly #now: () => number;
+  readonly #size: (environment: string) => SandboxSize | undefined;
   session: LaneSession | undefined;
   stopping = false;
   /** A read of its usage and workers in flight. */
@@ -109,11 +120,25 @@ class LaneRunner {
   /** Worker models it found no multiplier for (warned about once). */
   readonly #unpriced = new Set<string>();
 
-  constructor(lane: Lane, sandboxEnvironment: string | undefined, changed: () => void) {
+  constructor(lane: Lane, options: LaneRunnerOptions) {
     this.lane = lane;
-    this.#sandboxEnvironment = sandboxEnvironment ?? lane.environment;
-    this.#changed = changed;
-    this.#run = { lane: lane.id, status: "ready", brain: lane.brain, subagents: 0, sandboxes: [], premium: { session: 0, workers: 0 }, modelCalls: 0, approvals: 0 };
+    this.#sandboxEnvironment = options.sandboxEnvironment ?? lane.environment;
+    this.#changed = options.changed;
+    this.#now = options.now;
+    this.#size = options.size;
+    this.#run = {
+      lane: lane.id,
+      status: "ready",
+      brain: lane.brain,
+      subagents: 0,
+      sandboxes: [],
+      premium: { session: 0, workers: 0 },
+      modelCalls: 0,
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      modelMs: 0,
+      toolCalls: 0,
+      approvals: 0,
+    };
   }
 
   get run(): LaneRun {
@@ -139,13 +164,48 @@ class LaneRunner {
 
   #upsertSandbox(token: SandboxToken): void {
     const index = this.#run.sandboxes.findIndex((candidate) => candidate.id === token.id);
-    this.update({ sandboxes: index === -1 ? [...this.#run.sandboxes, token] : this.#run.sandboxes.map((candidate, i) => (i === index ? token : candidate)) });
+    const merged = this.#lifecycle(index === -1 ? undefined : this.#run.sandboxes[index], token);
+    this.update({ sandboxes: index === -1 ? [...this.#run.sandboxes, merged] : this.#run.sandboxes.map((candidate, i) => (i === index ? merged : candidate)) });
+  }
+
+  /** Keeps what's known about a sandbox (its size, when it appeared, was ready, and ended, and its usage) as its state changes. */
+  #lifecycle(previous: SandboxToken | undefined, token: SandboxToken): SandboxToken {
+    const now = this.#now();
+    const size = this.#size(token.environment);
+    const readyAt = previous?.readyAt ?? (token.state === "starting" ? undefined : now);
+    const endedAt = previous?.endedAt ?? (token.state === "stopped" || token.state === "failed" ? now : undefined);
+    return {
+      ...previous,
+      ...token,
+      ...(size ? { cpus: size.cpus, memoryBytes: size.memoryBytes } : {}),
+      appearedAt: previous?.appearedAt ?? token.appearedAt ?? now,
+      ...(readyAt !== undefined ? { readyAt } : {}),
+      ...(endedAt !== undefined ? { endedAt } : {}),
+    };
   }
 
   /** The lane's own sandbox: isolated from the start (`pending` while it's created), promotable once it moved. */
   ownSandbox(id: string, state: SandboxState): void {
+    const asked = this.#run.sandboxes.find((candidate) => candidate.kind === "own")?.appearedAt;
     this.#run.sandboxes = this.#run.sandboxes.filter((candidate) => candidate.kind !== "own" || candidate.id === id);
-    this.#upsertSandbox({ id, kind: "own", name: "Its own sandbox", state, environment: this.#sandboxEnvironment });
+    this.#upsertSandbox({ id, kind: "own", name: "Its own sandbox", state, environment: this.#sandboxEnvironment, ...(asked !== undefined ? { appearedAt: asked } : {}) });
+  }
+
+  /** Its sandboxes that can be measured now, and the session each is measured through. */
+  measureTargets(measurable: (environment: string) => boolean): { readonly id: string; readonly sessionId: string }[] {
+    const sessionId = this.session?.sessionId;
+    if (!sessionId) return [];
+    return this.#run.sandboxes
+      .filter((token) => token.id !== "pending" && (token.state === "working" || token.state === "idle") && measurable(token.environment))
+      .map((token) => ({ id: token.id, sessionId: token.kind === "own" ? sessionId : token.id }));
+  }
+
+  /** A reading of a sandbox's counters: both only grow, so a late or out-of-order reading never lowers them. */
+  sandboxUsage(id: string, usage: SandboxUsage): void {
+    const token = this.#run.sandboxes.find((candidate) => candidate.id === id);
+    if (!token) return;
+    const next = { cpuMs: Math.max(token.usage?.cpuMs ?? 0, usage.cpuMs), peakMemoryBytes: Math.max(token.usage?.peakMemoryBytes ?? 0, usage.peakMemoryBytes) };
+    this.update({ sandboxes: this.#run.sandboxes.map((candidate) => (candidate.id === id ? { ...candidate, usage: next } : candidate)) });
   }
 
   onEvent(event: SessionEvent): void {
@@ -162,6 +222,7 @@ class LaneRunner {
         }
         const activity = describeTool(toolName, event.data.arguments);
         this.#tools.set(toolCallId, activity);
+        this.update({ toolCalls: (this.#run.toolCalls ?? 0) + 1 });
         this.#activity("working", activity);
         // The sandbox it asked for appears at once, starting; the platform's `session.promoted` replaces it.
         if (toolName === "request_sandbox" && this.#run.brain === "runtime") {
@@ -214,11 +275,21 @@ class LaneRunner {
     }
   }
 
-  /** What the lane's own session reported: premium requests, and model calls (its sub-agents' included). */
+  /** What the lane's own session reported: premium requests, model calls, tokens, and model time (its sub-agents' included). */
   usage(metrics: Usage): void {
-    const modelCalls = Object.values(metrics.modelMetrics).reduce((sum, model) => sum + (model?.requests.count ?? 0), 0);
+    const models = Object.values(metrics.modelMetrics).filter((model) => model !== undefined);
+    const modelCalls = models.reduce((sum, model) => sum + (model.requests?.count ?? 0), 0);
+    const tokens = models.reduce(
+      (sum, model) => ({
+        input: sum.input + (model.usage?.inputTokens ?? 0),
+        output: sum.output + (model.usage?.outputTokens ?? 0),
+        cacheRead: sum.cacheRead + (model.usage?.cacheReadTokens ?? 0),
+        cacheWrite: sum.cacheWrite + (model.usage?.cacheWriteTokens ?? 0),
+      }),
+      { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    );
     if (metrics.totalUserRequests > 0) this.#measuredRate = metrics.totalPremiumRequestCost / metrics.totalUserRequests;
-    this.update({ premium: { ...this.#run.premium, session: metrics.totalPremiumRequestCost }, modelCalls });
+    this.update({ premium: { ...this.#run.premium, session: metrics.totalPremiumRequestCost }, modelCalls, tokens, modelMs: metrics.totalApiDurationMs ?? 0 });
   }
 
   /** Workers are sessions of their own: one premium request per message each received, at its model's multiplier. */
@@ -246,7 +317,8 @@ class LaneRunner {
 
   /** Its session was deleted, and its sandboxes, hands sandboxes, and workers with it. */
   sandboxesDeleted(): void {
-    this.update({ sandboxes: this.#run.sandboxes.map((token) => ({ ...token, state: "stopped" })) });
+    const now = this.#now();
+    this.update({ sandboxes: this.#run.sandboxes.map((token) => ({ ...token, state: "stopped", endedAt: token.endedAt ?? now })) });
   }
 }
 
@@ -330,7 +402,9 @@ export class RaceManager {
     const job = jobById(jobId);
     const changed = () => this.#changed();
     const lanes = new Map(this.#platform.lanes.map((lane) => [lane.lane, lane] as const));
-    const runners = LANES.filter((lane) => available.has(lane.id)).map((lane) => new LaneRunner(lane, lanes.get(lane.id)?.sandboxEnvironment, changed));
+    const runners = LANES.filter((lane) => available.has(lane.id)).map(
+      (lane) => new LaneRunner(lane, { sandboxEnvironment: lanes.get(lane.id)?.sandboxEnvironment, changed, now: this.#now, size: (environment) => this.#platform.sandboxSize(environment) }),
+    );
     const skipped = new Map(this.#platform.lanes.filter((lane) => !lane.available).map((lane) => [lane.lane, lane.reason ?? "Not available on this deployment."] as const));
     let settle!: () => void;
     const race: ActiveRace = {
@@ -431,6 +505,7 @@ export class RaceManager {
       log.warn("A lane failed", { race: race.id, lane: lane.id, error: errorText(error) });
       runner.finish({ status: "failed", verdict: "failed", error: describeFailure(error, this.#config.laneTimeoutMs) }, this.#now());
       await runner.session?.abort().catch(() => undefined);
+      await this.#observe(runner, { final: true });
     } finally {
       clearInterval(poll);
       await this.#cleanUp(race, runner);
@@ -484,6 +559,17 @@ export class RaceManager {
     }
     await Promise.all(reads);
     runner.workerPremium((model) => this.#platform.multiplier(model), this.#active?.model ?? this.#platform.model.id);
+    // Its sandboxes' own counters, through `managed.exec`: the workers just listed included.
+    await Promise.all(
+      runner.measureTargets((environment) => this.#platform.measurable(environment)).map(({ id, sessionId }) =>
+        this.#platform.sandboxUsage(sessionId).then(
+          (usage) => {
+            if (usage) runner.sandboxUsage(id, usage);
+          },
+          (error: unknown) => log.debug("Couldn't read a sandbox's usage", { lane: runner.lane.id, sandbox: id, error: errorText(error) }),
+        ),
+      ),
+    );
   }
 
   /** Deletes the lane's session: its sandboxes, hands sandboxes, and workers go with it. */
