@@ -27,10 +27,13 @@ has no shell, so it started sub-agents looking for one and answered that it coul
   correct lanes are highlighted.
 - **What each shape really costs.** Each lane counts the CPU time and peak memory its sandboxes used, read from each
   sandbox's own counters while it runs, and the tokens and model time its own session spent. A brain inside a sandbox
-  costs that sandbox the agent's memory; a worker per part costs a sandbox per part; a lane with no sandbox costs none
-  but may burn tokens looking for a shell. Its details add the vCPU-seconds its sandboxes held (busy or idle) and how
+  costs that sandbox the agent's memory; a worker per part costs a sandbox per part; a lane with no sandbox costs none.
+  Its details add the vCPU-seconds its sandboxes held (busy or idle) and how
   long it waited for sandboxes to start.
-- **True trade-offs, not a rigged race.** The shared lane can't run code, and says so. Delegation pays for a new agent
+- **True trade-offs, not a rigged race.** The shared lane can't run code, and says so: the `chat` environment's
+  instructions ([`environments/chat`](../../environments/chat/instructions/contoso.instructions.md)) tell its agent it
+  has no shell, so it answers at once instead of starting sub-agents to look for one (which once took 90 seconds and
+  262k tokens). Delegation pays for a new agent
   and sandbox per part, which wins when parts are big and loses when they're small. A coordinator retyping a worker's
   report can even drop a character (it happened: one run's Delegate lane missed the last digit of the hash). Results
   vary between runs; that is the point.
@@ -81,14 +84,13 @@ Pattern Race opens at <http://localhost:7420>.
 
 One measured "Split the work" race (local, Claude Sonnet 5): Isolated won in 13.8 s with 3.5 s of sandbox CPU and a
 298 MiB peak (its agent lives in that sandbox); Direct used 3.5 s and 193 MiB in a sandbox with no agent in it;
-Delegate's three workers used 7.9 s and 361 MiB; Shared used no sandbox at all, but 262k tokens and eleven sub-agents
-looking for a shell.
+Delegate's three workers used 7.9 s and 361 MiB. Shared used no sandbox at all.
 
 Each job costs about one premium request per lane, plus one per message each worker receives: the quick answer costs
 six in all, and the run-code and split races we measured cost eight to thirteen. Measured live on a local deployment:
 the quick answer finished in 7 seconds (only Isolated paid for a sandbox, 6.0 seconds against 1 to 2 for the rest);
-run code in 37 seconds (Mixed won in 12.3); split the work in 25 seconds for every lane with a shell, while Shared kept
-looking for one for 83.
+run code in 37 seconds (Mixed won in 12.3); split the work in 25 seconds for every lane with a shell. With its no-shell
+instruction, Shared says it can't run the code in about 10 seconds.
 
 <img src="docs/screenshots/lane-details.png" alt="The Delegate lane's details: its answer with the three values, each checked against the server's value, its three worker sandboxes with their IDs, and its usage: 4 agents, 4 premium requests (3 by workers), 3 model calls, 3 automatic approvals" width="900">
 
