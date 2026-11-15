@@ -64,5 +64,6 @@ Prerequisites: Windows (the narration uses the built-in Microsoft Mark voice), M
    `managed-copilot-tour-slides.pdf`. `node docs/tutorial/source/compose.mjs <shot id>` encodes a single shot for
    a quick preview. Copy the results here to update the published tour.
 
-The root README's architecture diagram and video thumbnail come from the same slides:
-`node docs/tutorial/source/readme-images.mjs` writes them to `docs/images/`.
+`node docs/tutorial/source/readme-images.mjs` writes the root README's images to `docs/images/`: the architecture
+diagram from [`architecture.html`](source/architecture.html), in GitHub's light and dark themes, and the video thumbnail
+from the slides.
