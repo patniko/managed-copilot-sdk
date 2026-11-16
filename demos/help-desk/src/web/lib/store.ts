@@ -58,8 +58,8 @@ export interface StoreState {
   readonly knownIssues: readonly KnownIssue[];
   /** Known issues being answered or resolved from this page, by ID. */
   readonly issueWork: Readonly<Record<string, "answer" | "resolve">>;
-  /** How many customers the next simulation starts (remembered in this browser). */
-  readonly size: SimulationSize;
+  /** How many customers are on the wall, for the next simulation or Classify (remembered in this browser). 0: only real tickets. */
+  readonly size: WallSize;
   /** A simulation is being started or ended from this page. */
   readonly working?: "simulate" | "end" | "classify";
   /** Approvals being answered from this page, by approval ID. */
@@ -74,12 +74,16 @@ export interface StoreState {
 const SIZE_KEY = "help-desk.size";
 const ZERO: Counters = { sessions: 0, runtimes: 0, sandboxes: 0, messages: 0, premiumRequests: 0 };
 
-function savedSize(): SimulationSize {
+/** The wall's size choices: no simulated customers, or one of the simulation sizes. */
+export const WALL_SIZES = [0, ...SIMULATION_SIZES] as const;
+export type WallSize = 0 | SimulationSize;
+
+function savedSize(): WallSize {
   try {
     const value = Number(globalThis.localStorage?.getItem(SIZE_KEY));
-    return (SIMULATION_SIZES as readonly number[]).includes(value) ? (value as SimulationSize) : 25;
+    return (WALL_SIZES as readonly number[]).includes(value) ? (value as WallSize) : 0;
   } catch {
-    return 25;
+    return 0;
   }
 }
 
@@ -259,7 +263,7 @@ export function dismissToast(id: number): void {
   setState((current) => (current.toasts.some((toast) => toast.id === id) ? { ...current, toasts: current.toasts.filter((toast) => toast.id !== id) } : current));
 }
 
-export function chooseSize(size: SimulationSize): void {
+export function chooseSize(size: WallSize): void {
   try {
     globalThis.localStorage?.setItem(SIZE_KEY, String(size));
   } catch {
@@ -269,7 +273,7 @@ export function chooseSize(size: SimulationSize): void {
 }
 
 export async function simulate(): Promise<void> {
-  if (state.working) return;
+  if (state.working || state.size === 0) return;
   setState((current) => ({ ...current, working: "simulate" }));
   try {
     await api.simulate(state.size);
@@ -282,7 +286,7 @@ export async function simulate(): Promise<void> {
 
 /** Classifies the chosen number of customers' first messages with `method`, without starting their sessions. */
 export async function classify(method: ClassificationMethod): Promise<void> {
-  if (state.working) return;
+  if (state.working || state.size === 0) return;
   setState((current) => ({ ...current, working: "classify" }));
   try {
     await api.classify(state.size, method);

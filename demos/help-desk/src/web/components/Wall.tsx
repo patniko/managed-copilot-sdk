@@ -2,7 +2,6 @@ import { CpuIcon, KebabHorizontalIcon, PlayIcon, TrashIcon, TriangleDownIcon, Za
 import { useCallback, useRef, useState, type ReactNode } from "react";
 import {
   CLASSIFICATION_METHODS,
-  SIMULATION_SIZES,
   TICKET_CATEGORIES,
   TICKET_CATEGORY_INFO,
   type ClassificationMethod,
@@ -15,7 +14,7 @@ import {
   type TicketTriage,
   type TriageInfo,
 } from "../../shared/types.js";
-import { chooseSize, classify, endSimulation, simulate, useStore } from "../lib/store.js";
+import { WALL_SIZES, chooseSize, classify, endSimulation, simulate, useStore } from "../lib/store.js";
 import { useDismiss } from "../lib/useDismiss.js";
 import { Issues } from "./Issues.js";
 import { Knowledge } from "./Knowledge.js";
@@ -27,7 +26,8 @@ import { Spinner } from "./ui/Spinner.js";
 
 /**
  * The operator's wall: live players of Downhill first, then the simulated customers, each with a private session on
- * the one shared runtime. Before a simulation it shows only the players.
+ * the one shared runtime. Before a simulation it shows the players and the chosen number of customers' waiting
+ * messages (none by default).
  */
 export function Wall() {
   const phase = useStore((state) => state.phase);
@@ -54,7 +54,7 @@ export function Wall() {
       </div>
       <PlatformNotice />
       <TriageNotice />
-      {!run && classification ? <ClassificationSummary latest={classification} runs={classifications} /> : null}
+      {!run && size > 0 && classification ? <ClassificationSummary latest={classification} runs={classifications} /> : null}
       <div className="mt-4">
         <Stats />
       </div>
@@ -74,23 +74,30 @@ export function Wall() {
           <PlayerGroup players={players} />
           <TicketGroups customers={customers} tickets={tickets} />
         </>
-      ) : !run && classification ? (
+      ) : !run && size > 0 && classification ? (
         <>
           <PlayerGroup players={players} />
           <ClassificationGroups customers={customers} classification={classification} />
         </>
       ) : !run && phase === "ready" ? (
-        // Before a simulation, only real tickets: live players, if any. The customers appear when the rush starts.
+        // Before a simulation: real tickets (live players, if any), then the chosen number of customers' waiting messages.
         <>
-          {players.length > 0 ? (
-            <section aria-label="Downhill players" className={GRID}>
-              {players.map((player) => (
-                <PlayerTile key={player.ticketId} ticket={player} />
-              ))}
-            </section>
-          ) : null}
+          <section aria-label="Players and customers" className={GRID}>
+            {players.map((player) => (
+              <PlayerTile key={player.ticketId} ticket={player} />
+            ))}
+            {customers.slice(0, size).map((customer) => (
+              <GhostTile key={customer.id} customer={customer} queued />
+            ))}
+          </section>
           <p className="mt-4 text-sm text-fg-muted">
-            Click <strong>Simulate {size} customers</strong> to start a support rush: one agent session per customer, all on the one shared runtime.
+            {size === 0 ? (
+              <>Choose how many simulated customers write in. Then <strong>Simulate</strong> gives each one an agent session, all on the one shared runtime.</>
+            ) : (
+              <>
+                <strong>Simulate {size} customers</strong> gives each one an agent session, all on the one shared runtime.
+              </>
+            )}
           </p>
         </>
       ) : (
@@ -272,14 +279,19 @@ function Controls() {
   const playersStay = players > 0 ? " Players' tickets stay." : "";
   return (
     <div className="flex items-center gap-2">
-      <div className="SegmentedControl" role="group" aria-label="Customers to simulate">
-        {SIMULATION_SIZES.map((option) => (
+      <div className="SegmentedControl" role="group" aria-label="Simulated customers">
+        {WALL_SIZES.map((option) => (
           <button key={option} type="button" className="SegmentedControl-item" aria-pressed={size === option} disabled={busy} onClick={() => chooseSize(option)}>
             {option}
           </button>
         ))}
       </div>
-      <button type="button" className="btn btn-primary" disabled={!connected || busy} onClick={() => (run ? setConfirm("restart") : void simulate())}>
+      <button
+        type="button"
+        className="btn btn-primary"
+        disabled={!connected || busy || size === 0}
+        title={size === 0 ? "Choose how many customers to simulate first." : undefined}
+        onClick={() => (run ? setConfirm("restart") : void simulate())}>
         {working === "simulate" || run?.ending ? <Spinner size={16} /> : <PlayIcon size={16} />}
         <span>
           <span className="max-sm:hidden">Simulate </span>
@@ -288,9 +300,14 @@ function Controls() {
       </button>
       {(triage && triage.state !== "off") || (llmTriage && llmTriage.state !== "off") ? (
         <ClassifyMenu
-          disabled={!connected || busy || classifying || Boolean(run)}
+          disabled={!connected || busy || classifying || Boolean(run) || size === 0}
           working={working === "classify" || classifying}
-          title={run ? "End the simulation first: Classify reads the customers' first messages without starting their sessions." : `Classify the first ${size} customers' messages, without starting their sessions.`}
+          title={
+            run
+              ? "End the simulation first: Classify reads the customers' first messages without starting their sessions."
+              : size === 0
+                ? "Choose how many customers to classify first."
+                : `Classify the first ${size} customers' messages, without starting their sessions.`}
           triage={triage}
           llmTriage={llmTriage}
         />
