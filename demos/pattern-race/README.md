@@ -30,6 +30,11 @@ has no shell, so it started sub-agents looking for one and answered that it coul
   costs that sandbox the agent's memory; a worker per part costs a sandbox per part; a lane with no sandbox costs none.
   Its details add the vCPU-seconds its sandboxes held (busy or idle) and how
   long it waited for sandboxes to start.
+- **The race over time.** Below the lanes, the race timeline gives each lane a swimlane on one clock: what it was
+  doing (starting, thinking, running commands, moving into a sandbox, working through workers or sub-agents), a bar
+  for each sandbox from the moment it was asked for (starting) until it was deleted, and charts of the vCPUs its
+  sandboxes kept busy and the memory they held, on one scale for every lane, with a finish line where it answered.
+  Hover a phase or a sandbox for what it was and how long it took.
 - **True trade-offs, not a rigged race.** The shared lane can't run code, and says so: the `chat` environment's
   instructions ([`environments/chat`](../../environments/chat/instructions/contoso.instructions.md)) tell its agent it
   has no shell, so it answers at once instead of starting sub-agents to look for one (which once took 90 seconds and
@@ -156,7 +161,9 @@ pnpm dev                                       # server and UI with live reload 
   then its session is deleted, which deletes its sandbox, hands sandboxes, and workers. A failed lane says why in plain
   words; **Stop** cancels every running lane (`session.abort()`) and deletes their sessions.
 - **The page is a live view.** The server pushes its whole state over server-sent events a few times a second; the
-  last finished race is kept in `.data/last-race.json`, so the board shows it after a restart.
+  last finished race is kept in `.data/last-race.json`, so the board shows it after a restart. Each lane keeps its
+  history for the timeline: a phase per change of what it's doing (from its session events) and a usage sample per
+  reading, at most 240 of each.
 
 ## Configuration
 

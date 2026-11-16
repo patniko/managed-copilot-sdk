@@ -72,7 +72,8 @@ export function parseUsage(output: string): SandboxUsage | undefined {
   }
   const cpuMs = values.has("cpu_us") ? values.get("cpu_us")! / 1000 : values.has("cpu_ns") ? values.get("cpu_ns")! / 1e6 : undefined;
   if (cpuMs === undefined) return undefined;
-  return { cpuMs, peakMemoryBytes: Math.max(values.get("peak") ?? 0, values.get("now") ?? 0) };
+  const now = values.get("now");
+  return { cpuMs, peakMemoryBytes: Math.max(values.get("peak") ?? 0, now ?? 0), ...(now !== undefined ? { memoryBytes: now } : {}) };
 }
 
 /** Retry delay after the `attempt`-th consecutive failure: exponential to 30 s, then 50–100 % of that (jitter). */

@@ -181,6 +181,15 @@ describe("a race", () => {
     isolated.answer("1. 315948");
     await vi.waitFor(() => expect(platform.deleted).toContain(isolated.sessionId));
     expect(lane("isolated").sandboxes[0]).toMatchObject({ state: "stopped", appearedAt: 1_000_000, endedAt: 1_005_000 });
+    // Its history: what it did when, and its sandbox's usage over time, ending with nothing held once it's deleted.
+    expect(lane("direct").timeline!.map((phase) => [phase.kind, phase.label])).toEqual([
+      ["starting", "Starting its session"],
+      ["thinking", "Thinking"],
+      ["thinking", "Counting primes"],
+      ["command", "$ python3 primes.py"],
+    ]);
+    expect(lane("isolated").samples!.at(-1)).toEqual({ at: 1_005_000, cpuMs: 1_200, memoryBytes: 0 });
+    expect(lane("shared").samples).toBeUndefined();
     await races.close();
   });
 

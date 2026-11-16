@@ -85,9 +85,9 @@ describe("connecting", () => {
 
 describe("a sandbox's usage", () => {
   it("reads its cgroup counters: CPU time and the higher of its peak and current memory", () => {
-    expect(parseUsage("cpu_us 1886519\npeak 71176192\nnow 52289536\n")).toEqual({ cpuMs: 1886.519, peakMemoryBytes: 71_176_192 });
+    expect(parseUsage("cpu_us 1886519\npeak 71176192\nnow 52289536\n")).toEqual({ cpuMs: 1886.519, peakMemoryBytes: 71_176_192, memoryBytes: 52_289_536 });
     // cgroup v1 counts CPU in nanoseconds; a kernel without memory.peak still has the current reading.
-    expect(parseUsage("cpu_ns 2500000000\npeak \nnow 1048576\n")).toEqual({ cpuMs: 2500, peakMemoryBytes: 1_048_576 });
+    expect(parseUsage("cpu_ns 2500000000\npeak \nnow 1048576\n")).toEqual({ cpuMs: 2500, peakMemoryBytes: 1_048_576, memoryBytes: 1_048_576 });
     expect(parseUsage("cpu_ns \npeak \nnow \n")).toBeUndefined();
   });
 });

@@ -49,6 +49,29 @@ export interface SandboxUsage {
   readonly cpuMs: number;
   /** The most memory it held at once, in bytes. */
   readonly peakMemoryBytes: number;
+  /** The memory it held at the latest reading, in bytes. */
+  readonly memoryBytes?: number;
+}
+
+/**
+ * What a lane was doing from `at` until its next phase (or its end):
+ * - `starting`: its session (or sandbox) is being created. `thinking`: its model is working.
+ * - `command`: a shell command or file tool. `sandbox`: moving into a sandbox. `workers`: starting, messaging, or
+ *   waiting for workers. `subagents`: a sub-agent's work. `tool`: any other tool.
+ */
+export type PhaseKind = "starting" | "thinking" | "command" | "sandbox" | "workers" | "subagents" | "tool";
+
+export interface Phase {
+  readonly at: number;
+  readonly kind: PhaseKind;
+  readonly label: string;
+}
+
+/** A lane's sandboxes at `at`: the CPU time they used so far, and the memory they held then. */
+export interface UsageSample {
+  readonly at: number;
+  readonly cpuMs: number;
+  readonly memoryBytes: number;
 }
 
 export interface SandboxToken {
@@ -111,6 +134,10 @@ export interface LaneRun {
   readonly modelMs?: number;
   /** Tool calls in its own session (sub-agents included). */
   readonly toolCalls?: number;
+  /** What it was doing over time, oldest first. */
+  readonly timeline?: readonly Phase[];
+  /** Its sandboxes' usage over time, one sample per reading. */
+  readonly samples?: readonly UsageSample[];
   /** Permission requests answered automatically. */
   readonly approvals: number;
   readonly answer?: string;

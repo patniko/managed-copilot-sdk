@@ -5,6 +5,7 @@ import { Header } from "./components/Header.js";
 import { LaneDialog } from "./components/LaneDialog.js";
 import { Scorecard } from "./components/Scorecard.js";
 import { Starter } from "./components/Starter.js";
+import { Timeline } from "./components/Timeline.js";
 import { Spinner } from "./components/ui/Spinner.js";
 import { connect, useStore } from "./lib/store.js";
 
@@ -20,6 +21,7 @@ export function App() {
             <Starter />
             <PlatformNotice />
             <Board />
+            <Timeline />
             <Scorecard />
           </>
         ) : (
