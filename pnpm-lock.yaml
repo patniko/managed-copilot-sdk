@@ -867,6 +867,9 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.1.2
         version: 6.1.2(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+      diff:
+        specifier: ^9.0.0
+        version: 9.0.0
       prism-react-renderer:
         specifier: ^2.4.1
         version: 2.4.1(react@19.3.1)
@@ -3231,6 +3234,10 @@ packages:
 
   devlop@1.1.0:
     resolution: {integrity: sha1-TbfCyk3G4Og0wwvnDJS7yXbccBg=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/devlop/-/devlop-1.1.0.tgz}
+
+  diff@9.0.0:
+    resolution: {integrity: sha1-KXwxzXwoDxPf4zV5HsIGO9SnOm8=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/diff/-/diff-9.0.0.tgz}
+    engines: {node: '>=0.3.1'}
 
   draco3d@1.5.9:
     resolution: {integrity: sha512-MqC0eAfW5gPATGY3GABIyFWpHwdDGAyewTdek5R/e+mhI9ZDUMKb2mTDkTMUW0+Vm7an+ThEMUop3+svS72Uug==, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/draco3d/-/draco3d-1.5.9.tgz}
@@ -6586,6 +6593,8 @@ snapshots:
   devlop@1.1.0:
     dependencies:
       dequal: 2.0.3
+
+  diff@9.0.0: {}
 
   draco3d@1.5.9: {}
 

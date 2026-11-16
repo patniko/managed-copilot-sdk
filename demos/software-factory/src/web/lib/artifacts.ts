@@ -1,3 +1,4 @@
+import { createTwoFilesPatch } from "diff";
 import { useCallback, useEffect, useState } from "react";
 import type { ArtifactFileView, ArtifactIndex, ArtifactVersionView, Station, TestReport, WorkOrder } from "../../shared/types.js";
 import { api, errorMessage } from "./api.js";
@@ -10,6 +11,23 @@ export const INTAKE_STATION_ID = "intake";
 
 export function basename(path: string): string {
   return path.split("/").pop() ?? path;
+}
+
+/**
+ * The project's original of a file a builder (`files/…`) or the release (`bundle/…`) published, from the intake's
+ * `project/…`. Undefined for a file the project didn't have, and for work orders without a project.
+ */
+export function projectOriginal(index: ArtifactIndex, file: Pick<ArtifactFileView, "stationId" | "path">): ArtifactFileView | undefined {
+  const prefix = file.stationId.startsWith("build:") ? "files/" : file.stationId === "release" ? "bundle/" : undefined;
+  if (!prefix || !file.path.startsWith(prefix)) return undefined;
+  const path = `project/${file.path.slice(prefix.length)}`;
+  return index.files.find((candidate) => candidate.stationId === INTAKE_STATION_ID && candidate.path === path && candidate.viewable);
+}
+
+/** A unified diff of one file against its original, for the diff viewer; empty when they're the same. */
+export function fileChanges(path: string, original: string, changed: string): string {
+  if (original === changed) return "";
+  return createTwoFilesPatch(`a/${path}`, `b/${path}`, original, changed, undefined, undefined, { context: 3 });
 }
 
 export function viewerKind(file: Pick<ArtifactFileView, "path" | "viewable">): ViewerKind {

@@ -195,9 +195,10 @@ and [Data Desk](../data-desk) sends an insight with the data behind it. Such a w
   and the release says which of the project's files it added, changed, or removed (files in dot-directories such as
   `.github/` aren't part of the release, so they're left as they were).
 
-The routed files are the **intake**'s artifacts, first on the Artifacts tab. `GET /api/work-orders` lists each work
-order's `origin`, so an app finds its work orders again after a restart, and `GET /api/work-orders/:id/release` returns
-the released files and the project's `changes` (Incident Commander verifies and deploys a fix from there).
+The routed files are the **intake**'s artifacts, first on the Artifacts tab. A builder's or the release's copy of a
+project file opens on **Changes**, a diff against that original; **File** shows the whole file.
+`GET /api/work-orders` lists each work order's `origin`, so an app finds its work orders again after a restart, and
+`GET /api/work-orders/:id/release` returns the released files and the project's `changes` (Incident Commander verifies and deploys a fix from there).
 
 ```ts
 await fetch(`${process.env.SOFTWARE_FACTORY_URL}/api/work-orders`, {

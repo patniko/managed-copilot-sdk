@@ -1,6 +1,8 @@
 import {
   ChevronRightIcon,
+  CodeIcon,
   DownloadIcon,
+  FileDiffIcon,
   FileDirectoryFillIcon,
   FileDirectoryIcon,
   FileDirectoryOpenFillIcon,
@@ -17,8 +19,10 @@ import {
   basename,
   buildTree,
   defaultArtifact,
+  fileChanges,
   groupArtifacts,
   pickReleaseArtifact,
+  projectOriginal,
   stationDefaultArtifact,
   useArtifactContent,
   type ArtifactGroup,
@@ -34,6 +38,7 @@ import { useNow } from "../lib/time.js";
 import { Button, buttonClass } from "./ui/Button.js";
 import { Callout, EmptyState } from "./ui/Feedback.js";
 import { Tooltip } from "./ui/Tooltip.js";
+import { DiffViewer } from "./viewers/DiffViewer.js";
 import { FileViewer } from "./viewers/FileViewer.js";
 
 const PICKS: readonly ArtifactPick[] = ["readme", "test-report", "patch", "notes"];
@@ -118,6 +123,7 @@ function ArtifactsBrowser({ workOrder, index, query }: { readonly workOrder: Wor
           <Viewer
             workOrder={workOrder}
             file={selected}
+            original={projectOriginal(index, selected)}
             version={version}
             stationTitle={groups.find((group) => group.stationId === selected.stationId)?.title}
             onVersion={(next) => select(selected, next === selected.versions[0]?.version ? undefined : next)}
@@ -276,21 +282,35 @@ function versionLabel(version: ArtifactVersionView, now: number): string {
   return `v${version.version}${round} · ${formatBytes(version.size)} · ${formatRelative(version.publishedAt, now)}`;
 }
 
+type ViewMode = "changes" | "file";
+
+const VIEW_MODES = [
+  { id: "changes", label: "Changes", icon: FileDiffIcon },
+  { id: "file", label: "File", icon: CodeIcon },
+] as const;
+
 function Viewer({
   workOrder,
   file,
+  original,
   version,
   stationTitle,
   onVersion,
 }: {
   readonly workOrder: WorkOrder;
   readonly file: ArtifactFileView;
+  /** The project's original of this file, when the work order changes an existing project that had it. */
+  readonly original?: ArtifactFileView;
   readonly version: ArtifactVersionView;
   readonly stationTitle?: string;
   readonly onVersion: (version: number) => void;
 }) {
   const now = useNow(30_000);
   const { content, retry } = useArtifactContent(workOrder.id, file, version);
+  const originalVersion = original?.versions[0];
+  const { content: originalContent, retry: retryOriginal } = useArtifactContent(workOrder.id, original, originalVersion);
+  const [mode, setMode] = useState<ViewMode>("changes");
+  const showChanges = Boolean(original) && version.viewable && mode === "changes";
   const url = artifactContentUrl(workOrder.id, file.stationId, file.path, version.version);
 
   let body: ReactNode;
@@ -312,7 +332,30 @@ function Viewer({
         {formatBytes(version.size)} · {file.contentType}. Only text files up to 1 MB are kept.
       </EmptyState>
     );
-  } else if (content.status === "ready") {
+  } else if (showChanges && content.status === "ready" && originalContent.status === "ready") {
+    const changes = fileChanges(original!.path.slice("project/".length), originalContent.text, content.text);
+    body = changes ? (
+      <DiffViewer key={`${file.stationId}:${file.path}:${version.version}`} text={changes} />
+    ) : (
+      <p className="px-4 py-10 text-center text-fg-muted">No changes: this is the same as the project's original.</p>
+    );
+  } else if (showChanges && originalContent.status === "error") {
+    body = (
+      <Callout
+        tone="danger"
+        compact
+        className="m-4"
+        title="Couldn't load the project's original of this file"
+        actions={
+          <Button size="sm" onClick={retryOriginal}>
+            Retry
+          </Button>
+        }
+      >
+        {originalContent.message} Choose <strong>File</strong> to see this version on its own.
+      </Callout>
+    );
+  } else if (content.status === "ready" && !(showChanges && originalContent.status !== "ready")) {
     body = <FileViewer key={`${file.stationId}:${file.path}:${version.version}`} path={file.path} text={content.text} />;
   } else if (content.status === "error") {
     body = (
@@ -350,6 +393,23 @@ function Viewer({
           {stationTitle ? <p className="truncate font-sans text-xs text-fg-muted">{stationTitle}</p> : null}
         </div>
         <div className="flex items-center gap-2 font-sans">
+          {original && version.viewable ? (
+            <div className="SegmentedControl SegmentedControl--sm" role="group" aria-label="Show">
+              {VIEW_MODES.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  aria-pressed={mode === option.id}
+                  onClick={() => setMode(option.id)}
+                  className="SegmentedControl-item"
+                  title={option.id === "changes" ? "What this file changes in the project" : "This version of the file"}
+                >
+                  <option.icon size={16} />
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
           {file.versions.length > 1 ? (
             <label className="min-w-0">
               <span className="sr-only">Version</span>
