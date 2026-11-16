@@ -85,6 +85,7 @@ export class FakePlatform implements RacePlatform {
   status: PlatformStatus = { state: "connected", url: "http://localhost:7400", mode: "local", deployment: "copilot", account: { login: "octocat" } };
   lanes: LaneAvailability[] = LANES.map((lane) => ({ lane: lane.id, available: true, sandboxEnvironment: lane.type === "isolated" ? lane.environment : "coder" }));
   readonly model = { id: "claude-sonnet-5", name: "Claude Sonnet 5" };
+  models = [this.model, { id: "gpt-6-sol", name: "GPT-6 Sol" }];
   readonly sessions = new Map<LaneId, FakeSession>();
   readonly deleted: string[] = [];
   readonly workerLists = new Map<string, WorkerInfo[]>();

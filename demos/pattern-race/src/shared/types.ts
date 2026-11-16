@@ -23,6 +23,14 @@ export interface LaneAvailability {
   readonly reason?: string;
   /** The environment its sandboxes come from: its own (isolated), its `promoteTo` (promotable), or its first worker environment. */
   readonly sandboxEnvironment?: string;
+  /** The models its environment allows; every model the deployment offers when absent. */
+  readonly models?: readonly string[];
+}
+
+/** A model a race can use. */
+export interface ModelChoice {
+  readonly id: string;
+  readonly name: string;
 }
 
 /**
@@ -164,8 +172,10 @@ export interface RaceSnapshot {
 export interface AppState {
   readonly platform: PlatformStatus;
   readonly lanes: readonly LaneAvailability[];
-  /** The model every lane uses, and its display name. */
-  readonly model: { readonly id: string; readonly name: string };
+  /** The model a race uses unless the person picks another (`PATTERN_RACE_MODEL`). */
+  readonly model: ModelChoice;
+  /** The models the deployment offers that at least one lane can race with. */
+  readonly models: readonly ModelChoice[];
   readonly race?: RaceSnapshot;
   /** The server's clock when this state was sent, so the page can time lanes without clock skew. */
   readonly serverNow: number;
@@ -173,6 +183,8 @@ export interface AppState {
 
 export interface StartRaceRequest {
   readonly job: JobId;
+  /** The model every lane uses; the default model when absent. */
+  readonly model?: string;
 }
 
 export interface ApiErrorBody {

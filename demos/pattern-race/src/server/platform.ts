@@ -3,8 +3,8 @@
 import type { AssistantMessageEvent, CopilotClient, MessageOptions, ModelInfo, SessionConfig, SessionEvent, UsageGetMetricsResult } from "@github/copilot-sdk";
 import { isManagedCopilotError, ManagedCopilot, type DeploymentInfo, type PlatformEvent, type SessionInfo, type WorkerInfo } from "@managed-copilot/sdk";
 import { SANDBOX_SIZES } from "@managed-copilot/protocol";
-import { LANES, laneById, type LaneId } from "../shared/lanes.js";
-import type { LaneAvailability, PlatformStatus, SandboxUsage } from "../shared/types.js";
+import { LANES, laneById, withModel, type LaneId } from "../shared/lanes.js";
+import type { LaneAvailability, ModelChoice, PlatformStatus, SandboxUsage } from "../shared/types.js";
 import type { RaceConfig } from "./config.js";
 import { RaceError } from "./errors.js";
 import { log } from "./log.js";
@@ -22,8 +22,10 @@ export interface LaneSession {
 export interface RacePlatform {
   readonly status: PlatformStatus;
   readonly lanes: readonly LaneAvailability[];
-  /** The model every lane asks for, and its display name. */
-  readonly model: { readonly id: string; readonly name: string };
+  /** The model a race uses unless the person picks another, and its display name. */
+  readonly model: ModelChoice;
+  /** The models the deployment offers that at least one available lane allows. */
+  readonly models: readonly ModelChoice[];
   /** A model's premium request multiplier, when the deployment reports one. */
   multiplier(model: string): number | undefined;
   /** Status or lane availability changed. */
@@ -113,8 +115,8 @@ const CAPABILITIES: Record<"shared" | "isolated" | "promotable" | "orchestrator"
 const NOT_RUNNING = "The shared runtime isn't running on this deployment.";
 const NOT_READY = "Sandboxes aren't ready on this deployment yet.";
 
-/** Which lanes this deployment can race: each lane's environment declared as its pattern needs, allowing the model, and working now. */
-export function describeLanes(info: DeploymentInfo, model: string): LaneAvailability[] {
+/** Which lanes this deployment can race: each lane's environment declared as its pattern needs, and working now (with the models it allows). */
+export function describeLanes(info: DeploymentInfo): LaneAvailability[] {
   const capabilities = new Set(info.capabilities);
   return LANES.map((lane): LaneAvailability => {
     const unavailable = (reason: string): LaneAvailability => ({ lane: lane.id, available: false, reason });
@@ -123,12 +125,11 @@ export function describeLanes(info: DeploymentInfo, model: string): LaneAvailabi
     if (declared.type !== lane.type) return unavailable(`"${lane.environment}" is a ${declared.type} environment, not ${lane.type}.`);
     const execution = declared.execution ?? "delegate";
     if (lane.execution && execution !== lane.execution) return unavailable(`"${lane.environment}" works ${execution}, not ${lane.execution}.`);
-    if (declared.models?.length && !declared.models.includes(model)) return unavailable(`"${lane.environment}" doesn't allow ${model}, the model every lane uses.`);
     const missing = CAPABILITIES[lane.type].filter((capability) => !capabilities.has(capability));
     if (missing.includes("shared")) return unavailable(NOT_RUNNING);
     if (missing.length) return unavailable(NOT_READY);
     const sandboxEnvironment = lane.type === "isolated" ? lane.environment : lane.type === "promotable" ? declared.promoteTo : declared.workers?.[0];
-    return { lane: lane.id, available: true, ...(sandboxEnvironment ? { sandboxEnvironment } : {}) };
+    return { lane: lane.id, available: true, ...(sandboxEnvironment ? { sandboxEnvironment } : {}), ...(declared.models?.length ? { models: [...declared.models] } : {}) };
   });
 }
 
@@ -161,9 +162,16 @@ export class Platform implements RacePlatform {
     return this.#lanes;
   }
 
-  get model(): { readonly id: string; readonly name: string } {
+  get model(): ModelChoice {
     const id = this.#config.model;
     return { id, name: this.#models.get(id)?.name ?? id };
+  }
+
+  get models(): readonly ModelChoice[] {
+    // `auto` picks a model per session: lanes on it wouldn't be racing the same model.
+    const offered = [...this.#models.values()].filter((model) => model.policy?.state !== "disabled" && model.id !== "auto").map((model) => ({ id: model.id, name: model.name }));
+    if (!offered.some((model) => model.id === this.#config.model)) offered.unshift(this.model);
+    return offered.filter((model) => this.#lanes.some((lane) => withModel(lane, model).available));
   }
 
   multiplier(model: string): number | undefined {
@@ -291,7 +299,7 @@ export class Platform implements RacePlatform {
         void connecting.then((late) => late.close()).catch(() => undefined);
         throw error;
       }
-      const lanes = describeLanes(managed.info, this.#config.model);
+      const lanes = describeLanes(managed.info);
       await Promise.all(
         lanes
           .filter((lane) => lane.available)
@@ -306,7 +314,7 @@ export class Platform implements RacePlatform {
             }
           }),
       );
-      const models = await this.#readModels([...clients.values()][0]);
+      const models = await this.#readModels([...clients.values()]);
       if (this.#stopped) throw new Error("stopped");
       for (const type of EVENTS) managed.on(type, (event) => this.#event(event));
       this.#managed = managed;
@@ -339,16 +347,16 @@ export class Platform implements RacePlatform {
     }
   }
 
-  /** The deployment's models (names and multipliers), read once per connection. */
-  async #readModels(client: CopilotClient | undefined): Promise<Map<string, ModelInfo>> {
-    if (!client) return new Map();
-    try {
-      const models = await deadline(client.listModels(), 15_000, "Listing models");
-      return new Map(models.map((model) => [model.id, model]));
-    } catch (error) {
-      log.warn("Couldn't list models; showing model IDs", { error: (error as Error).message });
-      return new Map();
+  /** The deployment's models (names and multipliers), read once per connection through every lane's client: each lists the models its environment allows. */
+  async #readModels(clients: readonly CopilotClient[]): Promise<Map<string, ModelInfo>> {
+    const models = new Map<string, ModelInfo>();
+    const lists = await Promise.allSettled(clients.map((client) => deadline(client.listModels(), 15_000, "Listing models")));
+    for (const list of lists) {
+      if (list.status === "fulfilled") for (const model of list.value) if (!models.has(model.id)) models.set(model.id, model);
     }
+    const failed = lists.find((list): list is PromiseRejectedResult => list.status === "rejected");
+    if (failed && models.size === 0) log.warn("Couldn't list models; showing model IDs", { error: (failed.reason as Error).message });
+    return models;
   }
 
   /** Checks the connection (`attempt` 0) or tries again after a failure. */

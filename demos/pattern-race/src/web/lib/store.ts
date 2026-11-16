@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { DEFAULT_JOB, type JobId } from "../../shared/jobs.js";
 import type { LaneId } from "../../shared/lanes.js";
-import type { ApiErrorBody, AppState } from "../../shared/types.js";
+import type { ApiErrorBody, AppState, ModelChoice } from "../../shared/types.js";
 
 export type Connection = "connecting" | "open" | "reconnecting";
 
@@ -13,6 +13,8 @@ export interface StoreState {
   /** The job the picker shows; follows the last race until the person picks one. */
   readonly job: JobId;
   readonly picked: boolean;
+  /** The model the person picked; until then, the last race's, else the default. */
+  readonly model?: string;
   /** A start or stop request is on its way. */
   readonly pending: boolean;
   /** Why the last start or stop failed. */
@@ -85,8 +87,29 @@ export function pickJob(job: JobId): void {
   setState((current) => ({ ...current, job, picked: true, error: undefined }));
 }
 
+export function pickModel(model: string): void {
+  setState((current) => ({ ...current, model, error: undefined }));
+}
+
+/** The model the next race uses: the one picked, else the last race's, else the default, while the deployment offers it. */
+export function selectedModel(current: StoreState): ModelChoice | undefined {
+  const app = current.app;
+  if (!app) return undefined;
+  for (const id of [current.model, app.race?.model, app.model.id]) {
+    const found = id === undefined ? undefined : app.models.find((model) => model.id === id);
+    if (found) return found;
+  }
+  return app.models[0] ?? app.model;
+}
+
+/** A model's display name, by ID. */
+export function modelName(app: AppState | undefined, id: string): string {
+  return app?.models.find((model) => model.id === id)?.name ?? (app?.model.id === id ? app.model.name : id);
+}
+
 export function startRace(): Promise<void> {
-  return act(() => post("/api/race", { job: state.job }));
+  const model = selectedModel(state);
+  return act(() => post("/api/race", { job: state.job, ...(model ? { model: model.id } : {}) }));
 }
 
 export function stopRace(): Promise<void> {

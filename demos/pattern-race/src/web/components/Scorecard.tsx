@@ -4,7 +4,7 @@ import { laneById } from "../../shared/lanes.js";
 import { agentCount, bests, cpuMs, elapsedMs, formatBytes, formatClock, formatCount, formatSeconds, formatTokens, hasWorkers, ordinal, partlyMeasured, peakMemoryBytes, plural, premiumRequests, sandboxCount, tokenCount } from "../../shared/score.js";
 import type { LaneRun, RaceSnapshot } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
-import { openLane, useStore } from "../lib/store.js";
+import { modelName, openLane, useStore } from "../lib/store.js";
 import { useNow } from "../lib/useNow.js";
 
 const ORDER: Readonly<Record<LaneRun["status"], number>> = { done: 0, thinking: 1, working: 1, starting: 1, ready: 1, failed: 2, stopped: 3, skipped: 4 };
@@ -35,7 +35,7 @@ const RESULT: Readonly<Record<string, { readonly text: string; readonly tone: st
 /** The race's outcome side by side: time, sandboxes, agents, premium requests, and (wide screens) compute and tokens per lane. */
 export function Scorecard() {
   const race = useStore((current) => current.app?.race);
-  const modelName = useStore((current) => current.app?.model.name);
+  const app = useStore((current) => current.app);
   const skew = useStore((current) => current.skew);
   const now = useNow(race?.state === "running") + skew;
   if (!race) return null;
@@ -47,7 +47,7 @@ export function Scorecard() {
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-line-muted px-4 py-3">
         <h2 className="text-base font-semibold">Scorecard</h2>
         <span className="text-xs text-fg-muted">
-          {jobById(race.job).title} · {modelName ?? race.model}
+          {jobById(race.job).title} · {modelName(app, race.model)}
         </span>
       </div>
       <div className="hidden grid-cols-[2.5rem_8rem_minmax(0,1fr)_5rem_4rem_5rem_7rem] gap-x-3 lg:grid-cols-[2.5rem_8rem_minmax(0,1fr)_5rem_4rem_5rem_5rem_5.5rem_4.5rem_7rem] border-b border-line-muted px-4 py-2 text-xs text-fg-muted sm:grid">

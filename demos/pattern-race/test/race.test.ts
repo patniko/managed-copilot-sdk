@@ -50,6 +50,18 @@ describe("a race", () => {
     await races.close();
   });
 
+  it("races the model the person picked, sitting out lanes whose environment doesn't allow it", async () => {
+    const { platform, races, lane } = setup();
+    platform.lanes = platform.lanes.map((availability) => (availability.lane === "shared" ? { ...availability, models: ["claude-sonnet-5"] } : availability));
+    expect(thrown(() => races.start("code", "no-such-model"))).toMatchObject({ code: "invalid_request", status: 400 });
+    races.start("code", "gpt-6-sol");
+    expect((await platform.session("isolated")).config.model).toBe("gpt-6-sol");
+    expect(races.snapshot()!.model).toBe("gpt-6-sol");
+    expect(lane("shared")).toMatchObject({ status: "skipped", error: '"chat" doesn\'t allow GPT-6 Sol.' });
+    expect(platform.sessions.has("shared")).toBe(false);
+    await races.close();
+  });
+
   it("places correct answers in the order they arrived, and judges every answer", async () => {
     const { platform, races, lane, tick } = setup();
     races.start("code");

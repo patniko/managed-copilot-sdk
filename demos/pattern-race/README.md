@@ -62,7 +62,11 @@ All six patterns from [Patterns](../../docs/concepts/patterns.md), on the enviro
 | Delegate | `"team"` | On the shared runtime, as a coordinator | Through new worker agents, each in its own sandbox |
 | Mixed | `"lead"` | On the shared runtime, as a coordinator | In its own sandbox, and through workers; the model picks |
 
-Every lane uses the same model (Claude Sonnet 5 by default; all six environments allow it) and gets the same prompt.
+Every lane uses the same model and gets the same prompt. Pick the model in the list next to the prompt: every model
+the deployment offers that at least one lane's environment allows (Claude Sonnet 5 by default; all six environments
+allow it and Claude Haiku 5.5). A lane whose environment doesn't allow the model sits that race out and says why:
+`chat` allows only those two, so Shared sits out a GPT race. `auto` isn't offered, since it could pick a different
+model for each lane.
 
 ## Run it
 
@@ -130,8 +134,9 @@ pnpm dev                                       # server and UI with live reload 
 
 - **One stock client per lane.** The server connects with `ManagedCopilot.connect()` and starts
   `managed.client(environment)` for each lane whose environment `/v1/info` declares with the right type (and, for the
-  coordinators, `execution`), allows the model, and has its capabilities (`shared`, `isolated`, `promotion`,
-  `orchestrator`) working. A race creates one session per lane with `client.createSession({ sessionId, model,
+  coordinators, `execution`) and has its capabilities (`shared`, `isolated`, `promotion`,
+  `orchestrator`) working. The models on offer are what each lane's `client.listModels()` lists (each lists the models
+  its environment allows), together. A race creates one session per lane with `client.createSession({ sessionId, model,
   onPermissionRequest })` and sends the job with `sendAndWait`. Session IDs start with `pattern-race-`, so sessions a
   restart cut short are found and deleted when the server connects again.
 - **Approvals are automatic, per lane.** Each lane answers its own permission requests with the SDK's `approveAll` (a
@@ -172,7 +177,7 @@ pnpm dev                                       # server and UI with live reload 
 | `PORT` | `7420` | HTTP port for the UI and API |
 | `HOST` | `127.0.0.1` | Interface to listen on (`0.0.0.0` in a container, together with `PATTERN_RACE_ALLOWED_HOSTS`) |
 | `MANAGED_COPILOT_URL` | local discovery | Gateway URL (Aspire sets it) |
-| `PATTERN_RACE_MODEL` | `claude-sonnet-5` | The model every lane uses; a lane whose environment doesn't allow it is not raced |
+| `PATTERN_RACE_MODEL` | `claude-sonnet-5` | The model picked until someone picks another in the page |
 | `PATTERN_RACE_DATA_DIR` | `.data` | Where the last race is kept |
 | `PATTERN_RACE_ALLOWED_HOSTS` | none | Extra host names allowed to address the server (it accepts loopback names only by default) |
 

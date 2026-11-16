@@ -1,4 +1,5 @@
 /** The six lanes: the same job in each pattern's environment. Shared by the server and the page. */
+import type { LaneAvailability, ModelChoice } from "./types.js";
 
 export type LaneId = "shared" | "isolated" | "promotable" | "direct" | "delegate" | "mixed";
 
@@ -64,4 +65,10 @@ export function laneById(id: LaneId): Lane {
   const lane = LANES.find((candidate) => candidate.id === id);
   if (!lane) throw new Error(`Unknown lane "${id}"`);
   return lane;
+}
+
+/** Whether a lane can race with `model`: it's available here and its environment allows that model, or why not. */
+export function withModel(availability: LaneAvailability, model: ModelChoice): LaneAvailability {
+  if (!availability.available || !availability.models?.length || availability.models.includes(model.id)) return availability;
+  return { lane: availability.lane, available: false, reason: `"${laneById(availability.lane).environment}" doesn't allow ${model.name}.` };
 }

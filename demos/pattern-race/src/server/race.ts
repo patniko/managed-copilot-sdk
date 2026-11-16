@@ -3,7 +3,7 @@
 import { approveAll, type PermissionHandler, type SessionEvent, type UsageGetMetricsResult } from "@github/copilot-sdk";
 import { isManagedCopilotError, type PlatformEvent, type WorkerEventData, type WorkerInfo } from "@managed-copilot/sdk";
 import { jobById, type Check, type JobId } from "../shared/jobs.js";
-import { LANES, type Lane, type LaneId } from "../shared/lanes.js";
+import { LANES, withModel, type Lane, type LaneId } from "../shared/lanes.js";
 import type { LaneRun, Phase, PhaseKind, RaceSnapshot, SandboxState, SandboxToken, SandboxUsage } from "../shared/types.js";
 import { expectedValue, judge } from "./checks.js";
 import type { RaceConfig } from "./config.js";
@@ -444,23 +444,26 @@ export class RaceManager {
   }
 
   /** Starts a race of `job` in every lane this deployment can race. */
-  start(jobId: JobId): RaceSnapshot {
+  start(jobId: JobId, modelId?: string): RaceSnapshot {
     if (this.running) throw new RaceError("race_running", "A race is already running. Stop it or wait for it to finish.", 409);
     if (this.#platform.status.state !== "connected") throw new RaceError("platform_unavailable", this.#platform.status.message ?? "Managed Copilot isn't connected yet.", 503);
-    const available = new Set(this.#platform.lanes.filter((lane) => lane.available).map((lane) => lane.lane));
+    const model = this.#platform.models.find((candidate) => candidate.id === (modelId ?? this.#platform.model.id));
+    if (!model) throw new RaceError("invalid_request", `${modelId ?? this.#platform.model.id} isn't a model any lane can race with here. Pick one from the list.`);
+    const offered = this.#platform.lanes.map((lane) => withModel(lane, model));
+    const available = new Set(offered.filter((lane) => lane.available).map((lane) => lane.lane));
     if (available.size === 0) throw new RaceError("lanes_unavailable", "This deployment can't race any lane right now.", 503);
     const job = jobById(jobId);
     const changed = () => this.#changed();
-    const lanes = new Map(this.#platform.lanes.map((lane) => [lane.lane, lane] as const));
+    const lanes = new Map(offered.map((lane) => [lane.lane, lane] as const));
     const runners = LANES.filter((lane) => available.has(lane.id)).map(
       (lane) => new LaneRunner(lane, { sandboxEnvironment: lanes.get(lane.id)?.sandboxEnvironment, changed, now: this.#now, size: (environment) => this.#platform.sandboxSize(environment) }),
     );
-    const skipped = new Map(this.#platform.lanes.filter((lane) => !lane.available).map((lane) => [lane.lane, lane.reason ?? "Not available on this deployment."] as const));
+    const skipped = new Map(offered.filter((lane) => !lane.available).map((lane) => [lane.lane, lane.reason ?? "Not available on this deployment."] as const));
     let settle!: () => void;
     const race: ActiveRace = {
       id: `${this.#now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
       job: jobId,
-      model: this.#platform.model.id,
+      model: model.id,
       expected: job.checks.map((check) => expectedValue(check.expect)),
       startedAt: this.#now(),
       state: "running",
@@ -469,7 +472,7 @@ export class RaceManager {
       done: new Promise<void>((resolve) => (settle = resolve)),
     };
     this.#active = race;
-    log.info("Race started", { race: race.id, job: jobId, lanes: runners.map((runner) => runner.lane.id).join(",") });
+    log.info("Race started", { race: race.id, job: jobId, model: model.id, lanes: runners.map((runner) => runner.lane.id).join(",") });
     void Promise.all(runners.map((runner) => this.#runLane(race, runner, job.prompt, job.checks))).then(() => {
       race.finishedAt = this.#now();
       if (race.state === "running") race.state = "finished";

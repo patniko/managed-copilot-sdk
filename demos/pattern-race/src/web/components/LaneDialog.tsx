@@ -4,7 +4,7 @@ import { jobById } from "../../shared/jobs.js";
 import { laneById } from "../../shared/lanes.js";
 import { agentCount, cpuMs, elapsedMs, formatBytes, formatClock, formatCount, formatSeconds, formatTokens, hasWorkers, ordinal, partlyMeasured, peakMemoryBytes, premiumRequests, reservedCpuSeconds, sandboxWaitMs } from "../../shared/score.js";
 import type { LaneRun, RaceSnapshot, SandboxToken } from "../../shared/types.js";
-import { openLane, useStore } from "../lib/store.js";
+import { modelName, openLane, useStore } from "../lib/store.js";
 import { MarkdownView } from "./ui/Markdown.js";
 
 const KIND: Readonly<Record<SandboxToken["kind"], string>> = { own: "Its own sandbox", hands: "Hands, no agent inside", worker: "Worker agent" };
@@ -24,7 +24,7 @@ function sandboxFacts(token: SandboxToken): string {
 export function LaneDialog() {
   const open = useStore((current) => current.open);
   const race = useStore((current) => current.app?.race);
-  const modelName = useStore((current) => current.app?.model.name);
+  const app = useStore((current) => current.app);
   const skew = useStore((current) => current.skew);
   const run = open ? race?.lanes.find((lane) => lane.lane === open) : undefined;
   const ref = useRef<HTMLDialogElement>(null);
@@ -45,7 +45,7 @@ export function LaneDialog() {
         if (event.target === event.currentTarget) event.currentTarget.close();
       }}
     >
-      {race && run ? <Details race={race} run={run} modelName={modelName ?? race.model} now={Date.now() + skew} /> : null}
+      {race && run ? <Details race={race} run={run} modelName={modelName(app, race.model)} now={Date.now() + skew} /> : null}
     </dialog>
   );
 }

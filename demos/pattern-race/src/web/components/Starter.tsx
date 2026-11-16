@@ -1,7 +1,8 @@
 import { CodeIcon, CommentIcon, CopilotIcon, PlayIcon, QuoteIcon, ShieldCheckIcon, SquareFillIcon, WorkflowIcon, type Icon } from "@primer/octicons-react";
 import { JOBS, jobById, type JobId } from "../../shared/jobs.js";
+import { withModel } from "../../shared/lanes.js";
 import { cx } from "../lib/cx.js";
-import { pickJob, startRace, stopRace, useStore } from "../lib/store.js";
+import { pickJob, pickModel, selectedModel, startRace, stopRace, useStore } from "../lib/store.js";
 import { Spinner } from "./ui/Spinner.js";
 import { Tooltip } from "./ui/Tooltip.js";
 
@@ -14,7 +15,8 @@ export function Starter() {
   const pending = useStore((current) => current.pending);
   const error = useStore((current) => current.error);
   const running = app?.race?.state === "running";
-  const ready = app?.platform.state === "connected" && app.lanes.some((lane) => lane.available);
+  const model = useStore(selectedModel);
+  const ready = app?.platform.state === "connected" && model !== undefined && app.lanes.some((lane) => withModel(lane, model).available);
   return (
     <section aria-label="Start a race" className="flex flex-col gap-4">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -71,14 +73,15 @@ export function Starter() {
           {error}
         </div>
       ) : null}
-      <PromptLine job={job} />
+      <PromptLine job={job} running={running} />
     </section>
   );
 }
 
-/** The prompt every lane gets, the model, and how approvals work: what makes the race fair. */
-function PromptLine({ job }: { readonly job: JobId }) {
-  const model = useStore((current) => current.app?.model);
+/** The prompt every lane gets, the model they all use, and how approvals work: what makes the race fair. */
+function PromptLine({ job, running }: { readonly job: JobId; readonly running: boolean }) {
+  const models = useStore((current) => current.app?.models);
+  const selected = useStore(selectedModel);
   const prompt = jobById(job).prompt;
   return (
     <div className="flex flex-col gap-2 rounded-md border border-line-muted bg-canvas-muted px-4 py-3 md:flex-row md:items-center md:gap-6">
@@ -87,13 +90,18 @@ function PromptLine({ job }: { readonly job: JobId }) {
         <p className="line-clamp-2 min-w-0 text-sm whitespace-pre-line">{prompt}</p>
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-muted">
-        {model ? (
-          <Tooltip content="Every lane uses the same model">
-            <span className="inline-flex items-center gap-1">
-              <CopilotIcon size={16} />
-              {model.name}
-            </span>
-          </Tooltip>
+        {selected && models ? (
+          <label className="inline-flex items-center gap-1.5" title="Every lane uses this model. A lane whose environment doesn't allow it sits the race out.">
+            <CopilotIcon size={16} />
+            <span className="sr-only">Model</span>
+            <select className="form-select input-sm" value={selected.id} disabled={running} onChange={(event) => pickModel(event.target.value)} aria-label="Model every lane uses">
+              {models.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+          </label>
         ) : null}
         <Tooltip content="Each lane's requests are approved automatically: they act only in that lane's own sandboxes, within its environment's network rules.">
           <span className="inline-flex items-center gap-1">
