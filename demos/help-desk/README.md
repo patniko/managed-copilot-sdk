@@ -67,7 +67,8 @@ pnpm build
 aspire run          # the platform and the demos; open the "help-desk" resource
 ```
 
-Help Desk opens at <http://localhost:7440>. To demo it:
+Help Desk opens at <http://localhost:7440>. Until you simulate, the wall shows only real tickets (live Downhill
+players, if any); the customers appear when the rush starts. To demo it:
 
 1. Pick **5**, **10**, or **25** customers (25 by default) and click **Simulate**. Watch the sessions count climb to 25
    while runtimes stay at 1 and sandboxes at 0. The first answers arrive within seconds.

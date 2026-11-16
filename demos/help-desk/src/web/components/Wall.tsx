@@ -26,8 +26,8 @@ import { ConfirmDialog } from "./ui/ConfirmDialog.js";
 import { Spinner } from "./ui/Spinner.js";
 
 /**
- * The operator's wall: live players of Downhill first, then every customer of the store, each with a private session
- * on the one shared runtime.
+ * The operator's wall: live players of Downhill first, then the simulated customers, each with a private session on
+ * the one shared runtime. Before a simulation it shows only the players.
  */
 export function Wall() {
   const phase = useStore((state) => state.phase);
@@ -78,6 +78,20 @@ export function Wall() {
         <>
           <PlayerGroup players={players} />
           <ClassificationGroups customers={customers} classification={classification} />
+        </>
+      ) : !run && phase === "ready" ? (
+        // Before a simulation, only real tickets: live players, if any. The customers appear when the rush starts.
+        <>
+          {players.length > 0 ? (
+            <section aria-label="Downhill players" className={GRID}>
+              {players.map((player) => (
+                <PlayerTile key={player.ticketId} ticket={player} />
+              ))}
+            </section>
+          ) : null}
+          <p className="mt-4 text-sm text-fg-muted">
+            Click <strong>Simulate {size} customers</strong> to start a support rush: one agent session per customer, all on the one shared runtime.
+          </p>
         </>
       ) : (
         <section aria-label="Players and customers" className={GRID}>
