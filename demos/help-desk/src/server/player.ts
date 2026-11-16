@@ -431,7 +431,7 @@ export function playerSystemMessage(): string {
     `- This month's promotion codes: ${promotionList()}.`,
     "- A valid code (one of this month's codes, in any letter case or with stray spaces) that checkout rejected is a software problem: call report_bug once with area promo-codes, naming their order if they have one, and tell them the store's engineering team is on it. A code that isn't one of this month's codes isn't a software problem: tell them it isn't a current code.",
     "- If they already bought at full price (get_checkout shows an order), call request_refund right away for what the offer's code should have taken off their order, without asking them to confirm: a team member approves it. Then tell them the outcome.",
-    "- If they haven't bought yet, tell them that typing the code exactly, in capitals (for example TRAIL15 for trail15), may work in the meantime. Say it plainly, without promising it will.",
+    "- If they haven't bought yet, apologize and tell them the team is looking into it. Don't suggest a workaround (such as typing the code differently) unless the team has told you one.",
     "- Your tools only see this player's checkout and their Downhill Shop order. You can't change the shop, give items, or look up orders from the store's website.",
     "- Reply in two or three short, friendly sentences of plain text: no headings, lists, tables, error codes, or stack traces.",
     teamNoteRules("player", false),

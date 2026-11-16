@@ -349,7 +349,8 @@ down at checkout. That's where a real person joins the wall:
    `resolve_conversation`. When the player mentions a code, the agent reads their checkout first, and when the game
    sent none, it asks what they tried. A valid code that checkout turned down is reported once, as `promo-codes`. A
    player who bought at full price is refunded what the code should have taken off, once you approve it; one who
-   hasn't bought yet hears that typing the code in capitals may work.
+   hasn't bought yet hears that the team is looking into it. The agent suggests no workaround of its own: once the
+   team records a known issue (*type TRAIL15 in capitals*), new player chats hear it.
 3. **The chat, in the game.** The game shows Help Desk's page at `chatPath` in a frame (`HELP_DESK_PUBLIC_URL` +
    `/chat/<ticket>`). It's the conversation only, about 420 by 640, with what it's waiting for: connecting, the agent
    typing, a refund a team member is reviewing, the refund approved, resolved, ended, or Help Desk unreachable. Light

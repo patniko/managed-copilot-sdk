@@ -222,7 +222,8 @@ describe("a player's tools", () => {
     for (const code of Object.keys(PROMOTIONS)) expect(text).toContain(code);
     expect(text).toContain("call report_bug once with area promo-codes");
     expect(text).toContain("call request_refund right away");
-    expect(text).toContain("in capitals (for example TRAIL15 for trail15)");
+    expect(text).toContain("Don't suggest a workaround");
+    expect(text).not.toContain("in capitals");
     expect(text).toContain("resolve_conversation");
   });
 });
