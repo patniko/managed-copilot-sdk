@@ -1221,10 +1221,13 @@ and quickstart snippet 14).
     worker model's multiplier (else the rate the coordinator measured). Compute is each sandbox's own cgroup counters
     (`cpu.stat` `usage_usec`, `memory.peak`), read with `managed.exec` through the lane's session (its own sandbox) or
     the worker's ID (workers and hands sandboxes) every poll and once more before deletion; reserved vCPU-seconds come
-    from `/v1/info` sizes and sandbox lifetimes, tokens and model time from `getMetrics()`. A lane ends when `sendAndWait` returns; its
+    from `/v1/info` sizes and sandbox lifetimes, tokens and model time from `getMetrics()`. The shared runtime, one
+    process for every shared session, is measured as a whole from the operator API's infrastructure view
+    (`runtime.usage`, read with the server's own GitHub sign-in; only operators can, every account on a local gateway
+    that names none), as CPU time and peak memory during the race. A lane ends when `sendAndWait` returns; its
     answer is checked against values the server computes, then its session is deleted with its sandboxes and workers.
     Verified live locally (2026-11-04): all six lanes on all three jobs; compute and tokens on "Split the work"
-    (2026-11-15).
+    (2026-11-15); the shared runtime's total (2026-11-16: 0.8 s CPU and 140 MiB for five lanes' brains).
   - *Incident Commander* (`demos/incident-commander`). An incident is a session of the `incident-commander`
     orchestrator (`execution: "mixed"`, network off, `maxWorkers` 4): its own sandbox in `incident-commander-triage`
     (small, network off) and workers in `incident-commander-node` (medium, the npm registry only). The app registers
@@ -1457,7 +1460,7 @@ structurally (they may add members).
 | `credentials` | durable | `store`/`status`/`revoke`/`has`, and `principalFor(accountId)` (re-verified as background work, never another account); tells core `auth.forgetCredential(token)` when a credential is removed or replaced |
 | `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`, `participate({ name, fence(id, signal), release(id, { committed, sealed }) }) → unregister` (paths into the source core's fence does not cover, such as attach); registers the `request_sandbox` platform tool and publishes `session.promoted` |
 | `orchestrator` | orchestrator | `listFor(principal, coordinatorId) → WorkerInfo[]` and `getFor(principal, coordinatorId, idOrName)` (REST `GET /v1/sessions/:id/workers[/:workerId]`); registers the seven worker platform tools for orchestrator sessions, answers approved workers' permission prompts, and publishes `worker.*` events (see Orchestrator) |
-| `coreOperator` | core | Read-only operator views for the operator module: `gateway()`, `info()`, `storage()`, `runtime()`, `sessions(query)`, `session(id)`, `sessionCounts()`, `connections()`, `upstreams()`, `accounts()`, `accountDirectory()`, `environments()`, `customizationFile(env, path)`, `events(query)`, `toOperatorEvent(event, owner)`. Other modules add optional `operator*` members to their own services (`sandboxes.operatorStatus`/`operatorSandboxes`/`operatorStop`, `policy.operatorEgress`/`operatorBlocks`, `actions.operatorActions`/`operatorActionCounts`, `webhooks.operator*`/`retry`, `schedules.operator*`/`schedulerStatus`, `credentials.operatorStatuses`), read through `modules/operator/contract.ts` |
+| `coreOperator` | core | Read-only operator views for the operator module: `gateway()`, `info()`, `storage()`, `runtime()` (async: it reads the runtime process's CPU time and memory, `modules/core/process-usage.ts`, at most every 2 s), `sessions(query)`, `session(id)`, `sessionCounts()`, `connections()`, `upstreams()`, `accounts()`, `accountDirectory()`, `environments()`, `customizationFile(env, path)`, `events(query)`, `toOperatorEvent(event, owner)`. Other modules add optional `operator*` members to their own services (`sandboxes.operatorStatus`/`operatorSandboxes`/`operatorStop`, `policy.operatorEgress`/`operatorBlocks`, `actions.operatorActions`/`operatorActionCounts`, `webhooks.operator*`/`retry`, `schedules.operator*`/`schedulerStatus`, `credentials.operatorStatuses`), read through `modules/operator/contract.ts` |
 
 `/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`, while
 `sandboxes.available` is not `false`), `artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background`

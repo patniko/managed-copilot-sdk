@@ -169,12 +169,13 @@ export class CoreOperator {
     return { dataDir, databaseBytes: size("gateway.db"), walBytes: size("gateway.db-wal") };
   }
 
-  runtime(): SharedRuntimeStatus {
+  async runtime(): Promise<SharedRuntimeStatus> {
     const runtime = this.#options.runtime;
     const sessions = this.#options.manager.operatorLive().filter((live) => live.placement === "shared" && live.resident).length;
     if (!runtime) return { state: "disabled", external: false, generation: 0, restarts: 0, sessions };
     const status = runtime.status();
-    return { ...status, ...(status.lastError ? { lastError: redactText(status.lastError) } : {}), sessions };
+    const usage = await runtime.usage();
+    return { ...status, ...(status.lastError ? { lastError: redactText(status.lastError) } : {}), sessions, ...(usage ? { usage } : {}) };
   }
 
   // --- Sessions ---------------------------------------------------------------------------------------------------

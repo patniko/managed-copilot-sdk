@@ -4,12 +4,12 @@ import { approveAll, type PermissionHandler, type SessionEvent, type UsageGetMet
 import { isManagedCopilotError, type PlatformEvent, type WorkerEventData, type WorkerInfo } from "@managed-copilot/sdk";
 import { jobById, type Check, type JobId } from "../shared/jobs.js";
 import { LANES, withModel, type Lane, type LaneId } from "../shared/lanes.js";
-import type { LaneRun, Phase, PhaseKind, RaceSnapshot, SandboxState, SandboxToken, SandboxUsage } from "../shared/types.js";
+import type { LaneRun, Phase, PhaseKind, RaceSnapshot, RuntimeShare, SandboxState, SandboxToken, SandboxUsage, UsageSample } from "../shared/types.js";
 import { expectedValue, judge } from "./checks.js";
 import type { RaceConfig } from "./config.js";
 import { errorText, RaceError } from "./errors.js";
 import { log } from "./log.js";
-import type { LaneSession, RacePlatform, SandboxSize } from "./platform.js";
+import type { LaneSession, RacePlatform, RuntimeReading, SandboxSize } from "./platform.js";
 import type { RaceStore } from "./store.js";
 
 /** Every lane session's ID starts with this, so sessions a crash left behind are found and deleted. */
@@ -372,6 +372,59 @@ class LaneRunner {
   }
 }
 
+/**
+ * The shared runtime during one race: CPU time since the race started (across a runtime restart), and its memory.
+ * Every shared session on the gateway counts, not only the race's.
+ */
+class RuntimeMeter {
+  readonly #read: () => Promise<RuntimeReading>;
+  readonly #now: () => number;
+  readonly #changed: () => void;
+  #last: RuntimeReading | undefined;
+  #cpuMs = 0;
+  #peak = 0;
+  #samples: UsageSample[] = [];
+  #reading: Promise<void> | undefined;
+  share: RuntimeShare | undefined;
+  /** Why its usage isn't shown. */
+  note: string | undefined;
+
+  constructor(read: () => Promise<RuntimeReading>, now: () => number, changed: () => void) {
+    this.#read = read;
+    this.#now = now;
+    this.#changed = changed;
+  }
+
+  /** Takes a reading, unless one is in flight (then waits for it). */
+  read(): Promise<void> {
+    if (this.note) return Promise.resolve();
+    this.#reading ??= this.#take().finally(() => (this.#reading = undefined));
+    return this.#reading;
+  }
+
+  async #take(): Promise<void> {
+    let reading: RuntimeReading;
+    try {
+      reading = await this.#read();
+    } catch (error) {
+      // Before the first reading, a failure says why it isn't shown; after it, a missed reading is skipped.
+      if (this.share) return log.debug("Couldn't read the shared runtime's usage", { error: errorText(error) });
+      this.note = error instanceof RaceError ? error.message : `Couldn't read the shared runtime's usage: ${errorText(error)}`;
+      return this.#changed();
+    }
+    const last = this.#last;
+    // A new runtime process counts from zero again.
+    if (last) this.#cpuMs += reading.generation !== last.generation || reading.cpuMs < last.cpuMs ? reading.cpuMs : reading.cpuMs - last.cpuMs;
+    this.#last = reading;
+    this.#peak = Math.max(this.#peak, reading.memoryBytes);
+    let samples = [...this.#samples, { at: this.#now(), cpuMs: this.#cpuMs, memoryBytes: reading.memoryBytes }];
+    if (samples.length > HISTORY_LIMIT) samples = samples.filter((_, index) => index % 2 === 0 || index === samples.length - 1);
+    this.#samples = samples;
+    this.share = { cpuMs: this.#cpuMs, memoryBytes: reading.memoryBytes, peakMemoryBytes: this.#peak, samples };
+    this.#changed();
+  }
+}
+
 interface ActiveRace {
   readonly id: string;
   readonly job: JobId;
@@ -382,6 +435,7 @@ interface ActiveRace {
   state: RaceSnapshot["state"];
   readonly runners: readonly LaneRunner[];
   readonly skipped: ReadonlyMap<LaneId, string>;
+  readonly runtime: RuntimeMeter;
   readonly done: Promise<void>;
 }
 
@@ -440,6 +494,8 @@ export class RaceManager {
           error: race.skipped.get(lane.id) ?? "Not available on this deployment.",
         };
       }),
+      ...(race.runtime.share ? { runtime: race.runtime.share } : {}),
+      ...(race.runtime.note ? { runtimeNote: race.runtime.note } : {}),
     };
   }
 
@@ -469,12 +525,17 @@ export class RaceManager {
       state: "running",
       runners,
       skipped,
+      runtime: new RuntimeMeter(() => this.#platform.runtimeUsage(), this.#now, changed),
       done: new Promise<void>((resolve) => (settle = resolve)),
     };
     this.#active = race;
+    void race.runtime.read();
+    const metering = setInterval(() => void race.runtime.read(), this.#config.pollIntervalMs);
     log.info("Race started", { race: race.id, job: jobId, model: model.id, lanes: runners.map((runner) => runner.lane.id).join(",") });
-    void Promise.all(runners.map((runner) => this.#runLane(race, runner, job.prompt, job.checks))).then(() => {
+    void Promise.all(runners.map((runner) => this.#runLane(race, runner, job.prompt, job.checks))).then(async () => {
+      clearInterval(metering);
       race.finishedAt = this.#now();
+      await race.runtime.read();
       if (race.state === "running") race.state = "finished";
       const snapshot = this.snapshot()!;
       this.#last = snapshot;

@@ -287,6 +287,19 @@ function RuntimeSection({ runtime, health }: { readonly runtime: SharedRuntimeSt
             {pluralize(runtime.sessions, "session")}
           </Link>
         </Field>
+        {runtime.usage ? (
+          <>
+            <Field label="Memory" hint="The runtime process's resident memory, shared by every open session">
+              <span className="tabular-nums">
+                {formatBytes(runtime.usage.memoryBytes)}
+                {runtime.usage.peakMemoryBytes !== undefined ? <span className="text-fg-muted"> (peak {formatBytes(runtime.usage.peakMemoryBytes)})</span> : null}
+              </span>
+            </Field>
+            <Field label="CPU time" hint="CPU the runtime process has used since it started">
+              <span className="tabular-nums">{formatMilliseconds(runtime.usage.cpuMs)}</span>
+            </Field>
+          </>
+        ) : null}
       </FieldGrid>
     </Card>
   );

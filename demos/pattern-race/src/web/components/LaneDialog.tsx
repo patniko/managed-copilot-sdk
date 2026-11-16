@@ -132,15 +132,15 @@ function Details({ race, run, modelName, now }: { readonly race: RaceSnapshot; r
         </Section>
         <Section title="Compute">
           <dl className="grid grid-cols-2 gap-x-6 gap-y-1.5 sm:grid-cols-3">
-            <Fact label="Sandbox CPU time">{cpu === undefined ? "Not measured" : `${formatSeconds(cpu)}${partly ? "+" : ""}`}</Fact>
-            <Fact label="Sandbox peak memory">{memory === undefined ? "Not measured" : `${formatBytes(memory)}${partly ? "+" : ""}`}</Fact>
+            <Fact label="Sandbox CPU time">{run.sandboxes.length === 0 ? "None of its own" : cpu === undefined ? "Not measured" : `${formatSeconds(cpu)}${partly ? "+" : ""}`}</Fact>
+            <Fact label="Sandbox peak memory">{run.sandboxes.length === 0 ? "None of its own" : memory === undefined ? "Not measured" : `${formatBytes(memory)}${partly ? "+" : ""}`}</Fact>
             <Fact label="vCPU-seconds held">{formatCount(Math.round(reservedCpuSeconds(run, now) * 10) / 10)}</Fact>
             <Fact label="Waiting for sandboxes">{formatSeconds(sandboxWaitMs(run, now))}</Fact>
           </dl>
           <p className="mt-2 text-xs text-fg-muted">
             {run.sandboxes.length
               ? "Read from each sandbox's own counters with managed.exec while it ran; every process in it counts (setup, any agent inside, and every command). vCPU-seconds held is each sandbox's vCPUs times how long it existed, busy or idle."
-              : "It had no sandbox. Its agent ran on the shared runtime, which every shared session shares, so its share isn't measured."}
+              : "It had no sandbox. Its agent ran on the shared runtime, which every shared session shares; the race shows that runtime's total below the lanes."}
             {partly ? " Some sandboxes ended before they could be read, so the totals are at least these." : ""}
           </p>
         </Section>

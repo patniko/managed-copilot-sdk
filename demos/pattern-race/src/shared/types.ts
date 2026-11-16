@@ -157,6 +157,20 @@ export interface LaneRun {
   readonly place?: number;
 }
 
+/**
+ * The shared runtime during a race: one process that every shared session on the gateway uses (the brains of the lanes
+ * without a sandbox, and any other app's shared sessions), read from the operator API.
+ */
+export interface RuntimeShare {
+  /** CPU time it used since the race started, in milliseconds. */
+  readonly cpuMs: number;
+  /** The memory it held at the latest reading, and the most during the race, in bytes. */
+  readonly memoryBytes: number;
+  readonly peakMemoryBytes: number;
+  /** Its usage over the race (CPU time since the race started). */
+  readonly samples: readonly UsageSample[];
+}
+
 export interface RaceSnapshot {
   readonly id: string;
   readonly job: JobId;
@@ -167,6 +181,10 @@ export interface RaceSnapshot {
   readonly finishedAt?: number;
   readonly state: "running" | "finished" | "stopped";
   readonly lanes: readonly LaneRun[];
+  /** The shared runtime's usage during the race, when this deployment shows it. */
+  readonly runtime?: RuntimeShare;
+  /** Why the shared runtime's usage isn't shown. */
+  readonly runtimeNote?: string;
 }
 
 export interface AppState {

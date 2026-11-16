@@ -253,6 +253,12 @@ export interface SharedRuntimeStatus {
   readonly lastError?: string;
   /** Shared sessions open on it now. */
   readonly sessions: number;
+  /**
+   * The runtime process's resource use, when the gateway started it (not `external`) and the operating system answers:
+   * CPU time since it started, the memory it holds, and (Linux, Windows) the most it has held. Every shared session
+   * on this gateway shares it.
+   */
+  readonly usage?: { readonly cpuMs: number; readonly memoryBytes: number; readonly peakMemoryBytes?: number };
 }
 
 export interface SandboxBackendStatus {

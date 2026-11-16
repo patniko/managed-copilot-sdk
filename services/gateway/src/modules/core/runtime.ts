@@ -10,7 +10,11 @@ import { promisify } from "node:util";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
 import type { Logger } from "../../log.js";
 import type { UpstreamInfo } from "./contracts.js";
+import { readProcessUsage, type ProcessUsage } from "./process-usage.js";
 import { RpcEndpoint, RpcError, streamTransport, type IncomingRequestContext, type MessageTransport, type RequestOptions } from "./rpc.js";
+
+/** How long a runtime usage reading is reused. */
+const USAGE_MAX_AGE_MS = 2_000;
 
 /** Minimum and maximum protocol versions this gateway relays (SDK 1.0.31 speaks version 3). */
 export const MIN_PROTOCOL_VERSION = 3;
@@ -208,6 +212,8 @@ export class SharedRuntime {
   #connectedAt: string | undefined;
   /** Connections lost since the gateway started (each one restarts the runtime). */
   #restarts = 0;
+  /** The latest usage reading, so frequent asks share one. */
+  #usage: { readonly pid: number; readonly at: number; readonly reading: Promise<ProcessUsage | undefined> } | undefined;
 
   constructor(options: SharedRuntimeOptions) {
     this.#options = options;
@@ -227,6 +233,20 @@ export class SharedRuntime {
       restarts: this.#restarts,
       ...(this.#lastError ? { lastError: this.#lastError } : {}),
     };
+  }
+
+  /**
+   * What the runtime process the gateway started has used: CPU time since it started and the memory it holds. Read at
+   * most every 2 seconds (Windows starts PowerShell to ask); undefined for an external runtime or none.
+   */
+  usage(): Promise<ProcessUsage | undefined> {
+    const pid = this.#child?.pid;
+    if (pid === undefined || this.external) return Promise.resolve(undefined);
+    const cached = this.#usage;
+    if (cached && cached.pid === pid && Date.now() - cached.at < USAGE_MAX_AGE_MS) return cached.reading;
+    const reading = readProcessUsage(pid);
+    this.#usage = { pid, at: Date.now(), reading };
+    return reading;
   }
 
   get state(): RuntimeState {

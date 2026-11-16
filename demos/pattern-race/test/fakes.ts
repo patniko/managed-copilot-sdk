@@ -12,7 +12,7 @@ import type {
 import type { PlatformEvent, SessionInfo, WorkerInfo } from "@managed-copilot/sdk";
 import { LANES, type LaneId } from "../src/shared/lanes.js";
 import type { LaneAvailability, PlatformStatus, SandboxUsage } from "../src/shared/types.js";
-import type { LaneSession, RacePlatform, SandboxSize } from "../src/server/platform.js";
+import type { LaneSession, RacePlatform, RuntimeReading, SandboxSize } from "../src/server/platform.js";
 
 export class FakeSession implements LaneSession {
   readonly sessionId: string;
@@ -154,6 +154,14 @@ export class FakePlatform implements RacePlatform {
   /** What each session's sandbox reports, by the session it's read through; unset ones aren't readable. */
   readonly usages = new Map<string, SandboxUsage>();
   readonly measured: string[] = [];
+
+  /** What the shared runtime reports next, or why it can't. */
+  runtime: RuntimeReading | Error = { cpuMs: 10_000, memoryBytes: 300 * 1024 ** 2, sessions: 4, generation: 1 };
+
+  async runtimeUsage(): Promise<RuntimeReading> {
+    if (this.runtime instanceof Error) throw this.runtime;
+    return this.runtime;
+  }
 
   async sandboxUsage(sessionId: string): Promise<SandboxUsage | undefined> {
     this.measured.push(sessionId);

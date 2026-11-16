@@ -1,13 +1,17 @@
 // The connection to Managed Copilot: one stock CopilotClient per lane's environment, kept healthy, plus the REST helpers
 // the race reads sessions and workers with. Everything here is the public SDK.
 import type { AssistantMessageEvent, CopilotClient, MessageOptions, ModelInfo, SessionConfig, SessionEvent, UsageGetMetricsResult } from "@github/copilot-sdk";
-import { isManagedCopilotError, ManagedCopilot, type DeploymentInfo, type PlatformEvent, type SessionInfo, type WorkerInfo } from "@managed-copilot/sdk";
-import { SANDBOX_SIZES } from "@managed-copilot/protocol";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { isManagedCopilotError, ManagedCopilot, ManagedCopilotError, type DeploymentInfo, type PlatformEvent, type SessionInfo, type WorkerInfo } from "@managed-copilot/sdk";
+import { OPERATOR_ROUTES, SANDBOX_SIZES, TOKEN_ENVS, type OperatorInfrastructure } from "@managed-copilot/protocol";
 import { LANES, laneById, withModel, type LaneId } from "../shared/lanes.js";
 import type { LaneAvailability, ModelChoice, PlatformStatus, SandboxUsage } from "../shared/types.js";
 import type { RaceConfig } from "./config.js";
 import { RaceError } from "./errors.js";
 import { log } from "./log.js";
+
+const execFileAsync = promisify(execFile);
 
 /** The parts of a stock `CopilotSession` a lane uses. */
 export interface LaneSession {
@@ -42,8 +46,53 @@ export interface RacePlatform {
   measurable(environment: string): boolean;
   /** What a session's sandbox used so far, from its own cgroup; undefined when its counters aren't readable. */
   sandboxUsage(sessionId: string): Promise<SandboxUsage | undefined>;
+  /** The shared runtime's process usage (every shared session's); fails in plain words where this account can't see it. */
+  runtimeUsage(): Promise<RuntimeReading>;
   /** Deletes the account's sessions in the lanes' environments whose IDs start with `prefix` (a race cut short). */
   deleteLeftovers(prefix: string): Promise<number>;
+}
+
+/** One reading of the shared runtime process: CPU time since it started, its memory, and its open shared sessions. */
+export interface RuntimeReading {
+  readonly cpuMs: number;
+  readonly memoryBytes: number;
+  readonly peakMemoryBytes?: number;
+  readonly sessions: number;
+  /** Increments with every new runtime process (its CPU counter starts again). */
+  readonly generation: number;
+}
+
+/** What the operator API's infrastructure view says about the shared runtime, as far as a race needs. */
+export function runtimeReading(infrastructure: Pick<OperatorInfrastructure, "runtime">): RuntimeReading {
+  const runtime = infrastructure.runtime;
+  if (runtime.state === "disabled") throw new RaceError("runtime_unavailable", "This deployment has no shared runtime.");
+  if (!runtime.usage) {
+    throw new RaceError(
+      "runtime_unavailable",
+      runtime.external ? "The shared runtime runs outside the gateway here, so the gateway can't read its usage." : "The gateway doesn't report the shared runtime's usage right now.",
+    );
+  }
+  const { cpuMs, memoryBytes, peakMemoryBytes } = runtime.usage;
+  return { cpuMs, memoryBytes, ...(peakMemoryBytes !== undefined ? { peakMemoryBytes } : {}), sessions: runtime.sessions, generation: runtime.generation };
+}
+
+async function ghAuthToken(): Promise<string | undefined> {
+  const { stdout } = await execFileAsync("gh", ["auth", "token"], { windowsHide: true, timeout: 10_000 });
+  return stdout.trim() || undefined;
+}
+
+/**
+ * This server's GitHub token, found the way `ManagedCopilot.connect()` finds one. It's passed to `connect`, so the one
+ * operator route the race reads (the shared runtime's usage) acts as exactly the account the connection does.
+ */
+export async function resolveGitHubToken(env: Readonly<Record<string, string | undefined>> = process.env, gh: () => Promise<string | undefined> = ghAuthToken): Promise<string> {
+  for (const name of TOKEN_ENVS) {
+    const value = env[name]?.trim();
+    if (value) return value;
+  }
+  const fromGh = await gh().catch(() => undefined);
+  if (fromGh) return fromGh;
+  throw new ManagedCopilotError("authentication_required", `Sign in with GitHub first: set ${TOKEN_ENVS[0]}, or run \`gh auth login\`.`);
 }
 
 const EVENTS = ["session.promoted", "worker.started", "worker.idle", "worker.failed", "worker.stopped"] as const;
@@ -137,6 +186,8 @@ export class Platform implements RacePlatform {
   readonly #config: RaceConfig;
   readonly #isBusy: () => boolean;
   #managed: ManagedCopilot | undefined;
+  /** The GitHub token `#managed` connected with; it never leaves this process except to the deployment. */
+  #token: string | undefined;
   #clients = new Map<LaneId, CopilotClient>();
   #status: PlatformStatus = { state: "connecting" };
   #lanes: LaneAvailability[] = LANES.map((lane) => ({ lane: lane.id, available: false, reason: "Connecting to Managed Copilot…" }));
@@ -225,6 +276,24 @@ export class Platform implements RacePlatform {
     return declared !== undefined && declared.exec !== false;
   }
 
+  async runtimeUsage(): Promise<RuntimeReading> {
+    const managed = this.#requireManaged();
+    let response: Response;
+    try {
+      response = await fetch(new URL(OPERATOR_ROUTES.infrastructure, managed.url), {
+        headers: { authorization: `Bearer ${this.#token}`, accept: "application/json" },
+        signal: AbortSignal.timeout(10_000),
+      });
+    } catch (error) {
+      throw new RaceError("runtime_unavailable", `Couldn't ask for the shared runtime's usage: ${(error as Error).message}`);
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new RaceError("runtime_unavailable", `Only operators of this deployment can see the shared runtime's usage, and @${managed.account.login} isn't one.`);
+    }
+    if (!response.ok) throw new RaceError("runtime_unavailable", `The gateway answered ${response.status} when asked for the shared runtime's usage.`);
+    return runtimeReading((await response.json()) as OperatorInfrastructure);
+  }
+
   async sandboxUsage(sessionId: string): Promise<SandboxUsage | undefined> {
     const result = await this.#requireManaged().exec(sessionId, USAGE_PROBE, { timeoutMs: 15_000 });
     return result.exitCode === 0 ? parseUsage(result.output) : undefined;
@@ -291,7 +360,8 @@ export class Platform implements RacePlatform {
     let managed: ManagedCopilot | undefined;
     const clients = new Map<LaneId, CopilotClient>();
     try {
-      const connecting = ManagedCopilot.connect({ clientName: "pattern-race" });
+      const token = await resolveGitHubToken();
+      const connecting = ManagedCopilot.connect({ clientName: "pattern-race", gitHubToken: token });
       try {
         managed = await deadline(connecting, 20_000, "Managed Copilot");
       } catch (error) {
@@ -318,6 +388,7 @@ export class Platform implements RacePlatform {
       if (this.#stopped) throw new Error("stopped");
       for (const type of EVENTS) managed.on(type, (event) => this.#event(event));
       this.#managed = managed;
+      this.#token = token;
       this.#clients = clients;
       this.#lanes = lanes;
       this.#models = models;

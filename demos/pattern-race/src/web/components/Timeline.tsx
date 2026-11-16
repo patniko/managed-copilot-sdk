@@ -1,7 +1,7 @@
-import { CheckCircleFillIcon, SquareFillIcon, TrophyIcon, XCircleFillIcon } from "@primer/octicons-react";
+import { CheckCircleFillIcon, CpuIcon, SquareFillIcon, TrophyIcon, XCircleFillIcon } from "@primer/octicons-react";
 import type { ReactNode } from "react";
 import { LANES } from "../../shared/lanes.js";
-import { cpuMs, elapsedMs, formatBytes, formatClock, formatSeconds, ordinal, peakMemoryBytes } from "../../shared/score.js";
+import { cpuMs, elapsedMs, formatBytes, formatClock, formatSeconds, ordinal, peakMemoryBytes, runtimeBrains } from "../../shared/score.js";
 import { axisFor, cpuSeries, memorySeries, segments, usageStart, type Point } from "../../shared/timeline.js";
 import type { LaneRun, PhaseKind, RaceSnapshot, SandboxToken } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
@@ -59,13 +59,14 @@ export function Timeline() {
         </Row>
       </div>
       <ol>
+        <RuntimeLane race={race} x={x} axis={axis} />
         {lanes.map((run) => (
           <Lane key={run.lane} race={race} run={run} now={now} axis={axis} x={x} series={series.get(run.lane)!} cpuMax={cpuMax} memoryMax={memoryMax} />
         ))}
       </ol>
       <p className="border-t border-line-muted px-4 py-2 text-xs text-fg-muted">
         Charts: vCPUs its sandboxes kept busy (up to {formatCores(cpuMax)}) and the memory they held (up to {formatBytes(memoryMax)}), read from each sandbox&apos;s own counters every
-        few seconds, on one scale for every lane. A lane with no sandbox has nothing to chart: the shared runtime it uses isn&apos;t counted.
+        few seconds, on one scale for every lane. A lane with no sandbox has no chart of its own: its brain ran on the shared runtime, charted at the top on its own scale together with every other shared session on the gateway.
       </p>
     </section>
   );
@@ -144,10 +145,58 @@ function Lane({ race, run, now, axis, x, series, cpuMax, memoryMax }: LaneProps)
                 <Spark points={series.memory} from={series.from} max={memoryMax} x={x} tone="memory" label="memory" />
               </>
             ) : (
-              <div className="flex h-[3.75rem] items-center text-xs text-fg-muted">{skipped ? "" : "No sandbox: nothing to measure"}</div>
+              <div className="flex h-[3.75rem] items-center text-xs text-fg-muted">{skipped ? "" : "No sandbox: its brain ran on the shared runtime (top)"}</div>
             )}
           </div>
           {run.finishedAt !== undefined ? <Finish run={run} left={x(run.finishedAt)} /> : null}
+        </div>
+      </Row>
+    </li>
+  );
+}
+
+/**
+ * The shared runtime's swimlane: one process for every shared session on the gateway, so the brains of the lanes
+ * without a sandbox show up here together, on their own scale.
+ */
+function RuntimeLane({ race, x, axis }: { readonly race: RaceSnapshot; readonly x: (at: number) => number; readonly axis: { readonly span: number; readonly step: number } }) {
+  const runtime = race.runtime;
+  const shared = runtimeBrains(race);
+  const cpu = runtime ? cpuSeries(runtime.samples, race.startedAt) : [];
+  const memory = runtime ? memorySeries(runtime.samples) : [];
+  const cpuMax = Math.max(1, ...cpu.map((point) => point.value));
+  const memoryMax = Math.max(MIN_MEMORY_SCALE, ...memory.map((point) => point.value));
+  return (
+    <li className="border-t border-line-muted bg-canvas-muted px-4 py-2.5">
+      <Row
+        label={
+          <div className="min-w-0" title="One process for every shared session on this gateway">
+            <span className="flex items-center gap-1 text-sm font-semibold">
+              <CpuIcon size={14} className="shrink-0 text-fg-muted" />
+              Shared runtime
+            </span>
+            <span className="line-clamp-3 text-xs text-fg-muted" title={shared.join(", ")}>{shared.length ? `Thinking here: ${shared.join(", ")}` : "No lane thought here"}</span>
+          </div>
+        }
+        readout={
+          runtime ? (
+            <dl className="flex flex-col gap-1 text-xs tabular-nums">
+              <dd className="font-semibold text-fg-accent">{formatSeconds(runtime.cpuMs)} CPU</dd>
+              <dd className="font-semibold text-fg-done">{formatBytes(runtime.peakMemoryBytes)} peak</dd>
+            </dl>
+          ) : null
+        }
+      >
+        <div className="relative">
+          <Grid axis={axis} />
+          {runtime ? (
+            <div className="relative flex flex-col gap-1">
+              <Spark points={cpu} from={race.startedAt} max={cpuMax} x={x} stepped tone="cpu" label={`CPU (up to ${formatCores(cpuMax)})`} />
+              <Spark points={memory} from={race.startedAt} max={memoryMax} x={x} tone="memory" label={`memory (up to ${formatBytes(memoryMax)})`} />
+            </div>
+          ) : (
+            <div className="relative flex h-[3.75rem] items-center text-xs text-fg-muted">{race.runtimeNote ?? (race.state === "running" ? "Reading the shared runtime…" : "Not read during this race.")}</div>
+          )}
         </div>
       </Row>
     </li>

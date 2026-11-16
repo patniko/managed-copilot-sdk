@@ -27,8 +27,10 @@ has no shell, so it started sub-agents looking for one and answered that it coul
   correct lanes are highlighted.
 - **What each shape really costs.** Each lane counts the CPU time and peak memory its sandboxes used, read from each
   sandbox's own counters while it runs, and the tokens and model time its own session spent. A brain inside a sandbox
-  costs that sandbox the agent's memory; a worker per part costs a sandbox per part; a lane with no sandbox costs none.
-  Its details add the vCPU-seconds its sandboxes held (busy or idle) and how
+  costs that sandbox the agent's memory; a worker per part costs a sandbox per part. A brain on the shared runtime
+  costs a share of one process that every shared session uses, so a lane with no sandbox shows **shared**, and the
+  shared runtime's own total during the race (its CPU time and the most memory it held) is shown once, under the
+  scorecard and at the top of the timeline. Its details add the vCPU-seconds its sandboxes held (busy or idle) and how
   long it waited for sandboxes to start.
 - **The race over time.** Below the lanes, the race timeline gives each lane a swimlane on one clock: what it was
   doing (starting, thinking, running commands, moving into a sandbox, working through workers or sub-agents), a bar
@@ -157,11 +159,16 @@ pnpm dev                                       # server and UI with live reload 
   its own sandbox, the worker's ID for a worker or hands sandbox. Both counters only grow, so the last reading before
   the sandbox is deleted is what it used: setup, any agent inside it, and every command, plus a few milliseconds for
   the read itself. A sandbox deleted before its first reading (a worker stopped early) leaves the totals marked `+`;
-  an environment with `exec: false` isn't measured. The shared runtime is shared by every shared session, so a brain
-  there isn't counted. A sandbox's size (from `/v1/info`) and when it appeared, was ready, and was deleted give the
+  an environment with `exec: false` isn't measured. A sandbox's size (from `/v1/info`) and when it appeared, was ready, and was deleted give the
   vCPU-seconds it held and the time the lane waited for sandboxes. Tokens and model time are its own session's
   `getMetrics()` (sub-agents included); each worker is a session of its own the race never attaches to, so a
   coordinator's tokens are marked `+`.
+- **The shared runtime is measured as a whole.** Every shared session on the gateway, the race's and any other app's,
+  runs in one runtime process, so it can't be split per lane. The server reads that process's CPU time and memory from
+  the operator API's infrastructure view (`/v1/operator/infrastructure`, `runtime.usage`) with the same GitHub sign-in
+  it connects with, when the race starts, on every poll, and when it ends, and shows the CPU time used and the most
+  memory held during the race. Only operators can read the operator API: on a local gateway that names no operators,
+  that's every account; elsewhere, an account that isn't an operator sees why instead of the numbers.
 - **A lane ends when its answer arrives.** Its stopwatch stops at `sendAndWait`'s answer, the answer is checked, and
   then its session is deleted, which deletes its sandbox, hands sandboxes, and workers. A failed lane says why in plain
   words; **Stop** cancels every running lane (`session.abort()`) and deletes their sessions.

@@ -100,18 +100,19 @@ function Compute({ run }: { readonly run: LaneRun | undefined }) {
   const cpu = raced ? cpuMs(raced) : undefined;
   const memory = raced ? peakMemoryBytes(raced) : undefined;
   const partly = raced ? partlyMeasured(raced) : false;
-  const noSandbox = raced?.sandboxes.length === 0 ? " None: it had no sandbox, and the shared runtime isn't counted." : "";
+  const shared = raced?.sandboxes.length === 0;
+  const onRuntime = " It had no sandbox: its brain ran on the shared runtime, which every shared session shares. Its total is below the lanes.";
   return (
     <div className="grid grid-cols-3 border-t border-line-muted">
       <Stat
         label="CPU time"
-        value={cpu === undefined ? "–" : `${formatSeconds(cpu)}${partly ? "+" : ""}`}
-        hint={`CPU time its sandboxes used, from their own counters: setup, any agent inside, and every command.${noSandbox}`}
+        value={shared ? "shared" : cpu === undefined ? "–" : `${formatSeconds(cpu)}${partly ? "+" : ""}`}
+        hint={shared ? onRuntime.trim() : "CPU time its sandboxes used, from their own counters: setup, any agent inside, and every command."}
       />
       <Stat
         label="peak memory"
-        value={memory === undefined ? "–" : `${formatBytes(memory)}${partly ? "+" : ""}`}
-        hint={`The most memory each of its sandboxes held, added up. An agent inside one counts.${noSandbox}`}
+        value={shared ? "shared" : memory === undefined ? "–" : `${formatBytes(memory)}${partly ? "+" : ""}`}
+        hint={shared ? onRuntime.trim() : "The most memory each of its sandboxes held, added up. An agent inside one counts."}
       />
       <Stat
         label="tokens"

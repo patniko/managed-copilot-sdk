@@ -1,6 +1,7 @@
 import { ManagedCopilotError, type DeploymentInfo, type EnvironmentInfo } from "@managed-copilot/sdk";
 import { describe, expect, it } from "vitest";
-import { describeConnectError, describeLanes, parseUsage, reconnectDelay } from "../src/server/platform.js";
+import type { SharedRuntimeStatus } from "@managed-copilot/protocol";
+import { describeConnectError, describeLanes, parseUsage, reconnectDelay, resolveGitHubToken, runtimeReading } from "../src/server/platform.js";
 import { withModel } from "../src/shared/lanes.js";
 
 const network = { access: "all", allowedDomains: [] } as unknown as EnvironmentInfo["network"];
@@ -96,5 +97,25 @@ describe("a sandbox's usage", () => {
     // cgroup v1 counts CPU in nanoseconds; a kernel without memory.peak still has the current reading.
     expect(parseUsage("cpu_ns 2500000000\npeak \nnow 1048576\n")).toEqual({ cpuMs: 2500, peakMemoryBytes: 1_048_576, memoryBytes: 1_048_576 });
     expect(parseUsage("cpu_ns \npeak \nnow \n")).toBeUndefined();
+  });
+});
+
+describe("the shared runtime's usage", () => {
+  const status = (fields: Partial<SharedRuntimeStatus>): { runtime: SharedRuntimeStatus } => ({ runtime: { state: "running", external: false, generation: 2, restarts: 0, sessions: 5, ...fields } });
+
+  it("reads it from the operator API's infrastructure view", () => {
+    expect(runtimeReading(status({ usage: { cpuMs: 4_200, memoryBytes: 300, peakMemoryBytes: 400 } }))).toEqual({ cpuMs: 4_200, memoryBytes: 300, peakMemoryBytes: 400, sessions: 5, generation: 2 });
+  });
+
+  it("says why it can't, in plain words", () => {
+    expect(() => runtimeReading(status({ state: "disabled" }))).toThrow("This deployment has no shared runtime.");
+    expect(() => runtimeReading(status({ external: true }))).toThrow("The shared runtime runs outside the gateway here, so the gateway can't read its usage.");
+    expect(() => runtimeReading(status({}))).toThrow("The gateway doesn't report the shared runtime's usage right now.");
+  });
+
+  it("asks with the same GitHub sign-in the SDK would find", async () => {
+    expect(await resolveGitHubToken({ GH_TOKEN: " gho_env " }, async () => "gho_gh")).toBe("gho_env");
+    expect(await resolveGitHubToken({}, async () => "gho_gh")).toBe("gho_gh");
+    await expect(resolveGitHubToken({}, async () => undefined)).rejects.toMatchObject({ code: "authentication_required" });
   });
 });

@@ -205,6 +205,32 @@ describe("a race", () => {
     await races.close();
   });
 
+  it("measures the shared runtime over the race, across a restart, and says why when it can't", async () => {
+    const { platform, races, tick } = setup();
+    platform.runtime = { cpuMs: 50_000, memoryBytes: 300, sessions: 2, generation: 1 };
+    races.start("answer");
+    await vi.waitFor(() => expect(races.snapshot()!.runtime).toMatchObject({ cpuMs: 0, memoryBytes: 300 }));
+    tick(2_500);
+    platform.runtime = { cpuMs: 51_500, memoryBytes: 500, sessions: 7, generation: 1 };
+    await vi.waitFor(() => expect(races.snapshot()!.runtime).toMatchObject({ cpuMs: 1_500, peakMemoryBytes: 500 }));
+    // A new runtime process counts from zero: its 200 ms add to the race's total.
+    platform.runtime = { cpuMs: 200, memoryBytes: 100, sessions: 1, generation: 2 };
+    await vi.waitFor(() => expect(races.snapshot()!.runtime).toMatchObject({ cpuMs: 1_700, memoryBytes: 100, peakMemoryBytes: 500 }));
+    // A reading that fails after the first is skipped.
+    platform.runtime = new Error("fetch failed");
+    for (const id of ["shared", "isolated", "promotable", "direct", "delegate", "mixed"] as const) (await platform.session(id)).answer("$925");
+    await vi.waitFor(() => expect(races.snapshot()!.state).toBe("finished"));
+    expect(races.snapshot()!.runtime!.cpuMs).toBe(1_700);
+    expect(races.snapshot()!.runtimeNote).toBeUndefined();
+
+    const refused = setup();
+    refused.platform.runtime = new RaceError("runtime_unavailable", "Only operators of this deployment can see the shared runtime's usage, and @octocat isn't one.");
+    refused.races.start("answer");
+    await vi.waitFor(() => expect(refused.races.snapshot()!.runtimeNote).toBe("Only operators of this deployment can see the shared runtime's usage, and @octocat isn't one."));
+    expect(refused.races.snapshot()!.runtime).toBeUndefined();
+    await refused.races.close();
+  });
+
   it("finds a move into a sandbox by the session's placement, and drops a move that failed", async () => {
     const { platform, races, lane } = setup();
     races.start("code");

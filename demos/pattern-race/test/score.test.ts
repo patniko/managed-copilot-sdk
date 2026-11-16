@@ -15,6 +15,7 @@ import {
   plural,
   premiumRequests,
   reservedCpuSeconds,
+  runtimeBrains,
   sandboxCount,
   sandboxWaitMs,
   tokenCount,
@@ -68,8 +69,8 @@ describe("score", () => {
     expect([cpuMs(delegate), peakMemoryBytes(delegate), partlyMeasured(delegate)]).toEqual([5_500, 500, false]);
     const partly = run({ lane: "mixed", sandboxes: [used("a", 4_000, 300), token("hands", "h")] });
     expect([cpuMs(partly), partlyMeasured(partly)]).toEqual([4_000, true]);
-    // No sandbox: nothing to measure, so nothing used; sandboxes not read yet: unknown.
-    expect([cpuMs(run({ lane: "shared" })), cpuMs(run({ lane: "direct", sandboxes: [token("hands", "h")] }))]).toEqual([0, undefined]);
+    // No sandbox: none of its own (its brain used the shared runtime); sandboxes not read yet: unknown.
+    expect([cpuMs(run({ lane: "shared" })), peakMemoryBytes(run({ lane: "shared" })), cpuMs(run({ lane: "direct", sandboxes: [token("hands", "h")] }))]).toEqual([undefined, undefined, undefined]);
   });
 
   it("counts the vCPUs held over each sandbox's life, and the time spent waiting for sandboxes once", () => {
@@ -96,7 +97,19 @@ describe("score", () => {
         run({ lane: "isolated", verdict: "correct", finishedAt: 6_000, tokens: { ...tokens, input: 20_000 }, sandboxes: [{ ...token("own", "s"), usage: { cpuMs: 3_000, peakMemoryBytes: 400 } }] }),
       ],
     };
-    expect(bests(race)).toMatchObject({ cpu: 0, memory: 0, tokens: 9_400 });
+    // A lane without a sandbox isn't the lightest on compute: its brain's share of the shared runtime isn't its own number.
+    expect(bests(race)).toMatchObject({ cpu: 3_000, memory: 400, tokens: 9_400 });
+  });
+
+  it("names the lanes whose brain thought on the shared runtime", () => {
+    const lanes = [
+      run({ lane: "shared" }),
+      run({ lane: "isolated", brain: "sandbox" }),
+      run({ lane: "promotable", brain: "sandbox" }),
+      run({ lane: "direct", sandboxes: [token("hands", "h")] }),
+      run({ lane: "mixed", status: "skipped" }),
+    ];
+    expect(runtimeBrains({ lanes })).toEqual(["Shared", "Promotable (until it moved)", "Direct"]);
   });
 
   it("formats seconds, memory, and tokens", () => {

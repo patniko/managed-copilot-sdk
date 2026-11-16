@@ -1,7 +1,7 @@
-import { TrophyIcon } from "@primer/octicons-react";
+import { CpuIcon, TrophyIcon } from "@primer/octicons-react";
 import { jobById } from "../../shared/jobs.js";
 import { laneById } from "../../shared/lanes.js";
-import { agentCount, bests, cpuMs, elapsedMs, formatBytes, formatClock, formatCount, formatSeconds, formatTokens, hasWorkers, ordinal, partlyMeasured, peakMemoryBytes, plural, premiumRequests, sandboxCount, tokenCount } from "../../shared/score.js";
+import { agentCount, bests, cpuMs, elapsedMs, formatBytes, formatClock, formatCount, formatSeconds, formatTokens, hasWorkers, ordinal, partlyMeasured, peakMemoryBytes, plural, premiumRequests, sandboxCount, tokenCount, runtimeBrains } from "../../shared/score.js";
 import type { LaneRun, RaceSnapshot } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
 import { modelName, openLane, useStore } from "../lib/store.js";
@@ -73,7 +73,46 @@ export function Scorecard() {
           <Row key={run.lane} race={race} run={run} now={now} longest={longest} best={best} />
         ))}
       </ol>
+      <RuntimeFooter race={race} />
     </section>
+  );
+}
+
+/** Marks a lane with no sandbox: its brain used the shared runtime, whose total is the footer. */
+function SharedMark() {
+  return (
+    <span className="text-xs text-fg-muted" title="No sandbox: its brain ran on the shared runtime, which every shared session shares (its total is below)">
+      shared
+    </span>
+  );
+}
+
+/** The shared runtime's total during the race: one process, shared by every lane without a sandbox and any other shared session. */
+function RuntimeFooter({ race }: { readonly race: RaceSnapshot }) {
+  const runtime = race.runtime;
+  const names = runtimeBrains(race).join(", ");
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line bg-canvas-muted px-4 py-2.5 text-sm">
+      <span className="inline-flex items-center gap-1.5 font-semibold">
+        <CpuIcon size={16} className="text-fg-muted" />
+        Shared runtime
+      </span>
+      {runtime ? (
+        <>
+          <span className="tabular-nums">
+            <span className="font-semibold text-fg-accent">{formatSeconds(runtime.cpuMs)}</span> CPU during the race
+          </span>
+          <span className="tabular-nums">
+            <span className="font-semibold text-fg-done">{formatBytes(runtime.peakMemoryBytes)}</span> held at most
+          </span>
+          <span className="text-xs text-fg-muted">
+            One process for every shared session on this gateway{names ? `, including the brains of ${names}` : ""}, so it isn&apos;t split per lane.
+          </span>
+        </>
+      ) : (
+        <span className="text-xs text-fg-muted">{race.runtimeNote ?? (race.state === "running" ? "Reading…" : "Not read during this race.")}</span>
+      )}
+    </div>
   );
 }
 
@@ -119,8 +158,8 @@ function Row({ race, run, now, longest, best }: { readonly race: RaceSnapshot; r
         <span className={cx("hidden text-right tabular-nums sm:block", highlight(sandboxes, best.sandboxes))}>{run.status === "skipped" ? "–" : sandboxes}</span>
         <span className="hidden text-right tabular-nums sm:block">{run.status === "skipped" ? "–" : agentCount(run)}</span>
         <span className={cx("hidden text-right tabular-nums sm:block", highlight(requests, best.requests))}>{run.status === "skipped" ? "–" : formatCount(requests)}</span>
-        <span className={cx("hidden text-right tabular-nums lg:block", highlight(cpu ?? -1, best.cpu))}>{skipped || cpu === undefined ? "–" : `${formatSeconds(cpu)}${partly ? "+" : ""}`}</span>
-        <span className={cx("hidden text-right tabular-nums lg:block", highlight(memory ?? -1, best.memory))}>{skipped || memory === undefined ? "–" : `${formatBytes(memory)}${partly ? "+" : ""}`}</span>
+        <span className={cx("hidden text-right tabular-nums lg:block", highlight(cpu ?? -1, best.cpu))}>{skipped ? "–" : run.sandboxes.length === 0 ? <SharedMark /> : cpu === undefined ? "–" : `${formatSeconds(cpu)}${partly ? "+" : ""}`}</span>
+        <span className={cx("hidden text-right tabular-nums lg:block", highlight(memory ?? -1, best.memory))}>{skipped ? "–" : run.sandboxes.length === 0 ? <SharedMark /> : memory === undefined ? "–" : `${formatBytes(memory)}${partly ? "+" : ""}`}</span>
         <span className={cx("hidden text-right tabular-nums lg:block", run.tokens ? highlight(tokens, best.tokens) : "")}>
           {skipped || !run.tokens ? "–" : `${formatTokens(tokens)}${hasWorkers(run) ? "+" : ""}`}
         </span>

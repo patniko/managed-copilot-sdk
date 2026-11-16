@@ -107,7 +107,7 @@ export class OperatorViews {
     const egress = ports.policy?.operatorEgress?.();
     const scheduler = ports.schedules?.schedulerStatus?.();
     const webhooks = ports.webhooks?.operatorStatus?.();
-    const runtime = core.runtime();
+    const runtime = await core.runtime();
     const storage = core.storage();
     const gateway = {
       ...core.gateway(),

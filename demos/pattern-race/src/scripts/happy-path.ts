@@ -107,7 +107,12 @@ function row(snapshot: RaceSnapshot, lane: LaneRun): string {
   const counts = [plural(sandboxCount(lane), "sandbox", "sandboxes"), plural(agentCount(lane), "agent", "agents"), plural(premiumRequests(lane), "premium request", "premium requests")].join(" · ");
   const cpu = cpuMs(lane);
   const memory = peakMemoryBytes(lane);
-  const compute = [`CPU ${cpu === undefined ? "not measured" : formatSeconds(cpu)}`, `peak ${memory === undefined ? "not measured" : formatBytes(memory)}`, `${formatTokens(tokenCount(lane))} tokens`].join(" · ");
+  const own = lane.sandboxes.length > 0;
+  const compute = [
+    own ? `CPU ${cpu === undefined ? "not measured" : formatSeconds(cpu)}` : "on the shared runtime",
+    ...(own ? [`peak ${memory === undefined ? "not measured" : formatBytes(memory)}`] : []),
+    `${formatTokens(tokenCount(lane))} tokens`,
+  ].join(" · ");
   return `  ${place.padEnd(4)} ${pattern.pattern.padEnd(10)} ${`"${pattern.environment}"`.padEnd(10)} ${time.padStart(7)}  ${(lane.verdict ?? lane.status).padEnd(8)} ${counts} · ${compute}`;
 }
 
@@ -127,6 +132,11 @@ async function main(): Promise<void> {
   log(`Race ${snapshot.state} in ${formatClock((snapshot.finishedAt ?? Date.now()) - snapshot.startedAt)}:`);
   for (const lane of ranked) console.log(row(snapshot, lane));
   log(`Premium requests in all: ${formatCount(snapshot.lanes.reduce((sum, lane) => sum + premiumRequests(lane), 0))}`);
+  log(
+    snapshot.runtime
+      ? `Shared runtime during the race (every shared session on the gateway): CPU ${formatSeconds(snapshot.runtime.cpuMs)} · peak ${formatBytes(snapshot.runtime.peakMemoryBytes)}`
+      : `Shared runtime: ${snapshot.runtimeNote ?? "not read"}`,
+  );
 
   const problems: string[] = [];
   if (snapshot.state !== "finished") problems.push(`the race ended ${snapshot.state}`);

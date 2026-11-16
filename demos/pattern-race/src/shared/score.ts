@@ -1,4 +1,5 @@
 /** What a race's lanes add up to: shared by the page, the happy-path script, and tests. */
+import { laneById } from "./lanes.js";
 import type { LaneRun, RaceSnapshot, SandboxToken } from "./types.js";
 
 /** How long a lane took (or has taken, at `now`): from the start of the race to its answer. */
@@ -23,14 +24,17 @@ export function premiumRequests(lane: Pick<LaneRun, "premium">): number {
   return lane.premium.session + lane.premium.workers;
 }
 
-/** Sum of a measurement over the sandboxes that reported it: 0 with no sandboxes, undefined when none reported yet. */
+/**
+ * Sum of a measurement over the sandboxes that reported it; undefined with no sandbox (its brain used the shared
+ * runtime, which every shared session shares: see the race's `runtime`) or none reported yet.
+ */
 function sandboxSum(lane: Pick<LaneRun, "sandboxes">, read: (token: SandboxToken) => number | undefined): number | undefined {
-  if (lane.sandboxes.length === 0) return 0;
+  if (lane.sandboxes.length === 0) return undefined;
   const values = lane.sandboxes.map(read).filter((value): value is number => value !== undefined);
   return values.length ? values.reduce((sum, value) => sum + value, 0) : undefined;
 }
 
-/** CPU time its sandboxes used, in milliseconds (work on the shared runtime isn't counted: it's shared). */
+/** CPU time its sandboxes used, in milliseconds (work on the shared runtime isn't counted here: it's shared). */
 export function cpuMs(lane: Pick<LaneRun, "sandboxes">): number | undefined {
   return sandboxSum(lane, (token) => token.usage?.cpuMs);
 }
@@ -65,6 +69,16 @@ export function sandboxWaitMs(lane: Pick<LaneRun, "sandboxes">, now: number): nu
     end = to;
   }
   return total;
+}
+
+/**
+ * The lanes whose brain thought on the shared runtime during the race, by name: every lane that raced except those
+ * that started in a sandbox; a promotable lane that moved is there "until it moved".
+ */
+export function runtimeBrains(race: Pick<RaceSnapshot, "lanes">): string[] {
+  return race.lanes
+    .filter((lane) => lane.status !== "skipped" && lane.status !== "ready" && laneById(lane.lane).brain === "runtime")
+    .map((lane) => `${laneById(lane.lane).pattern}${lane.brain === "sandbox" ? " (until it moved)" : ""}`);
 }
 
 /** Tokens its own session used: input and output (sub-agents included; workers' aren't visible). */
