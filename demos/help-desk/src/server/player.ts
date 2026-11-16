@@ -434,7 +434,7 @@ export function playerSystemMessage(): string {
     "- If they haven't bought yet, tell them that typing the code exactly, in capitals (for example TRAIL15 for trail15), may work in the meantime. Say it plainly, without promising it will.",
     "- Your tools only see this player's checkout and their Downhill Shop order. You can't change the shop, give items, or look up orders from the store's website.",
     "- Reply in two or three short, friendly sentences of plain text: no headings, lists, tables, error codes, or stack traces.",
-    teamNoteRules("player", false),
+    teamNoteRules("player"),
     "- End every turn the same way: when nothing is left for the player to wait on (their question is answered, or a refund was decided), call resolve_conversation with a one-line summary, then send your reply. Only skip it when you asked them a question.",
   ].join("\n");
 }

@@ -19,7 +19,6 @@ export const TOOLS: readonly ToolInfo[] = [
   { name: "request_refund", approval: true },
   { name: "cancel_order", approval: true },
   { name: "report_bug", approval: false },
-  { name: "report_known_issue", approval: false },
   { name: "resolve_conversation", approval: false },
 ];
 
@@ -46,11 +45,6 @@ export const KnownIssueInput = z.object({
 });
 export type KnownIssueReport = z.infer<typeof KnownIssueInput>;
 
-/** Records a known issue an agent proposed, for a team member to decide; says what happened to it. */
-export type ReportKnownIssue = (report: KnownIssueReport) => ToolResult;
-
-const NO_KNOWN_ISSUES: ReportKnownIssue = () => ({ ok: false, error: "Known issues can't be proposed from this conversation." });
-
 /** Runs `run` with the arguments `schema` accepts, or tells the agent what was wrong with them. */
 export function withInput<T>(schema: z.ZodType<T>, args: unknown, run: (input: T) => ToolResult): ToolResult {
   const parsed = schema.safeParse(args ?? {});
@@ -58,8 +52,8 @@ export function withInput<T>(schema: z.ZodType<T>, args: unknown, run: (input: T
   return run(parsed.data);
 }
 
-/** The store's tools for one customer's session. `reportKnownIssue` keeps the known issues its agent proposes. */
-export function customerTools(shop: Shop, customerId: string, reportKnownIssue: ReportKnownIssue = NO_KNOWN_ISSUES): Tool<any>[] {
+/** The store's tools for one customer's session. */
+export function customerTools(shop: Shop, customerId: string): Tool<any>[] {
   return [
     defineTool("list_my_orders", {
       description: "List the signed-in customer's orders, newest first, with their status.",
@@ -95,13 +89,6 @@ export function customerTools(shop: Shop, customerId: string, reportKnownIssue: 
       parameters: BugInput,
       skipPermission: true,
       handler: (args) => withInput(BugInput, args, (input) => shop.reportBug(customerId, input)),
-    }),
-    defineTool("report_known_issue", {
-      description:
-        "Propose an ongoing problem a support team member told you about in a team note as a known issue for the whole support desk. A team member records it, and every agent then tells affected customers the update. Internal: never mention it to the customer.",
-      parameters: KnownIssueInput,
-      skipPermission: true,
-      handler: (args) => withInput(KnownIssueInput, args, reportKnownIssue),
     }),
     defineTool("resolve_conversation", {
       description: "Mark this conversation resolved once the customer's request is fully handled and you aren't waiting on them.",
@@ -141,7 +128,7 @@ export function systemMessage(customer: CustomerSeed, shop: Shop): string {
     `- This month's promotion codes: ${promotions}.`,
     "- The customer sees the store's website and app; your tools see the orders behind them. An order's shownOnMyOrdersPage is the label the customer's My orders page shows: when it doesn't match the order's real status, the website is wrong. When the customer says the website or app showed or did something wrong (it rejected a promo code, changed a quantity, showed a wrong total, or showed an order as delivered when the carrier says it isn't), that's a software problem even if the order's status looks right in your tools: check their order with your tools, call report_bug once with the area it's about, and tell them you reported it to the store's engineering team. A product that arrived broken, leaks, or doesn't fit is not a software problem: never report it with report_bug. Still help with their order as usual: if the website's problem made them pay more than they should have, request a partial refund of the difference right away (a team member approves it).",
     "- Reply in two or three short, friendly sentences of plain text: no headings, lists, or tables.",
-    teamNoteRules("customer", true),
+    teamNoteRules("customer"),
     "- End every turn the same way: when nothing is left for the customer to wait on (their question is answered, or a refund or cancellation was decided), call resolve_conversation with a one-line summary, then send your reply. Only skip it when you asked them a question.",
   ].join("\n");
 }

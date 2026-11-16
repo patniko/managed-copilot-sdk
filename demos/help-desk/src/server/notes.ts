@@ -31,18 +31,10 @@ export function readTeamNote(content: string): { readonly text: string; readonly
   return { text: match[3]!.trim(), author: match[1]!, ...(match[2] ? { knownIssueId: match[2] } : {}) };
 }
 
-/** What every agent is told about team notes. `knownIssues`: whether it can propose known issues (customers' agents). */
-export function teamNoteRules(person: "customer" | "player", knownIssues: boolean): string {
-  const lines = [
+/** What every agent is told about team notes. */
+export function teamNoteRules(person: "customer" | "player"): string {
+  return [
     `- A message wrapped in a <${BLOCK}> block comes from a Contoso Outdoors support team member, not the ${person}, and the ${person} doesn't see it. Follow it.`,
-  ];
-  if (knownIssues) {
-    lines.push(
-      "- When a team note tells you about an ongoing problem that affects many customers (an outage, a known bug, a workaround while something is fixed), call report_known_issue once: a short title, how customers describe the problem, and what customers should be told. A team member records it for the whole desk. It's internal, like store_memory: never mention it to the customer.",
-    );
-  }
-  lines.push(
     `- After a team note, reply to the ${person} only with what they need to know, in your own words, as if you had just learned it. Never quote the note, name the team member, or mention notes, the team's tools, or known issues by that name. Anything that costs money (refunds, cancellations) still goes through your tools and waits for a team member's approval, as always.`,
-  );
-  return lines.join("\n");
+  ].join("\n");
 }

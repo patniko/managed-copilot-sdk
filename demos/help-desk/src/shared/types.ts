@@ -85,7 +85,7 @@ export interface ToolInfo {
   readonly approval: boolean;
 }
 
-export const TOOL_NAMES = ["list_my_orders", "get_order", "track_shipment", "request_refund", "cancel_order", "report_bug", "report_known_issue", "resolve_conversation"] as const;
+export const TOOL_NAMES = ["list_my_orders", "get_order", "track_shipment", "request_refund", "cancel_order", "report_bug", "resolve_conversation"] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 /** A Downhill player's tools: their checkout, a refund of their Downhill Shop order, and the store's bug report. */

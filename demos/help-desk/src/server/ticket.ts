@@ -433,7 +433,7 @@ export class CustomerTicket extends TicketSession {
   }
 
   protected override sessionTools(): Tool<any>[] {
-    return customerTools(this.host.shop, this.customer.id, (report) => this.host.proposeKnownIssue(this, report));
+    return customerTools(this.host.shop, this.customer.id);
   }
 
   protected override instructions(): string {
