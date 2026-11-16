@@ -1,10 +1,10 @@
 import { TrophyIcon } from "@primer/octicons-react";
 import { jobById } from "../../shared/jobs.js";
 import { laneById } from "../../shared/lanes.js";
-import { agentCount, bests, elapsedMs, formatClock, formatCount, ordinal, plural, premiumRequests, sandboxCount } from "../../shared/score.js";
+import { agentCount, bests, cpuMs, elapsedMs, formatBytes, formatClock, formatCount, formatSeconds, formatTokens, hasWorkers, ordinal, partlyMeasured, peakMemoryBytes, plural, premiumRequests, sandboxCount, tokenCount } from "../../shared/score.js";
 import type { LaneRun, RaceSnapshot } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
-import { openLane, useStore } from "../lib/store.js";
+import { modelName, openLane, useStore } from "../lib/store.js";
 import { useNow } from "../lib/useNow.js";
 
 const ORDER: Readonly<Record<LaneRun["status"], number>> = { done: 0, thinking: 1, working: 1, starting: 1, ready: 1, failed: 2, stopped: 3, skipped: 4 };
@@ -32,10 +32,10 @@ const RESULT: Readonly<Record<string, { readonly text: string; readonly tone: st
   failed: { text: "Failed", tone: "text-fg-danger" },
 };
 
-/** The race's outcome side by side: time, sandboxes, agents, and premium requests per lane. */
+/** The race's outcome side by side: time, sandboxes, agents, premium requests, and (wide screens) compute and tokens per lane. */
 export function Scorecard() {
   const race = useStore((current) => current.app?.race);
-  const modelName = useStore((current) => current.app?.model.name);
+  const app = useStore((current) => current.app);
   const skew = useStore((current) => current.skew);
   const now = useNow(race?.state === "running") + skew;
   if (!race) return null;
@@ -47,16 +47,25 @@ export function Scorecard() {
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-line-muted px-4 py-3">
         <h2 className="text-base font-semibold">Scorecard</h2>
         <span className="text-xs text-fg-muted">
-          {jobById(race.job).title} · {modelName ?? race.model}
+          {jobById(race.job).title} · {modelName(app, race.model)}
         </span>
       </div>
-      <div className="hidden grid-cols-[2.5rem_8rem_minmax(0,1fr)_5rem_4rem_5rem_7rem] gap-x-3 border-b border-line-muted px-4 py-2 text-xs text-fg-muted sm:grid">
+      <div className="hidden grid-cols-[2.5rem_8rem_minmax(0,1fr)_5rem_4rem_5rem_7rem] gap-x-3 lg:grid-cols-[2.5rem_8rem_minmax(0,1fr)_5rem_4rem_5rem_5rem_5.5rem_4.5rem_7rem] border-b border-line-muted px-4 py-2 text-xs text-fg-muted sm:grid">
         <span />
         <span>Pattern</span>
         <span>Time</span>
         <span className="text-right">Sandboxes</span>
         <span className="text-right">Agents</span>
         <span className="text-right">Requests</span>
+        <span className="hidden text-right lg:block" title="CPU time its sandboxes used">
+          CPU
+        </span>
+        <span className="hidden text-right lg:block" title="Each sandbox's peak memory, added up">
+          Memory
+        </span>
+        <span className="hidden text-right lg:block" title="Input and output tokens of its own session">
+          Tokens
+        </span>
         <span>Result</span>
       </div>
       <ol>
@@ -77,13 +86,18 @@ function Row({ race, run, now, longest, best }: { readonly race: RaceSnapshot; r
   const highlight = (value: number, target: number | undefined) => (correct && value === target ? "font-semibold text-fg-success" : "");
   const sandboxes = sandboxCount(run);
   const requests = premiumRequests(run);
+  const skipped = run.status === "skipped" || run.status === "ready";
+  const cpu = cpuMs(run);
+  const memory = peakMemoryBytes(run);
+  const partly = partlyMeasured(run);
+  const tokens = tokenCount(run);
   return (
     <li className="border-b border-line-muted last:border-b-0">
       <button
         type="button"
         disabled={run.status === "skipped"}
         onClick={() => openLane(run.lane)}
-        className="grid w-full grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5 px-4 py-2.5 text-left text-sm hover:bg-canvas-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus disabled:hover:bg-transparent sm:grid-cols-[2.5rem_8rem_minmax(0,1fr)_5rem_4rem_5rem_7rem]"
+        className="grid w-full grid-cols-[2rem_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5 px-4 py-2.5 text-left text-sm hover:bg-canvas-muted focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus disabled:hover:bg-transparent sm:grid-cols-[2.5rem_8rem_minmax(0,1fr)_5rem_4rem_5rem_7rem] lg:grid-cols-[2.5rem_8rem_minmax(0,1fr)_5rem_4rem_5rem_5rem_5.5rem_4.5rem_7rem]"
       >
         <span className={cx("inline-flex items-center gap-1 font-semibold tabular-nums", run.place === 1 ? "text-fg-success" : "text-fg-muted")}>
           {run.place === 1 ? <TrophyIcon size={16} /> : null}
@@ -105,6 +119,11 @@ function Row({ race, run, now, longest, best }: { readonly race: RaceSnapshot; r
         <span className={cx("hidden text-right tabular-nums sm:block", highlight(sandboxes, best.sandboxes))}>{run.status === "skipped" ? "–" : sandboxes}</span>
         <span className="hidden text-right tabular-nums sm:block">{run.status === "skipped" ? "–" : agentCount(run)}</span>
         <span className={cx("hidden text-right tabular-nums sm:block", highlight(requests, best.requests))}>{run.status === "skipped" ? "–" : formatCount(requests)}</span>
+        <span className={cx("hidden text-right tabular-nums lg:block", highlight(cpu ?? -1, best.cpu))}>{skipped || cpu === undefined ? "–" : `${formatSeconds(cpu)}${partly ? "+" : ""}`}</span>
+        <span className={cx("hidden text-right tabular-nums lg:block", highlight(memory ?? -1, best.memory))}>{skipped || memory === undefined ? "–" : `${formatBytes(memory)}${partly ? "+" : ""}`}</span>
+        <span className={cx("hidden text-right tabular-nums lg:block", run.tokens ? highlight(tokens, best.tokens) : "")}>
+          {skipped || !run.tokens ? "–" : `${formatTokens(tokens)}${hasWorkers(run) ? "+" : ""}`}
+        </span>
         <span className={cx("col-start-3 row-start-1 text-right font-semibold sm:col-start-auto sm:row-start-auto sm:text-left", result.tone)}>{result.text}</span>
         <span className="col-span-3 text-xs text-fg-muted sm:hidden">
           {run.status === "skipped" ? "" : [plural(sandboxes, "sandbox", "sandboxes"), plural(agentCount(run), "agent", "agents"), plural(requests, "request", "requests")].join(" · ")}

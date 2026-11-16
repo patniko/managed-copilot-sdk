@@ -23,6 +23,14 @@ export interface LaneAvailability {
   readonly reason?: string;
   /** The environment its sandboxes come from: its own (isolated), its `promoteTo` (promotable), or its first worker environment. */
   readonly sandboxEnvironment?: string;
+  /** The models its environment allows; every model the deployment offers when absent. */
+  readonly models?: readonly string[];
+}
+
+/** A model a race can use. */
+export interface ModelChoice {
+  readonly id: string;
+  readonly name: string;
 }
 
 /**
@@ -43,12 +51,59 @@ export type LaneStatus = "ready" | "starting" | "thinking" | "working" | "done" 
 export type SandboxKind = "own" | "hands" | "worker";
 export type SandboxState = "starting" | "working" | "idle" | "failed" | "stopped";
 
+/** What a sandbox used, read from its own cgroup with `managed.exec`: the last reading before it was deleted. */
+export interface SandboxUsage {
+  /** CPU time every process in it used since it started (setup, its runtime, the agent's commands), in milliseconds. */
+  readonly cpuMs: number;
+  /** The most memory it held at once, in bytes. */
+  readonly peakMemoryBytes: number;
+  /** The memory it held at the latest reading, in bytes. */
+  readonly memoryBytes?: number;
+}
+
+/**
+ * What a lane was doing from `at` until its next phase (or its end):
+ * - `starting`: its session (or sandbox) is being created. `thinking`: its model is working.
+ * - `command`: a shell command or file tool. `sandbox`: moving into a sandbox. `workers`: starting, messaging, or
+ *   waiting for workers. `subagents`: a sub-agent's work. `tool`: any other tool.
+ */
+export type PhaseKind = "starting" | "thinking" | "command" | "sandbox" | "workers" | "subagents" | "tool";
+
+export interface Phase {
+  readonly at: number;
+  readonly kind: PhaseKind;
+  readonly label: string;
+}
+
+/** A lane's sandboxes at `at`: the CPU time they used so far, and the memory they held then. */
+export interface UsageSample {
+  readonly at: number;
+  readonly cpuMs: number;
+  readonly memoryBytes: number;
+}
+
 export interface SandboxToken {
   readonly id: string;
   readonly kind: SandboxKind;
   readonly name: string;
   readonly state: SandboxState;
   readonly environment: string;
+  /** What it was given: its environment's size. */
+  readonly cpus?: number;
+  readonly memoryBytes?: number;
+  /** Epoch milliseconds when it appeared (asked for), was ready (no longer starting), and was deleted. */
+  readonly appearedAt?: number;
+  readonly readyAt?: number;
+  readonly endedAt?: number;
+  readonly usage?: SandboxUsage;
+}
+
+/** Tokens a session's model calls used. */
+export interface Tokens {
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number;
+  readonly cacheWrite: number;
 }
 
 export interface Premium {
@@ -81,6 +136,16 @@ export interface LaneRun {
   readonly premium: Premium;
   /** Model calls its own session made (sub-agents included; workers are sessions of their own). */
   readonly modelCalls: number;
+  /** Tokens its own session's model calls used (sub-agents included; workers are sessions of their own). */
+  readonly tokens?: Tokens;
+  /** Time its own session spent in model calls (sub-agents included), in milliseconds. */
+  readonly modelMs?: number;
+  /** Tool calls in its own session (sub-agents included). */
+  readonly toolCalls?: number;
+  /** What it was doing over time, oldest first. */
+  readonly timeline?: readonly Phase[];
+  /** Its sandboxes' usage over time, one sample per reading. */
+  readonly samples?: readonly UsageSample[];
   /** Permission requests answered automatically. */
   readonly approvals: number;
   readonly answer?: string;
@@ -107,8 +172,10 @@ export interface RaceSnapshot {
 export interface AppState {
   readonly platform: PlatformStatus;
   readonly lanes: readonly LaneAvailability[];
-  /** The model every lane uses, and its display name. */
-  readonly model: { readonly id: string; readonly name: string };
+  /** The model a race uses unless the person picks another (`PATTERN_RACE_MODEL`). */
+  readonly model: ModelChoice;
+  /** The models the deployment offers that at least one lane can race with. */
+  readonly models: readonly ModelChoice[];
   readonly race?: RaceSnapshot;
   /** The server's clock when this state was sent, so the page can time lanes without clock skew. */
   readonly serverNow: number;
@@ -116,6 +183,8 @@ export interface AppState {
 
 export interface StartRaceRequest {
   readonly job: JobId;
+  /** The model every lane uses; the default model when absent. */
+  readonly model?: string;
 }
 
 export interface ApiErrorBody {

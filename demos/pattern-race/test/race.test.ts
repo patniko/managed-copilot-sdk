@@ -50,6 +50,18 @@ describe("a race", () => {
     await races.close();
   });
 
+  it("races the model the person picked, sitting out lanes whose environment doesn't allow it", async () => {
+    const { platform, races, lane } = setup();
+    platform.lanes = platform.lanes.map((availability) => (availability.lane === "shared" ? { ...availability, models: ["claude-sonnet-5"] } : availability));
+    expect(thrown(() => races.start("code", "no-such-model"))).toMatchObject({ code: "invalid_request", status: 400 });
+    races.start("code", "gpt-6-sol");
+    expect((await platform.session("isolated")).config.model).toBe("gpt-6-sol");
+    expect(races.snapshot()!.model).toBe("gpt-6-sol");
+    expect(lane("shared")).toMatchObject({ status: "skipped", error: '"chat" doesn\'t allow GPT-6 Sol.' });
+    expect(platform.sessions.has("shared")).toBe(false);
+    await races.close();
+  });
+
   it("places correct answers in the order they arrived, and judges every answer", async () => {
     const { platform, races, lane, tick } = setup();
     races.start("code");
@@ -112,7 +124,9 @@ describe("a race", () => {
     const { platform, races, lane } = setup();
     races.start("split");
     const isolated = await platform.session("isolated");
-    expect(lane("isolated").sandboxes).toEqual([{ id: `sandbox-of-${isolated.sessionId}`, kind: "own", name: "Its own sandbox", state: "working", environment: "coder" }]);
+    expect(lane("isolated").sandboxes).toEqual([
+      { id: `sandbox-of-${isolated.sessionId}`, kind: "own", name: "Its own sandbox", state: "working", environment: "coder", cpus: 2, memoryBytes: 4 * 1024 ** 3, appearedAt: 1_000_000, readyAt: 1_000_000 },
+    ]);
     expect(lane("isolated").brain).toBe("sandbox");
 
     const promotable = await platform.session("promotable");
@@ -138,6 +152,57 @@ describe("a race", () => {
     await races.close();
     // A lane's session is deleted when it ends, and its sandboxes with it.
     expect(lane("delegate").sandboxes.every((token) => token.state === "stopped")).toBe(true);
+  });
+
+  it("measures each lane's sandboxes through the session each belongs to, and what its own session spent", async () => {
+    const { platform, races, lane, tick } = setup();
+    races.start("split");
+    const isolated = await platform.session("isolated");
+    platform.usages.set(isolated.sessionId, { cpuMs: 1_200, peakMemoryBytes: 300 * 1024 ** 2 });
+    await vi.waitFor(() => expect(lane("isolated").sandboxes[0]!.usage).toEqual({ cpuMs: 1_200, peakMemoryBytes: 300 * 1024 ** 2 }));
+
+    // A worker is read through its own session; its counters only grow, so an older reading never lowers them.
+    const delegate = await platform.session("delegate");
+    platform.workerLists.set(delegate.sessionId, [worker({ id: "w1", name: "primes" }), worker({ id: "w2", name: "gone", state: "stopped" })]);
+    platform.usages.set("w1", { cpuMs: 9_000, peakMemoryBytes: 200 });
+    await vi.waitFor(() => expect(lane("delegate").sandboxes[0]!.usage?.cpuMs).toBe(9_000));
+    platform.usages.set("w1", { cpuMs: 8_000, peakMemoryBytes: 100 });
+    const readsOfW1 = () => platform.measured.filter((id) => id === "w1").length;
+    const before = readsOfW1();
+    await vi.waitFor(() => expect(readsOfW1()).toBeGreaterThan(before + 1));
+    expect(lane("delegate").sandboxes[0]!.usage).toEqual({ cpuMs: 9_000, peakMemoryBytes: 200 });
+    expect(platform.measured).not.toContain("w2");
+
+    // A sandbox still starting isn't read.
+    const promotable = await platform.session("promotable");
+    promotable.emit("tool.execution_start", { toolName: "request_sandbox", toolCallId: "move" });
+    expect(lane("promotable").sandboxes).toMatchObject([{ id: "pending", state: "starting", appearedAt: 1_000_000 }]);
+
+    const direct = await platform.session("direct");
+    direct.emit("tool.execution_start", { toolName: "report_intent", toolCallId: "t0", arguments: { intent: "Counting primes" } });
+    direct.emit("tool.execution_start", { toolName: "bash", toolCallId: "t1", arguments: { command: "python3 primes.py" } });
+    direct.usage = {
+      ...direct.usage,
+      totalApiDurationMs: 4_200,
+      modelMetrics: { "claude-sonnet-5": { requests: { count: 3, cost: 1 }, usage: { inputTokens: 9_000, outputTokens: 400, cacheReadTokens: 8_000, cacheWriteTokens: 100 } } },
+    } as typeof direct.usage;
+    await vi.waitFor(() => expect(lane("direct")).toMatchObject({ toolCalls: 1, modelMs: 4_200, modelCalls: 3, tokens: { input: 9_000, output: 400, cacheRead: 8_000, cacheWrite: 100 } }));
+    expect(platform.measured).not.toContain(promotable.sessionId);
+
+    tick(5_000);
+    isolated.answer("1. 315948");
+    await vi.waitFor(() => expect(platform.deleted).toContain(isolated.sessionId));
+    expect(lane("isolated").sandboxes[0]).toMatchObject({ state: "stopped", appearedAt: 1_000_000, endedAt: 1_005_000 });
+    // Its history: what it did when, and its sandbox's usage over time, ending with nothing held once it's deleted.
+    expect(lane("direct").timeline!.map((phase) => [phase.kind, phase.label])).toEqual([
+      ["starting", "Starting its session"],
+      ["thinking", "Thinking"],
+      ["thinking", "Counting primes"],
+      ["command", "$ python3 primes.py"],
+    ]);
+    expect(lane("isolated").samples!.at(-1)).toEqual({ at: 1_005_000, cpuMs: 1_200, memoryBytes: 0 });
+    expect(lane("shared").samples).toBeUndefined();
+    await races.close();
   });
 
   it("finds a move into a sandbox by the session's placement, and drops a move that failed", async () => {

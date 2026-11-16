@@ -11,7 +11,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise((resolve) => server.close(resolve))));
 });
 
-const STATE: AppState = { platform: { state: "connected" }, lanes: [], model: { id: "claude-sonnet-5", name: "Claude Sonnet 5" }, serverNow: 1 };
+const STATE: AppState = { platform: { state: "connected" }, lanes: [], model: { id: "claude-sonnet-5", name: "Claude Sonnet 5" }, models: [], serverNow: 1 };
 
 async function serve(races: { start: (job: JobId) => RaceSnapshot; stop: () => void }): Promise<string> {
   const handler = createRequestHandler({ races, hub: { attach: () => undefined }, state: () => STATE, config: { webRoot: "does-not-exist" } });

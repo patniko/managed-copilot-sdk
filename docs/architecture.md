@@ -1218,9 +1218,13 @@ and quickstart snippet 14).
     `worker.*` events, and `managed.workers(...).list()`. Premium requests are each lane session's
     `session.rpc.usage.getMetrics().totalPremiumRequestCost` (verified live: 1 per prompt for Claude Sonnet 5, whose
     `listModels()` billing carries token prices and no multiplier) plus, for workers, one per message received at the
-    worker model's multiplier (else the rate the coordinator measured). A lane ends when `sendAndWait` returns; its
+    worker model's multiplier (else the rate the coordinator measured). Compute is each sandbox's own cgroup counters
+    (`cpu.stat` `usage_usec`, `memory.peak`), read with `managed.exec` through the lane's session (its own sandbox) or
+    the worker's ID (workers and hands sandboxes) every poll and once more before deletion; reserved vCPU-seconds come
+    from `/v1/info` sizes and sandbox lifetimes, tokens and model time from `getMetrics()`. A lane ends when `sendAndWait` returns; its
     answer is checked against values the server computes, then its session is deleted with its sandboxes and workers.
-    Verified live locally (2026-11-04): all six lanes on all three jobs.
+    Verified live locally (2026-11-04): all six lanes on all three jobs; compute and tokens on "Split the work"
+    (2026-11-15).
   - *Incident Commander* (`demos/incident-commander`). An incident is a session of the `incident-commander`
     orchestrator (`execution: "mixed"`, network off, `maxWorkers` 4): its own sandbox in `incident-commander-triage`
     (small, network off) and workers in `incident-commander-node` (medium, the npm registry only). The app registers

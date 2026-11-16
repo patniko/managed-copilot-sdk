@@ -1,9 +1,9 @@
 import { ContainerIcon, CpuIcon } from "@primer/octicons-react";
 import { jobById } from "../../shared/jobs.js";
-import { LANES } from "../../shared/lanes.js";
+import { LANES, withModel } from "../../shared/lanes.js";
 import { formatClock } from "../../shared/score.js";
-import type { RaceSnapshot } from "../../shared/types.js";
-import { useStore } from "../lib/store.js";
+import type { LaneAvailability, ModelChoice, RaceSnapshot } from "../../shared/types.js";
+import { selectedModel, useStore } from "../lib/store.js";
 import { useNow } from "../lib/useNow.js";
 import { LaneCard } from "./LaneCard.js";
 import { Spinner } from "./ui/Spinner.js";
@@ -13,6 +13,7 @@ export function Board() {
   const app = useStore((current) => current.app);
   const picked = useStore((current) => current.job);
   const skew = useStore((current) => current.skew);
+  const model = useStore(selectedModel);
   const race = app?.race;
   const now = useNow(true, race?.state === "running" ? 100 : 30_000) + skew;
   const job = jobById(race?.job ?? picked);
@@ -28,7 +29,7 @@ export function Board() {
           <LaneCard
             key={lane.id}
             lane={lane}
-            availability={app?.lanes.find((candidate) => candidate.lane === lane.id)}
+            availability={availability(app?.lanes.find((candidate) => candidate.lane === lane.id), model)}
             race={race}
             job={job}
             run={race?.lanes.find((run) => run.lane === lane.id)}
@@ -38,6 +39,11 @@ export function Board() {
       </div>
     </section>
   );
+}
+
+/** Whether a lane can race with the model picked for the next race. */
+function availability(lane: LaneAvailability | undefined, model: ModelChoice | undefined): LaneAvailability | undefined {
+  return lane && model ? withModel(lane, model) : lane;
 }
 
 /** On a single row of lanes, the two places a lane's agents can be, named once beside the first lane. */

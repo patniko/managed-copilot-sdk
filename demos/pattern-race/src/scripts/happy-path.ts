@@ -12,7 +12,7 @@
 import { parseArgs } from "node:util";
 import { isJobId, jobById, type JobId } from "../shared/jobs.js";
 import { laneById } from "../shared/lanes.js";
-import { agentCount, elapsedMs, formatClock, formatCount, ordinal, plural, premiumRequests, sandboxCount } from "../shared/score.js";
+import { agentCount, cpuMs, elapsedMs, formatBytes, formatClock, formatCount, formatSeconds, formatTokens, ordinal, peakMemoryBytes, plural, premiumRequests, sandboxCount, tokenCount } from "../shared/score.js";
 import type { ApiErrorBody, AppState, LaneRun, RaceSnapshot } from "../shared/types.js";
 
 const timeoutMs = Number(process.env.HAPPY_PATH_TIMEOUT_MINUTES ?? 15) * 60_000;
@@ -105,7 +105,10 @@ function row(snapshot: RaceSnapshot, lane: LaneRun): string {
   const place = lane.place ? ordinal(lane.place) : "–";
   const time = formatClock(elapsedMs(snapshot, lane, lane.finishedAt ?? Date.now()));
   const counts = [plural(sandboxCount(lane), "sandbox", "sandboxes"), plural(agentCount(lane), "agent", "agents"), plural(premiumRequests(lane), "premium request", "premium requests")].join(" · ");
-  return `  ${place.padEnd(4)} ${pattern.pattern.padEnd(10)} ${`"${pattern.environment}"`.padEnd(10)} ${time.padStart(7)}  ${(lane.verdict ?? lane.status).padEnd(8)} ${counts}`;
+  const cpu = cpuMs(lane);
+  const memory = peakMemoryBytes(lane);
+  const compute = [`CPU ${cpu === undefined ? "not measured" : formatSeconds(cpu)}`, `peak ${memory === undefined ? "not measured" : formatBytes(memory)}`, `${formatTokens(tokenCount(lane))} tokens`].join(" · ");
+  return `  ${place.padEnd(4)} ${pattern.pattern.padEnd(10)} ${`"${pattern.environment}"`.padEnd(10)} ${time.padStart(7)}  ${(lane.verdict ?? lane.status).padEnd(8)} ${counts} · ${compute}`;
 }
 
 async function main(): Promise<void> {

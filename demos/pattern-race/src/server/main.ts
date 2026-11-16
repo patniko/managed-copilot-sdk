@@ -17,7 +17,7 @@ const platform = new Platform(config, () => races?.running ?? false);
 races = new RaceManager({ platform, config, store: new RaceStore(config.dataDir) });
 const state = (): AppState => {
   const race = races!.snapshot();
-  return { platform: platform.status, lanes: platform.lanes, model: platform.model, ...(race ? { race } : {}), serverNow: Date.now() };
+  return { platform: platform.status, lanes: platform.lanes, model: platform.model, models: platform.models, ...(race ? { race } : {}), serverNow: Date.now() };
 };
 const hub = new StateHub(state);
 races.onChange(() => hub.changed());

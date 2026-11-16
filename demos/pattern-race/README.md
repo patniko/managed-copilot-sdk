@@ -2,7 +2,7 @@
 
 One job, six patterns, side by side. Pattern Race sends the same prompt to six real sessions at once, one in each
 pattern's environment of the root AppHost, and races them: where each agent thinks and acts, how long it takes, how many
-sandboxes and agents it uses, and how many premium requests it spends. The code in every lane is the same stock
+sandboxes and agents it uses, how many premium requests it spends, and the CPU time, memory, and tokens it burns. The code in every lane is the same stock
 `CopilotClient`; the only thing that differs is the environment name passed to `managed.client(...)`.
 
 ![A finished "Split the work" race: Mixed won in 12.0 s with one sandbox; Delegate used three sandboxes, four agents, and four premium requests; Shared had no shell](docs/screenshots/race-finished.png)
@@ -23,8 +23,22 @@ has no shell, so it started sub-agents looking for one and answered that it coul
   a worker per part. Sandboxes turn dashed when the lane's session (and every sandbox it had) is deleted at the end.
 - **An honest scorecard.** Every answer is checked against values the server computes itself (a SHA-256 digest,
   prime counts, a Collatz count), so a fast wrong answer doesn't win. Places go to correct answers in the order they
-  arrived. The best time, fewest sandboxes, and fewest premium requests among correct lanes are highlighted.
-- **True trade-offs, not a rigged race.** The shared lane can't run code, and says so. Delegation pays for a new agent
+  arrived. The best time, fewest sandboxes, fewest premium requests, and least CPU time, memory, and tokens among
+  correct lanes are highlighted.
+- **What each shape really costs.** Each lane counts the CPU time and peak memory its sandboxes used, read from each
+  sandbox's own counters while it runs, and the tokens and model time its own session spent. A brain inside a sandbox
+  costs that sandbox the agent's memory; a worker per part costs a sandbox per part; a lane with no sandbox costs none.
+  Its details add the vCPU-seconds its sandboxes held (busy or idle) and how
+  long it waited for sandboxes to start.
+- **The race over time.** Below the lanes, the race timeline gives each lane a swimlane on one clock: what it was
+  doing (starting, thinking, running commands, moving into a sandbox, working through workers or sub-agents), a bar
+  for each sandbox from the moment it was asked for (starting) until it was deleted, and charts of the vCPUs its
+  sandboxes kept busy and the memory they held, on one scale for every lane, with a finish line where it answered.
+  Hover a phase or a sandbox for what it was and how long it took.
+- **True trade-offs, not a rigged race.** The shared lane can't run code, and says so: the `chat` environment's
+  instructions ([`environments/chat`](../../environments/chat/instructions/contoso.instructions.md)) tell its agent it
+  has no shell, so it answers at once instead of starting sub-agents to look for one (which once took 90 seconds and
+  262k tokens). Delegation pays for a new agent
   and sandbox per part, which wins when parts are big and loses when they're small. A coordinator retyping a worker's
   report can even drop a character (it happened: one run's Delegate lane missed the last digit of the hash). Results
   vary between runs; that is the point.
@@ -48,7 +62,11 @@ All six patterns from [Patterns](../../docs/concepts/patterns.md), on the enviro
 | Delegate | `"team"` | On the shared runtime, as a coordinator | Through new worker agents, each in its own sandbox |
 | Mixed | `"lead"` | On the shared runtime, as a coordinator | In its own sandbox, and through workers; the model picks |
 
-Every lane uses the same model (Claude Sonnet 5 by default; all six environments allow it) and gets the same prompt.
+Every lane uses the same model and gets the same prompt. Pick the model in the list next to the prompt: every model
+the deployment offers that at least one lane's environment allows (Claude Sonnet 5 by default; all six environments
+allow it and Claude Haiku 5.5). A lane whose environment doesn't allow the model sits that race out and says why:
+`chat` allows only those two, so Shared sits out a GPT race. `auto` isn't offered, since it could pick a different
+model for each lane.
 
 ## Run it
 
@@ -71,13 +89,17 @@ Pattern Race opens at <http://localhost:7420>.
 3. Press **Race again** with **Split the work**: three independent parts. Compare Delegate (a worker and sandbox per
    part, more premium requests) with Direct and Mixed (one sandbox).
 4. Open any lane's **Details** (the chevron) for its full answer, the values it was checked against, its sandboxes
-   with their IDs, and its usage.
+   with their IDs, sizes, start-up times, and what each used, and its compute and usage.
+
+One measured "Split the work" race (local, Claude Sonnet 5): Isolated won in 13.8 s with 3.5 s of sandbox CPU and a
+298 MiB peak (its agent lives in that sandbox); Direct used 3.5 s and 193 MiB in a sandbox with no agent in it;
+Delegate's three workers used 7.9 s and 361 MiB. Shared used no sandbox at all.
 
 Each job costs about one premium request per lane, plus one per message each worker receives: the quick answer costs
 six in all, and the run-code and split races we measured cost eight to thirteen. Measured live on a local deployment:
 the quick answer finished in 7 seconds (only Isolated paid for a sandbox, 6.0 seconds against 1 to 2 for the rest);
-run code in 37 seconds (Mixed won in 12.3); split the work in 25 seconds for every lane with a shell, while Shared kept
-looking for one for 83.
+run code in 37 seconds (Mixed won in 12.3); split the work in 25 seconds for every lane with a shell. With its no-shell
+instruction, Shared says it can't run the code in about 10 seconds.
 
 <img src="docs/screenshots/lane-details.png" alt="The Delegate lane's details: its answer with the three values, each checked against the server's value, its three worker sandboxes with their IDs, and its usage: 4 agents, 4 premium requests (3 by workers), 3 model calls, 3 automatic approvals" width="900">
 
@@ -112,8 +134,9 @@ pnpm dev                                       # server and UI with live reload 
 
 - **One stock client per lane.** The server connects with `ManagedCopilot.connect()` and starts
   `managed.client(environment)` for each lane whose environment `/v1/info` declares with the right type (and, for the
-  coordinators, `execution`), allows the model, and has its capabilities (`shared`, `isolated`, `promotion`,
-  `orchestrator`) working. A race creates one session per lane with `client.createSession({ sessionId, model,
+  coordinators, `execution`) and has its capabilities (`shared`, `isolated`, `promotion`,
+  `orchestrator`) working. The models on offer are what each lane's `client.listModels()` lists (each lists the models
+  its environment allows), together. A race creates one session per lane with `client.createSession({ sessionId, model,
   onPermissionRequest })` and sends the job with `sendAndWait`. Session IDs start with `pattern-race-`, so sessions a
   restart cut short are found and deleted when the server connects again.
 - **Approvals are automatic, per lane.** Each lane answers its own permission requests with the SDK's `approveAll` (a
@@ -129,11 +152,23 @@ pnpm dev                                       # server and UI with live reload 
   session of its own that the race never attaches to, so it counts one premium request per message the worker
   received, its task included, at its model's multiplier (from `client.listModels()`, else the rate its coordinator
   measured).
+- **Compute is measured in each sandbox.** While a lane runs, the server reads each of its sandboxes' own cgroup
+  counters (`cpu.stat` and `memory.peak`, cgroup v1 where v2 isn't there) with `managed.exec`: the lane's session for
+  its own sandbox, the worker's ID for a worker or hands sandbox. Both counters only grow, so the last reading before
+  the sandbox is deleted is what it used: setup, any agent inside it, and every command, plus a few milliseconds for
+  the read itself. A sandbox deleted before its first reading (a worker stopped early) leaves the totals marked `+`;
+  an environment with `exec: false` isn't measured. The shared runtime is shared by every shared session, so a brain
+  there isn't counted. A sandbox's size (from `/v1/info`) and when it appeared, was ready, and was deleted give the
+  vCPU-seconds it held and the time the lane waited for sandboxes. Tokens and model time are its own session's
+  `getMetrics()` (sub-agents included); each worker is a session of its own the race never attaches to, so a
+  coordinator's tokens are marked `+`.
 - **A lane ends when its answer arrives.** Its stopwatch stops at `sendAndWait`'s answer, the answer is checked, and
   then its session is deleted, which deletes its sandbox, hands sandboxes, and workers. A failed lane says why in plain
   words; **Stop** cancels every running lane (`session.abort()`) and deletes their sessions.
 - **The page is a live view.** The server pushes its whole state over server-sent events a few times a second; the
-  last finished race is kept in `.data/last-race.json`, so the board shows it after a restart.
+  last finished race is kept in `.data/last-race.json`, so the board shows it after a restart. Each lane keeps its
+  history for the timeline: a phase per change of what it's doing (from its session events) and a usage sample per
+  reading, at most 240 of each.
 
 ## Configuration
 
@@ -142,7 +177,7 @@ pnpm dev                                       # server and UI with live reload 
 | `PORT` | `7420` | HTTP port for the UI and API |
 | `HOST` | `127.0.0.1` | Interface to listen on (`0.0.0.0` in a container, together with `PATTERN_RACE_ALLOWED_HOSTS`) |
 | `MANAGED_COPILOT_URL` | local discovery | Gateway URL (Aspire sets it) |
-| `PATTERN_RACE_MODEL` | `claude-sonnet-5` | The model every lane uses; a lane whose environment doesn't allow it is not raced |
+| `PATTERN_RACE_MODEL` | `claude-sonnet-5` | The model picked until someone picks another in the page |
 | `PATTERN_RACE_DATA_DIR` | `.data` | Where the last race is kept |
 | `PATTERN_RACE_ALLOWED_HOSTS` | none | Extra host names allowed to address the server (it accepts loopback names only by default) |
 

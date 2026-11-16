@@ -11,7 +11,23 @@ import {
 import type { ReactNode } from "react";
 import type { Job } from "../../shared/jobs.js";
 import type { Lane } from "../../shared/lanes.js";
-import { agentCount, elapsedMs, formatClock, formatCount, ordinal, premiumRequests, sandboxCount } from "../../shared/score.js";
+import {
+  agentCount,
+  cpuMs,
+  elapsedMs,
+  formatBytes,
+  formatClock,
+  formatCount,
+  formatSeconds,
+  formatTokens,
+  hasWorkers,
+  ordinal,
+  partlyMeasured,
+  peakMemoryBytes,
+  premiumRequests,
+  sandboxCount,
+  tokenCount,
+} from "../../shared/score.js";
 import type { LaneAvailability, LaneRun, RaceSnapshot } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
 import { openLane } from "../lib/store.js";
@@ -73,7 +89,36 @@ export function LaneCard({ lane, availability, race, job, run, now }: LaneCardPr
           hint={run?.premium.workers ? `Premium requests: ${formatCount(run.premium.session)} by this session, ${formatCount(run.premium.workers)} by its workers` : "Premium requests this session used"}
         />
       </div>
+      <Compute run={run} />
     </article>
+  );
+}
+
+/** What its sandboxes used (measured in each one's cgroup) and the tokens its own session spent. */
+function Compute({ run }: { readonly run: LaneRun | undefined }) {
+  const raced = run && run.status !== "ready" && run.status !== "skipped" ? run : undefined;
+  const cpu = raced ? cpuMs(raced) : undefined;
+  const memory = raced ? peakMemoryBytes(raced) : undefined;
+  const partly = raced ? partlyMeasured(raced) : false;
+  const noSandbox = raced?.sandboxes.length === 0 ? " None: it had no sandbox, and the shared runtime isn't counted." : "";
+  return (
+    <div className="grid grid-cols-3 border-t border-line-muted">
+      <Stat
+        label="CPU time"
+        value={cpu === undefined ? "–" : `${formatSeconds(cpu)}${partly ? "+" : ""}`}
+        hint={`CPU time its sandboxes used, from their own counters: setup, any agent inside, and every command.${noSandbox}`}
+      />
+      <Stat
+        label="peak memory"
+        value={memory === undefined ? "–" : `${formatBytes(memory)}${partly ? "+" : ""}`}
+        hint={`The most memory each of its sandboxes held, added up. An agent inside one counts.${noSandbox}`}
+      />
+      <Stat
+        label="tokens"
+        value={raced?.tokens ? `${formatTokens(tokenCount(raced))}${hasWorkers(raced) ? "+" : ""}` : "–"}
+        hint={raced && hasWorkers(raced) ? "Input and output tokens of its own session; its workers' sessions used more, which the race can't see" : "Input and output tokens its session used, sub-agents included"}
+      />
+    </div>
   );
 }
 

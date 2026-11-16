@@ -11,8 +11,8 @@ import type {
 } from "@github/copilot-sdk";
 import type { PlatformEvent, SessionInfo, WorkerInfo } from "@managed-copilot/sdk";
 import { LANES, type LaneId } from "../src/shared/lanes.js";
-import type { LaneAvailability, PlatformStatus } from "../src/shared/types.js";
-import type { LaneSession, RacePlatform } from "../src/server/platform.js";
+import type { LaneAvailability, PlatformStatus, SandboxUsage } from "../src/shared/types.js";
+import type { LaneSession, RacePlatform, SandboxSize } from "../src/server/platform.js";
 
 export class FakeSession implements LaneSession {
   readonly sessionId: string;
@@ -85,6 +85,7 @@ export class FakePlatform implements RacePlatform {
   status: PlatformStatus = { state: "connected", url: "http://localhost:7400", mode: "local", deployment: "copilot", account: { login: "octocat" } };
   lanes: LaneAvailability[] = LANES.map((lane) => ({ lane: lane.id, available: true, sandboxEnvironment: lane.type === "isolated" ? lane.environment : "coder" }));
   readonly model = { id: "claude-sonnet-5", name: "Claude Sonnet 5" };
+  models = [this.model, { id: "gpt-6-sol", name: "GPT-6 Sol" }];
   readonly sessions = new Map<LaneId, FakeSession>();
   readonly deleted: string[] = [];
   readonly workerLists = new Map<string, WorkerInfo[]>();
@@ -140,6 +141,23 @@ export class FakePlatform implements RacePlatform {
 
   async workers(sessionId: string): Promise<WorkerInfo[]> {
     return this.workerLists.get(sessionId) ?? [];
+  }
+
+  sandboxSize(environment: string): SandboxSize | undefined {
+    return environment === "coder" ? { cpus: 2, memoryBytes: 4 * 1024 ** 3 } : undefined;
+  }
+
+  measurable(environment: string): boolean {
+    return environment === "coder";
+  }
+
+  /** What each session's sandbox reports, by the session it's read through; unset ones aren't readable. */
+  readonly usages = new Map<string, SandboxUsage>();
+  readonly measured: string[] = [];
+
+  async sandboxUsage(sessionId: string): Promise<SandboxUsage | undefined> {
+    this.measured.push(sessionId);
+    return this.usages.get(sessionId);
   }
 
   async deleteLeftovers(prefix: string): Promise<number> {

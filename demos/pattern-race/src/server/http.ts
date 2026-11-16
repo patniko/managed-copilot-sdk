@@ -119,7 +119,8 @@ function routes(ctx: ApiContext): ReadonlyMap<string, Handler> {
       async (req, res) => {
         const body = await readJson<Partial<StartRaceRequest>>(req);
         if (!isJobId(body.job)) throw new RaceError("invalid_request", 'job must be "answer", "code", or "split".');
-        sendJson(res, 201, ctx.races.start(body.job));
+        if (body.model !== undefined && typeof body.model !== "string") throw new RaceError("invalid_request", "model must be a model ID, such as \"claude-sonnet-5\".");
+        sendJson(res, 201, ctx.races.start(body.job, body.model));
       },
     ],
     [

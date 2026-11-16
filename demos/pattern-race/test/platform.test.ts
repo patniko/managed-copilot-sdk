@@ -1,6 +1,7 @@
 import { ManagedCopilotError, type DeploymentInfo, type EnvironmentInfo } from "@managed-copilot/sdk";
 import { describe, expect, it } from "vitest";
-import { describeConnectError, describeLanes, reconnectDelay } from "../src/server/platform.js";
+import { describeConnectError, describeLanes, parseUsage, reconnectDelay } from "../src/server/platform.js";
+import { withModel } from "../src/shared/lanes.js";
 
 const network = { access: "all", allowedDomains: [] } as unknown as EnvironmentInfo["network"];
 const env = (fields: Partial<EnvironmentInfo> & Pick<EnvironmentInfo, "name" | "type">): EnvironmentInfo => ({ network, scheduling: false, agents: [], ...fields });
@@ -26,8 +27,8 @@ function deployment(overrides: { environments?: EnvironmentInfo[]; capabilities?
 
 describe("lanes on a deployment", () => {
   it("races all six on the root AppHost's environments, and knows where each lane's sandboxes come from", () => {
-    expect(describeLanes(deployment(), "claude-sonnet-5")).toEqual([
-      { lane: "shared", available: true },
+    expect(describeLanes(deployment())).toEqual([
+      { lane: "shared", available: true, models: ["claude-sonnet-5", "claude-haiku-5.5"] },
       { lane: "isolated", available: true, sandboxEnvironment: "coder" },
       { lane: "promotable", available: true, sandboxEnvironment: "coder" },
       { lane: "direct", available: true, sandboxEnvironment: "coder" },
@@ -45,9 +46,9 @@ describe("lanes on a deployment", () => {
         env({ name: "operator", type: "orchestrator", workers: ["coder"], execution: "direct" }),
       ],
     });
-    const reasons = Object.fromEntries(describeLanes(info, "claude-sonnet-5").map((lane) => [lane.lane, lane.available ? "ok" : lane.reason]));
+    const reasons = Object.fromEntries(describeLanes(info).map((lane) => [lane.lane, lane.available ? "ok" : lane.reason]));
     expect(reasons).toEqual({
-      shared: '"chat" doesn\'t allow claude-sonnet-5, the model every lane uses.',
+      shared: "ok",
       isolated: '"coder" is a shared environment, not isolated.',
       promotable: 'This deployment has no "helper" environment.',
       direct: "ok",
@@ -56,11 +57,17 @@ describe("lanes on a deployment", () => {
     });
   });
 
+  it("sits a lane out of a race whose model its environment doesn't allow", () => {
+    const shared = describeLanes(deployment()).find((lane) => lane.lane === "shared")!;
+    expect(withModel(shared, { id: "claude-haiku-5.5", name: "Claude Haiku 5.5" })).toBe(shared);
+    expect(withModel(shared, { id: "gpt-6-sol", name: "GPT-6 Sol" })).toEqual({ lane: "shared", available: false, reason: '"chat" doesn\'t allow GPT-6 Sol.' });
+  });
+
   it("waits for sandboxes and the shared runtime where a lane needs them", () => {
-    const lanes = describeLanes(deployment({ capabilities: ["events", "shared"] }), "claude-sonnet-5");
+    const lanes = describeLanes(deployment({ capabilities: ["events", "shared"] }));
     expect(lanes.filter((lane) => lane.available).map((lane) => lane.lane)).toEqual(["shared"]);
     expect(lanes.find((lane) => lane.lane === "delegate")?.reason).toBe("Sandboxes aren't ready on this deployment yet.");
-    expect(describeLanes(deployment({ capabilities: ["events", "isolated"] }), "claude-sonnet-5").find((lane) => lane.lane === "shared")?.reason).toBe(
+    expect(describeLanes(deployment({ capabilities: ["events", "isolated"] })).find((lane) => lane.lane === "shared")?.reason).toBe(
       "The shared runtime isn't running on this deployment.",
     );
   });
@@ -80,5 +87,14 @@ describe("connecting", () => {
     expect(reconnectDelay(1, () => 1)).toBe(1_000);
     expect(reconnectDelay(4, () => 0)).toBe(4_000);
     expect(reconnectDelay(20, () => 1)).toBe(30_000);
+  });
+});
+
+describe("a sandbox's usage", () => {
+  it("reads its cgroup counters: CPU time and the higher of its peak and current memory", () => {
+    expect(parseUsage("cpu_us 1886519\npeak 71176192\nnow 52289536\n")).toEqual({ cpuMs: 1886.519, peakMemoryBytes: 71_176_192, memoryBytes: 52_289_536 });
+    // cgroup v1 counts CPU in nanoseconds; a kernel without memory.peak still has the current reading.
+    expect(parseUsage("cpu_ns 2500000000\npeak \nnow 1048576\n")).toEqual({ cpuMs: 2500, peakMemoryBytes: 1_048_576, memoryBytes: 1_048_576 });
+    expect(parseUsage("cpu_ns \npeak \nnow \n")).toBeUndefined();
   });
 });
