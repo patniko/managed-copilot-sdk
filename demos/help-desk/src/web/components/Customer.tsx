@@ -342,10 +342,10 @@ export function TeamNotes({
   const connected = useStore((state) => state.platform?.state === "connected");
   const state = knownIssue ? KNOWN_ISSUE_STATE[knownIssue.state] : undefined;
   return (
-    <section aria-label="Team notes" className="Box">
+    <section aria-label="Continue session with agent" className="Box">
       <div className="Box-header py-2">
         <CommentIcon size={16} className="shrink-0 text-fg-muted" />
-        <h2 className="Box-title">Team notes</h2>
+        <h2 className="Box-title">Continue session with agent</h2>
         <span className="Counter">{notes.length}</span>
         {knownIssue && state ? (
           <span className={cx("ml-auto inline-flex min-w-0 items-center gap-1 text-xs", TONE_TEXT[state.tone])} title={knownIssue.message ?? `Known issue: ${knownIssue.title}`}>

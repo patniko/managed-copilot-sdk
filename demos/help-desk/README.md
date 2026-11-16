@@ -83,7 +83,7 @@ wall, waiting, before you Simulate or Classify them. To demo it:
    listed with the customers, as *Mona · Downhill*), then **Open in Software Factory** to follow the work order there
    (see [below](#software-issues-fixed-by-software-factory)).
 6. **Teach the desk.** Open one of the customers with a discount-code complaint, such as **Mateo Rossi**, and under
-   **Team notes** write to his agent: *Customers can type TRAIL15 in capitals while we fix it. Let's track this solution
+   **Continue session with agent** write to his agent: *Customers can type TRAIL15 in capitals while we fix it. Let's track this solution
    for future customers.* **Add** what the agent proposes for the team knowledge base. See [below](#team-notes).
 7. Type as a customer in their widget to keep a conversation going.
 8. End the simulation from **⋯**: its sessions are deleted. Simulating again replaces it the same way. Players' tickets
@@ -195,7 +195,7 @@ only its tools for the Downhill Shop.
 
 ## Team notes
 
-Open a ticket (a customer's or a player's) and write in **Team notes**, on the right of their page. A note goes to the
+Open a ticket (a customer's or a player's) and write in **Continue session with agent**, on the right of their page. A note goes to the
 agent, not the customer: it reaches the session as a message in a `<team_note author="…">` block (Help Desk defuses the
 tag in what customers and players type, so only a team member can write one), the customer's chat never shows it, and
 the agent replies to the customer only with what they need to know. Your note is signed with the GitHub account Help
