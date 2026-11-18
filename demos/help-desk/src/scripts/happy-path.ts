@@ -3,7 +3,7 @@
  * refunds and cancellations they ask for (approves the first, declines any others), checks that every session stayed
  * on its own customer's orders and on one shared runtime, lists the software issues the agents reported (Aisha's promo
  * code, among the first five; it doesn't send them to Software Factory), then ends the simulation, which deletes its
- * sessions. When an agent proposes a fact for the team knowledge base (Noah's usually does: his boots run small), it
+ * sessions. When an agent proposes a fact for the team knowledge base (Noah's usually does: the Painterly filter), it
  * adds the first (checking the app stored it) and declines the others, then removes the one it added, so the
  * knowledge base is left as it was.
  *

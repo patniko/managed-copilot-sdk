@@ -123,7 +123,7 @@ function AlertsButton() {
   const integrations = useStore((state) => state.integrations);
   const now = useNow(30_000);
   if (!integrations) return null;
-  const example = `curl -X POST ${integrations.alertsUrl} \\\n  -H "Authorization: Bearer $INCIDENT_ALERT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"title":"Checkout errors","service":"checkout","severity":"major","summary":"5xx rate is 12%"}'`;
+  const example = `curl -X POST ${integrations.alertsUrl} \\\n  -H "Authorization: Bearer $INCIDENT_ALERT_SECRET" \\\n  -H "Content-Type: application/json" \\\n  -d '{"title":"Checkout errors","service":"downhill-orders","severity":"major","summary":"5xx rate is 12%"}'`;
   return (
     <Popover
       label="Connect your alerts"

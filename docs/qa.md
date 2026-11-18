@@ -163,9 +163,9 @@ later (`copilot --version`).
 The steps for `local.factory-routing`, with `aspire run` up (Software Factory, Help Desk, Data Desk, and Downhill run
 with it).
 
-- [ ] Help Desk: simulate 25 customers. Aisha's and Ben's agents report promo codes rejected at checkout, Lucas's a cart
-      quantity that changed, and Hannah's and Arjun's an order shown as delivered that is out for delivery. The wall's
-      **Software issues** groups the reports by area.
+- [ ] Help Desk: simulate 25 customers. Aisha's and Ben's agents report promo codes rejected at checkout, Lucas's the
+      same look charged twice, and Hannah's and Arjun's a purchase shown as unlocked while its payment is pending. The
+      wall's **Software issues** groups the reports by area.
 - [ ] Downhill: ride a run, open the **Shop**, and press **Apply code** on the launch offer: checkout says **Invalid
       code.** Buy anyway, then **Contact support**. The chat opens in the game, and the wall shows the player's tile
       (**Downhill**, **Live**); their report joins **Promo codes rejected at checkout**, and the refund the agent asks
@@ -175,8 +175,8 @@ with it).
 - [ ] On the factory's floor the work order starts from **From Help Desk**: the brief quotes the reports, and it brought
       `BUG_REPORT.md` and the `contoso-storefront` project. The release fixes the storefront with regression tests, and
       the Deliverable lists the files it changed.
-- [ ] Data Desk: pick **Storefront checkout funnel** and ask the suggested question. Copilot finds that mobile shoppers
-      with $40–$49 carts drop out at the shipping step.
+- [ ] Data Desk: pick **Downhill beta frame rate** and ask the suggested question. Copilot finds that on integrated
+      graphics, Auto runs about as slowly as High, and first-minute quits triple.
 - [ ] Select rows in Copilot's table and **Send to Software Factory** with what to build: the conversation shows the
       work order, and the factory's floor shows **From Data Desk** with `INSIGHT.md` and the data files.
 - [ ] Restart Help Desk (`aspire resource help-desk restart --apphost apphost.mts`): the wall still shows its issues'

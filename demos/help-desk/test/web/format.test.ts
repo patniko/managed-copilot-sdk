@@ -26,7 +26,7 @@ import {
 import { chatTicketId, parseHash } from "../../src/web/lib/router.js";
 import { reduce, type StoreState } from "../../src/web/lib/store.js";
 
-const tool = (overrides: Partial<ToolItem>): ToolItem => ({ kind: "tool", id: "t1", name: "get_order", args: { orderId: "co-48177" }, at: "2026-11-03T10:00:00.000Z", status: "done", ...overrides });
+const tool = (overrides: Partial<ToolItem>): ToolItem => ({ kind: "tool", id: "t1", name: "get_order", args: { orderId: "dh-20417" }, at: "2026-11-03T10:00:00.000Z", status: "done", ...overrides });
 const ticket = (overrides: Partial<Ticket> = {}): Ticket => ({ customerId: "c01", status: "waiting", items: [], blocked: 0, ...overrides });
 
 describe("words on the wall", () => {
@@ -63,30 +63,31 @@ describe("words on the wall", () => {
 
   it("tells the customer what the agent did, without the operator's details", () => {
     expect(customerLine(tool({ name: "list_my_orders", status: "running" }))).toEqual({ text: "Looking up your orders…", tone: "muted" });
-    expect(customerLine(tool({ status: "refused", blocked: true }))).toEqual({ text: "CO-48177 isn't on your account", tone: "muted" });
+    expect(customerLine(tool({ status: "refused", blocked: true }))).toEqual({ text: "DH-20417 isn't on your account", tone: "muted" });
     expect(customerLine(tool({ name: "request_refund", status: "asking" }))).toEqual({ text: "Refund sent to the team for approval", tone: "attention" });
-    expect(customerLine(tool({ name: "request_refund", status: "done", result: { ok: true, refunded: 39 } }))).toEqual({ text: "Refund approved: $39.00 back", tone: "success" });
+    expect(customerLine(tool({ name: "request_refund", status: "done", result: { ok: true, refunded: 4.99 } }))).toEqual({ text: "Refund approved: $4.99 back", tone: "success" });
+    expect(customerLine(tool({ name: "check_unlock", status: "running" }))).toEqual({ text: "Checking DH-20417's payment…", tone: "muted" });
     expect(customerLine(tool({ name: "cancel_order", status: "declined" }))).toEqual({ text: "Cancellation needs a closer look", tone: "muted" });
     expect(customerLine(tool({ name: "resolve_conversation" }))).toBeUndefined();
   });
 
   it("tells the operator what each tool call did", () => {
     expect(operatorOutcome(tool({ status: "refused", blocked: true }))).toEqual({ text: "Blocked: another customer's order", tone: "danger" });
-    expect(operatorOutcome(tool({ status: "refused", result: { ok: false, error: "Delivered 50 days ago." } }))).toEqual({ text: "Delivered 50 days ago.", tone: "muted" });
+    expect(operatorOutcome(tool({ status: "refused", result: { ok: false, error: "This order is cancelled already." } }))).toEqual({ text: "This order is cancelled already.", tone: "muted" });
     expect(operatorOutcome(tool({ name: "list_my_orders", result: { orders: [{}, {}] } }))).toEqual({ text: "2 orders", tone: "success" });
-    expect(operatorOutcome(tool({ name: "track_shipment", result: { carrier: "UPS", status: "in transit" } }))).toEqual({ text: "UPS · in transit", tone: "success" });
-    expect(operatorOutcome(tool({ name: "request_refund", result: { refunded: 24 } }))).toEqual({ text: "$24.00 refunded", tone: "success" });
+    expect(operatorOutcome(tool({ name: "check_unlock", result: { paymentMethod: "Bank transfer", status: "payment pending" } }))).toEqual({ text: "Bank transfer · payment pending", tone: "success" });
+    expect(operatorOutcome(tool({ name: "request_refund", result: { refunded: 6.99 } }))).toEqual({ text: "$6.99 refunded", tone: "success" });
     expect(operatorOutcome(tool({ status: "asking" }))).toEqual({ text: "Needs approval", tone: "attention" });
-    expect(operatorOutcome(tool({ name: "store_memory", args: { subject: "Boots" } }))).toEqual({ text: "Proposed to the team", tone: "muted" });
-    expect(toolArgs(tool({ args: { orderId: "co-1", amount: 5 } }))).toBe("CO-1 · $5.00");
+    expect(operatorOutcome(tool({ name: "store_memory", args: { subject: "Painterly filter" } }))).toEqual({ text: "Proposed to the team", tone: "muted" });
+    expect(toolArgs(tool({ args: { orderId: "dh-1", amount: 5 } }))).toBe("DH-1 · $5.00");
   });
 
-  it("shows a reported problem with the website to both: plainly to the customer, by area to the operator", () => {
-    const report = tool({ name: "report_bug", args: { area: "promo-codes", title: "TRAIL15 rejected", orderId: "CO-48224" }, result: { ok: true, area: "promo-codes" } });
+  it("shows a reported problem with the shop to both: plainly to the customer, by area to the operator", () => {
+    const report = tool({ name: "report_bug", args: { area: "promo-codes", title: "TRAIL15 rejected", orderId: "DH-20540" }, result: { ok: true, area: "promo-codes" } });
     expect(customerLine(report)).toEqual({ text: "Reported the problem to our engineering team", tone: "muted" });
     expect(customerLine({ ...report, status: "running" })).toEqual({ text: "Reporting the problem to our engineering team…", tone: "muted" });
     expect(customerLine({ ...report, status: "failed" })).toBeUndefined();
-    expect(customerLine({ ...report, status: "refused" })).toEqual({ text: "CO-48224 isn't on your account", tone: "muted" });
+    expect(customerLine({ ...report, status: "refused" })).toEqual({ text: "DH-20540 isn't on your account", tone: "muted" });
     expect(operatorOutcome(report)).toEqual({ text: "Reported: Promo codes", tone: "done" });
     expect(operatorOutcome({ ...report, args: { area: "made-up" } })).toEqual({ text: "Reported: Other", tone: "done" });
   });
@@ -98,17 +99,17 @@ describe("words on the wall", () => {
   });
 
   it("applies the Markdown marks agents use, and drops them from previews", () => {
-    expect(inlineMarkdown("Yes! **CO-48234** ships *tomorrow*, see `track_shipment`.")).toEqual([
+    expect(inlineMarkdown("Yes! **DH-20866** unlocks *tomorrow*, see `check_unlock`.")).toEqual([
       { kind: "text", text: "Yes! " },
-      { kind: "strong", text: "CO-48234" },
-      { kind: "text", text: " ships " },
+      { kind: "strong", text: "DH-20866" },
+      { kind: "text", text: " unlocks " },
       { kind: "em", text: "tomorrow" },
       { kind: "text", text: ", see " },
-      { kind: "code", text: "track_shipment" },
+      { kind: "code", text: "check_unlock" },
       { kind: "text", text: "." },
     ]);
     expect(inlineMarkdown("$39 back, 3 * 4 = 12")).toEqual([{ kind: "text", text: "$39 back, 3 * 4 = 12" }]);
-    expect(plainText("Yes! **CO-48234** (Merino)\n- ships __tomorrow__")).toBe("Yes! CO-48234 (Merino) ships tomorrow");
+    expect(plainText("Yes! **DH-20866** (Golden Mona)\n- unlocks __tomorrow__")).toBe("Yes! DH-20866 (Golden Mona) unlocks tomorrow");
   });
 
   it("shows a player's checkout and refund in plain words", () => {
@@ -118,7 +119,7 @@ describe("words on the wall", () => {
     expect(checkoutLine({ items: [], subtotalCents: 499 })).toBe("No code applied");
     const refund = { id: "r1", action: "refund" as const, orderId: "DH-1042", amount: 0.75 };
     expect(approvalTitle(refund, "Mona")).toBe("Refund $0.75 of DH-1042 to Mona");
-    expect(approvalTitle({ ...refund, orderId: "CO-48177", amount: 39 })).toBe("Refund $39.00 · CO-48177");
+    expect(approvalTitle({ ...refund, orderId: "DH-20417", amount: 4.99 })).toBe("Refund $4.99 · DH-20417");
     expect(customerLine(tool({ name: "get_checkout", args: {}, status: "running" }))).toEqual({ text: "Looking at your checkout…", tone: "muted" });
     expect(customerLine(tool({ name: "get_checkout", args: {} }))).toEqual({ text: "Looked at your checkout", tone: "muted" });
     expect(operatorOutcome(tool({ name: "get_checkout", args: {}, result: { ok: true, code: "trail15", bought: true } }))).toEqual({ text: 'Code "trail15" · bought anyway', tone: "success" });

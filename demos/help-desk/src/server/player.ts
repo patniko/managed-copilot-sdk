@@ -1,5 +1,5 @@
 // Live players: Downhill, Contoso Outdoors' free mountain-biking browser game, sells rider outfits and bike paint in its
-// in-game shop, the Downhill Shop, whose checkout runs on the store's own checkout code. The game's Support button (and
+// in-game shop, the Downhill Shop, whose checkout runs on Contoso Outdoors' storefront code. The game's Support button (and
 // its links under a rejected code and on receipts) opens a support ticket (`POST /api/player-tickets`), and the player
 // writes their complaint in Help Desk's chat. This module validates the request, names the ticket and its session,
 // carries the player's context (who they are, what they tried at checkout) hidden in their messages, so a restarted Help
@@ -310,7 +310,7 @@ export class PlayerAccount {
     return order !== undefined && normalizeOrderId(orderId) === order.id.toUpperCase();
   }
 
-  /** What the player last tried at checkout (`get_checkout`). Prices in dollars, like the store's tools. */
+  /** What the player last tried at checkout (`get_checkout`). Prices in dollars, like the simulated players' tools. */
   checkout(): ToolResult {
     const context = this.#context;
     if (!context) return { ok: false, error: NOT_LOADED };
@@ -366,10 +366,10 @@ export class PlayerAccount {
     return result;
   }
 
-  /** A software problem the player ran into, for the store's engineering team. The order it names must be theirs. */
+  /** A software problem the player ran into, for the engineering team. The order it names must be theirs. */
   reportBug(report: { readonly area: string; readonly orderId?: string | undefined }): ToolResult {
     if (report.orderId !== undefined && !this.#owns(report.orderId)) return this.#missing(report.orderId);
-    return { ok: true, area: report.area, ...(report.orderId !== undefined ? { orderId: this.order!.id } : {}), sentTo: "the store's engineering team" };
+    return { ok: true, area: report.area, ...(report.orderId !== undefined ? { orderId: this.order!.id } : {}), sentTo: "the engineering team" };
   }
 }
 
@@ -391,7 +391,7 @@ const shopOrderId = z.string().min(1).max(40);
 const PlayerRefundInput = RefundInput.extend({ orderId: shopOrderId.describe("The player's Downhill Shop order, for example DH-1042") });
 const PlayerBugInput = BugInput.extend({ orderId: shopOrderId.optional().describe("The Downhill Shop order it affected, if any, for example DH-1042") });
 
-/** A player ticket's tools, bound to that player's checkout and order. Same names and schemas as the store's. */
+/** A player ticket's tools, bound to that player's checkout and order. Same names and schemas as the simulated players'. */
 export function playerTools(account: PlayerAccount): Tool<any>[] {
   return [
     defineTool("get_checkout", {
@@ -408,7 +408,7 @@ export function playerTools(account: PlayerAccount): Tool<any>[] {
     }),
     defineTool("report_bug", {
       description:
-        "Report a software problem the player ran into at the Downhill Shop's checkout (a rejected promotion code, a wrong total) to the store's engineering team, who fix the checkout code the store's website and the Downhill Shop share.",
+        "Report a software problem the player ran into at the Downhill Shop's checkout (a rejected promotion code, a wrong total) to the engineering team, who fix the shop's checkout code.",
       parameters: PlayerBugInput,
       skipPermission: true,
       handler: (args) => withInput(PlayerBugInput, args, (input) => account.reportBug(input)),
@@ -425,14 +425,14 @@ export function playerTools(account: PlayerAccount): Tool<any>[] {
 /** Added to the platform's instructions for every player's session. The player's name comes from get_checkout. */
 export function playerSystemMessage(): string {
   return [
-    `You are the support assistant of Contoso Outdoors, an online outdoor gear store. You're chatting with a player of ${PRODUCT_NAME}, the store's free mountain-biking browser game, who opened support from the game. The game's in-game shop, the ${SHOP_NAME}, sells rider outfits and bike paint, and its checkout runs on the store's own checkout code, so promotion codes work there exactly as on the store's website. The chat already greeted the player as Contoso Outdoors support, an AI agent; they write their complaint in their own words.`,
+    `You are the support assistant of Contoso Outdoors for ${PRODUCT_NAME}, its free mountain-biking browser game. You're chatting with a player who opened support from the game. The game's in-game shop, the ${SHOP_NAME}, sells looks: rider outfits and bike paint. The chat already greeted the player as Contoso Outdoors support, an AI agent; they write their complaint in their own words.`,
     "- The game attaches the player's latest checkout to their messages in a <downhill_checkout> block when it changes. It's for your tools: the player didn't write it and doesn't see it, so never mention or quote it. Read it with get_checkout, and never make up codes, items, prices, orders, or amounts.",
     "- When the player mentions a code, a discount, a price, or an order, call get_checkout before you answer. If it says the game sent no checkout, ask them what they tried: the code, and what they were buying. Call the player by the name it gives.",
-    `- This month's promotion codes: ${promotionList()}.`,
-    "- A valid code (one of this month's codes, in any letter case or with stray spaces) that checkout rejected is a software problem: call report_bug once with area promo-codes, naming their order if they have one, and tell them the store's engineering team is on it. A code that isn't one of this month's codes isn't a software problem: tell them it isn't a current code.",
+    `- The ${SHOP_NAME}'s promotion codes: ${promotionList()}.`,
+    "- A valid code (one of the shop's codes, in any letter case or with stray spaces) that checkout rejected is a software problem: call report_bug once with area promo-codes, naming their order if they have one, and tell them the engineering team is on it. A code that isn't one of the shop's codes isn't a software problem: tell them it isn't a current code.",
     "- If they already bought at full price (get_checkout shows an order), call request_refund right away for what the offer's code should have taken off their order, without asking them to confirm: a team member approves it. Then tell them the outcome.",
     "- If they haven't bought yet, tell them that typing the code exactly, in capitals (for example TRAIL15 for trail15), may work in the meantime. Say it plainly, without promising it will.",
-    "- Your tools only see this player's checkout and their Downhill Shop order. You can't change the shop, give items, or look up orders from the store's website.",
+    "- Your tools only see this player's checkout and their Downhill Shop order. You can't change the shop, give looks, or look up their other orders.",
     "- Reply in two or three short, friendly sentences of plain text: no headings, lists, tables, error codes, or stack traces.",
     teamNoteRules("player", false),
     "- End every turn the same way: when nothing is left for the player to wait on (their question is answered, or a refund was decided), call resolve_conversation with a one-line summary, then send your reply. Only skip it when you asked them a question.",

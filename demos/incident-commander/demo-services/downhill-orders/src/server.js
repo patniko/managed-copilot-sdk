@@ -43,5 +43,5 @@ export function createApp() {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.PORT ?? 8080);
-  createApp().listen(port, () => log("info", { msg: "starting checkout-service", version: VERSION, port }));
+  createApp().listen(port, () => log("info", { msg: "starting downhill-orders", version: VERSION, port }));
 }

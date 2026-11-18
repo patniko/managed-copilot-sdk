@@ -55,13 +55,13 @@ export interface Classification {
 /** The questions, as the system message Help Desk's endpoint reads. Their names are the schema's properties. */
 export const TRIAGE_QUESTIONS: QuestionSpecs = {
   category: {
-    instructions: "Which kind of support request is this message from an outdoor gear shop's customer? Pick the customer's main need.",
+    instructions: "Which kind of support request is this message from a Downhill player, about the game or its in-game shop? Pick the player's main need.",
     criteria: Object.fromEntries(TICKET_CATEGORIES.map((category) => [category, TICKET_CATEGORY_INFO[category].description])),
   },
   urgent: {
-    instructions: "Does the customer need an answer urgently?",
+    instructions: "Does the player need an answer urgently?",
     criteria: {
-      true: "There's a near deadline (a trip, an event, a gift), the product is broken or unsafe, or the customer was charged wrongly.",
+      true: "There's a near deadline (a race, an event, a gift), someone bought without permission, or the player was charged wrongly.",
       false: "A routine question or request that can wait a day.",
     },
   },
@@ -69,7 +69,7 @@ export const TRIAGE_QUESTIONS: QuestionSpecs = {
 
 /** The same questions for an ordinary LLM, in words. */
 export const LLM_TRIAGE_INSTRUCTIONS = [
-  "You classify messages from an outdoor gear shop's customers. Answer with the requested JSON only.",
+  "You classify messages from players of Downhill, a mountain-biking browser game with an in-game shop. Answer with the requested JSON only.",
   `category: ${TRIAGE_QUESTIONS["category"]!.instructions}`,
   ...TICKET_CATEGORIES.map((category) => `- ${category}: ${TICKET_CATEGORY_INFO[category].description}`),
   `urgent: ${TRIAGE_QUESTIONS["urgent"]!.instructions}`,

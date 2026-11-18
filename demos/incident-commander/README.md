@@ -6,11 +6,12 @@ before it deploys. The request waits on the platform, not in your browser: close
 **Deploy**. Built on the stock `@github/copilot-sdk` and `@managed-copilot/sdk`
 ([spec section 17](../../docs/spec/developer-experience.md)).
 
-![A checkout incident waiting for approval: the map shows the alert, Copilot on the shared runtime, its own triage sandbox and two finished workers, and the deploy gate marked Needs you; the approval card shows the verified one-line fix](docs/screenshots/approval.png)
+![A checkout incident in downhill-orders waiting for approval: the map shows the alert, Copilot on the shared runtime, its own triage sandbox and two finished workers, and the deploy gate marked Needs you; the approval card shows the verified fix, which releases downhill-orders v1.4.3](docs/screenshots/approval.png)
 
-*A real run against the bundled demo service. Copilot found the crash in the logs from its own sandbox (**Triage**),
-`repro` wrote a failing test, `fix` patched the code, and Copilot verified both together (10 passed). The deploy
-request now waits on the platform, and the app holds no connection to the session.*
+*A real run against the bundled demo service, Downhill's order service. Copilot found the crash in the logs from its
+own sandbox (**Triage**): since v1.4.2, expired codes such as `EARLYRIDER` crash checkout. `repro` wrote a failing
+test, `fix` patched the code, and Copilot verified both together (9 passed). The deploy request now waits on the
+platform, and the app holds no connection to the session.*
 
 ## What it shows
 
@@ -28,7 +29,7 @@ request now waits on the platform, and the app holds no connection to the sessio
   Services can publish their code, logs, and deploy history over HTTP: [Downhill](../downhill/README.md)'s shop does,
   pages Incident Commander when checkout rejects its launch code, and takes the fix back
   ([From Downhill's shop](#from-downhills-shop)). **Simulate an incident** is the labeled demo: a sample alert for a
-  bundled checkout service.
+  second launch-day failure, in Downhill's order service, bundled as `downhill-orders`.
 - **Real logs, live.** Services stream OpenTelemetry logs to an OTLP/HTTP endpoint, and the board and each incident show
   them as they arrive ([Stream your logs](#stream-your-logs)). Play Downhill and every trick, crash, and checkout
   streams in; the rejected code shows up seconds before the incident it opens.
@@ -46,8 +47,9 @@ request now waits on the platform, and the app holds no connection to the sessio
    card in `pnpm gallery`).
 2. Choose how the fix is made next to **Simulate an incident**: **Fix with: Copilot's workers** or **Software
    Factory** (the default when Software Factory is connected).
-3. Click **Simulate an incident**. It posts an Alertmanager-shaped alert for the demo checkout service, whose v1.4.2
-   deploy crashes on expired coupon codes.
+3. Click **Simulate an incident**. It posts an Alertmanager-shaped alert for `downhill-orders`, the Downhill Shop's
+   order service, whose v1.4.2 deploy crashes on expired codes: players still typing `EARLYRIDER`, the
+   pre-registration reward, or `BETA25`, the open beta's thank-you, get a 500 at checkout.
 4. Watch the map: Copilot triages in **Triage** (its own sandbox), then hands `repro` and `fix` to workers. With
    Software Factory, a **Software Factory** node takes the fix worker's place: `WO-0012`, its status, and **Open in
    Software Factory**.
@@ -73,9 +75,9 @@ and fails if the deploy request isn't the factory's fix.
 
 | Triage in its own sandbox | Repro and fix in workers |
 | --- | --- |
-| ![Investigating: Copilot working, its Triage sandbox running commands, two dashed slots for workers, and the root cause still being searched](docs/screenshots/triage.png) | ![Mitigating: the fix and repro workers working in their own sandboxes, and the root cause recorded with its evidence](docs/screenshots/workers.png) |
+| ![Investigating: Copilot working, its own Triage sandbox after 10 commands, two dashed slots for workers, and the root cause still being searched](docs/screenshots/triage.png) | ![Mitigating: the repro and fix workers starting in their own sandboxes, and the root cause recorded with its evidence: TypeErrors in src/discounts.js, all with EARLYRIDER or BETA25](docs/screenshots/workers.png) |
 
-![Resolved: every sandbox done, the deploy gate shows checkout v1.4.2 → v1.4.3, and the postmortem with triage, fix, and resolve times](docs/screenshots/resolved.png)
+![Resolved: every sandbox done, the deploy gate shows downhill-orders v1.4.2 → v1.4.3, and the postmortem with triage, fix, and resolve times](docs/screenshots/resolved.png)
 
 ## The pattern: mixed
 
@@ -142,7 +144,7 @@ sequenceDiagram
   `context` is `INCIDENT.md`: the alert, the root cause and its evidence, the failing path, the expected behavior, the
   diff of the deploy that caused it (for a service without a diff for its version, its deploy history), and the newest
   error lines from the logs (its warnings, when it logged no errors). Its `origin` names Incident Commander and the
-  incident (`INC-1004 · checkout`), with a link back to the incident page.
+  incident (`INC-1004 · downhill-orders`), with a link back to the incident page.
 - **Following it.** The app reads the work order about every 5 seconds while it's active and records each step on the
   timeline (planning, building, releasing, released or failed). The state is in the app's records, so a restart picks
   it up again. If Software Factory can't be reached, the incident says so and the app keeps trying, more slowly.
@@ -188,7 +190,7 @@ sequenceDiagram
   answers `GET <url>`, server to server within 10 seconds, with its name, version, and files:
 
   ```json
-  { "name": "downhill-shop", "version": "1.0.0",
+  { "name": "downhill-shop", "version": "2.3.0",
     "files": [ { "path": "package.json", "content": "…" }, { "path": "src/promotions.js", "content": "…" },
                { "path": "test/promotions.test.js", "content": "…" },
                { "path": "logs/shop.log", "content": "…" }, { "path": "deploys/HISTORY.md", "content": "…" } ] }
@@ -229,8 +231,9 @@ sequenceDiagram
   incidents and answers the app's tools and sandbox prompts with `event.handleActions`, and leaves an undecided deploy
   for a person.
 - **What's real and what's the demo.** The alert endpoint, the webhook, the sessions, sandboxes, and workers are real.
-  The bundled checkout service is the labeled demo: its production logs and deploy history are generated around the
-  alert's time (the numbers in the alert match the logs), and deploying it records the release and resolves the alert.
+  The bundled `downhill-orders` service is the labeled demo: its production logs and deploy history are generated
+  around the alert's time (the numbers in the alert match the logs), and deploying it records the release and resolves
+  the alert.
   Your own services deploy through your pipeline instead.
 
 ## Connect your alerts
@@ -260,11 +263,11 @@ else can post a small JSON object:
 ```powershell
 curl -X POST http://localhost:7445/api/alerts `
   -H "Authorization: Bearer $env:INCIDENT_ALERT_SECRET" -H "Content-Type: application/json" `
-  -d '{"title":"Checkout errors","service":"checkout","severity":"major","summary":"5xx rate is 12%"}'
+  -d '{"title":"Checkout errors","service":"downhill-orders","severity":"major","summary":"5xx rate is 12%"}'
 ```
 
 The service comes from the `service`, `app`, `component`, or `job` label. Copilot gets that service's folder when
-Incident Commander has one: the bundled `checkout`, a folder of your own, or a service over HTTP (below). Without one,
+Incident Commander has one: the bundled `downhill-orders`, a folder of your own, or a service over HTTP (below). Without one,
 it records what the alert says and what to check next.
 
 ## Stream your logs
@@ -306,7 +309,7 @@ reported when the incident opened:
 ```json
 {
   "type": "incident.deploy_approved",
-  "incident": "INC-1004",
+  "incident": "INC-1001",
   "service": "downhill-shop",
   "version": "2.3.1",
   "previousVersion": "2.3.0",
@@ -362,7 +365,7 @@ secret.
 
 | Board | Dark |
 | --- | --- |
-| ![The incident board with one open SEV2 incident and its elapsed time, and a resolved one below](docs/screenshots/board.png) | ![The waiting approval in GitHub's dark theme](docs/screenshots/dark.png) |
+| ![The incident board: Downhill's open SEV2 incident (24 of 24 promo checkouts failed, "Invalid code.") routed to Software Factory, live telemetry from downhill-shop with the rejected trail15, and a resolved downhill-orders incident below](docs/screenshots/board.png) | ![The waiting approval in GitHub's dark theme](docs/screenshots/dark.png) |
 
 <img src="docs/screenshots/mobile.png" alt="The waiting incident at phone width: a jump to the deploy request, then the map stacked top to bottom" width="320">
 
@@ -377,7 +380,7 @@ secret.
 | `src/server/factory.ts` | Software Factory: the work order for a fix (project, `INCIDENT.md`, origin), its API, and the fix in its release |
 | `src/server/alerts.ts`, `deploy.ts`, `services.ts` | Alert parsing and auth, deploy targets, the service catalog (your folders, services over HTTP, the demo) |
 | `src/server/telemetry.ts` | OpenTelemetry logs in: the OTLP/HTTP JSON parser and the recent records streamed to browsers |
-| `src/server/demo.ts`, `demo-services/checkout` | The labeled demo: the checkout service and its generated production logs |
+| `src/server/demo.ts`, `demo-services/downhill-orders` | The labeled demo: Downhill's order service and its generated production logs |
 | `src/web` | The UI (React, Tailwind with `@managed-copilot/github-theme`, Octicons) |
 | `src/scripts/happy-path.ts` | The scripted real run |
 

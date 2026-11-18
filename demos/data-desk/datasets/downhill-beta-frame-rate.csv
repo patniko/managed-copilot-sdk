@@ -1,0 +1,91 @@
+course,gpu,quality,sessions,median_fps,low_fps,first_minute_quit_rate
+Citadel Coast,integrated,Auto,7871,26.5,18.6,0.249
+Citadel Coast,integrated,Low,874,50.1,32.5,0.086
+Citadel Coast,integrated,Medium,1054,39.7,27.1,0.140
+Citadel Coast,integrated,High,1792,25.5,18.1,0.247
+Citadel Coast,integrated,Ultra,1105,13.8,9.8,0.268
+Citadel Coast,mid-range,Auto,6159,55.1,42.6,0.076
+Citadel Coast,mid-range,Low,677,60.0,48.3,0.085
+Citadel Coast,mid-range,Medium,924,60.0,47.7,0.088
+Citadel Coast,mid-range,High,1541,49.5,38.0,0.119
+Citadel Coast,mid-range,Ultra,775,34.4,27.4,0.157
+Citadel Coast,high-end,Auto,3448,60.0,49.0,0.078
+Citadel Coast,high-end,Low,360,60.0,48.5,0.083
+Citadel Coast,high-end,Medium,506,60.0,45.6,0.079
+Citadel Coast,high-end,High,816,60.0,49.4,0.082
+Citadel Coast,high-end,Ultra,445,56.6,46.2,0.081
+Sunset Mesa,integrated,Auto,5739,29.6,18.5,0.224
+Sunset Mesa,integrated,Low,590,56.4,36.3,0.089
+Sunset Mesa,integrated,Medium,778,43.0,26.9,0.115
+Sunset Mesa,integrated,High,1303,28.2,17.8,0.220
+Sunset Mesa,integrated,Ultra,639,14.6,9.2,0.244
+Sunset Mesa,mid-range,Auto,4502,59.6,47.6,0.074
+Sunset Mesa,mid-range,Low,478,60.0,45.2,0.083
+Sunset Mesa,mid-range,Medium,641,60.0,50.8,0.076
+Sunset Mesa,mid-range,High,920,55.7,43.8,0.089
+Sunset Mesa,mid-range,Ultra,531,39.5,30.6,0.144
+Sunset Mesa,high-end,Auto,2608,60.0,46.1,0.081
+Sunset Mesa,high-end,Low,310,60.0,48.6,0.073
+Sunset Mesa,high-end,Medium,321,60.0,49.9,0.087
+Sunset Mesa,high-end,High,628,60.0,49.5,0.088
+Sunset Mesa,high-end,Ultra,299,60.0,47.9,0.071
+Alpine Peaks,integrated,Auto,5244,26.3,16.7,0.264
+Alpine Peaks,integrated,Low,588,52.4,37.0,0.074
+Alpine Peaks,integrated,Medium,711,41.5,28.0,0.098
+Alpine Peaks,integrated,High,1175,25.4,17.6,0.245
+Alpine Peaks,integrated,Ultra,733,14.0,8.8,0.220
+Alpine Peaks,mid-range,Auto,4345,55.6,45.3,0.072
+Alpine Peaks,mid-range,Low,448,60.0,46.2,0.084
+Alpine Peaks,mid-range,Medium,617,60.0,48.0,0.087
+Alpine Peaks,mid-range,High,1022,52.9,41.3,0.086
+Alpine Peaks,mid-range,Ultra,597,35.9,27.4,0.150
+Alpine Peaks,high-end,Auto,2306,60.0,50.6,0.075
+Alpine Peaks,high-end,Low,233,60.0,50.8,0.081
+Alpine Peaks,high-end,Medium,310,60.0,45.0,0.072
+Alpine Peaks,high-end,High,500,60.0,48.1,0.074
+Alpine Peaks,high-end,Ultra,276,56.3,43.3,0.087
+Dreamscape,integrated,Auto,4213,28.1,18.9,0.267
+Dreamscape,integrated,Low,529,53.4,35.7,0.075
+Dreamscape,integrated,Medium,573,41.5,26.8,0.103
+Dreamscape,integrated,High,966,26.2,16.4,0.233
+Dreamscape,integrated,Ultra,566,14.0,8.8,0.216
+Dreamscape,mid-range,Auto,3695,55.8,46.0,0.086
+Dreamscape,mid-range,Low,410,60.0,45.8,0.075
+Dreamscape,mid-range,Medium,492,60.0,46.6,0.083
+Dreamscape,mid-range,High,701,53.3,43.2,0.087
+Dreamscape,mid-range,Ultra,404,36.8,28.4,0.160
+Dreamscape,high-end,Auto,1678,60.0,47.6,0.080
+Dreamscape,high-end,Low,204,60.0,45.6,0.073
+Dreamscape,high-end,Medium,274,60.0,49.1,0.087
+Dreamscape,high-end,High,416,60.0,45.5,0.075
+Dreamscape,high-end,Ultra,260,60.0,50.1,0.078
+Dune Coast,integrated,Auto,4581,27.7,19.2,0.228
+Dune Coast,integrated,Low,513,54.6,35.3,0.080
+Dune Coast,integrated,Medium,630,41.4,29.1,0.120
+Dune Coast,integrated,High,986,26.8,17.7,0.260
+Dune Coast,integrated,Ultra,568,14.3,9.5,0.238
+Dune Coast,mid-range,Auto,3407,58.9,48.4,0.073
+Dune Coast,mid-range,Low,408,60.0,47.2,0.070
+Dune Coast,mid-range,Medium,550,60.0,50.3,0.085
+Dune Coast,mid-range,High,865,54.8,44.1,0.089
+Dune Coast,mid-range,Ultra,462,37.3,28.1,0.148
+Dune Coast,high-end,Auto,2108,60.0,45.2,0.082
+Dune Coast,high-end,Low,219,60.0,46.2,0.086
+Dune Coast,high-end,Medium,269,60.0,49.4,0.085
+Dune Coast,high-end,High,430,60.0,49.4,0.088
+Dune Coast,high-end,Ultra,219,60.0,49.9,0.072
+Sunset Blocks,integrated,Auto,5401,28.3,17.6,0.225
+Sunset Blocks,integrated,Low,657,55.3,35.3,0.085
+Sunset Blocks,integrated,Medium,700,43.1,29.1,0.101
+Sunset Blocks,integrated,High,1362,26.9,18.0,0.254
+Sunset Blocks,integrated,Ultra,721,14.1,8.9,0.211
+Sunset Blocks,mid-range,Auto,4862,59.7,48.8,0.087
+Sunset Blocks,mid-range,Low,557,60.0,49.4,0.082
+Sunset Blocks,mid-range,Medium,574,60.0,46.2,0.078
+Sunset Blocks,mid-range,High,1009,53.4,41.0,0.071
+Sunset Blocks,mid-range,Ultra,528,38.0,31.5,0.157
+Sunset Blocks,high-end,Auto,2666,60.0,47.2,0.076
+Sunset Blocks,high-end,Low,258,60.0,46.7,0.086
+Sunset Blocks,high-end,Medium,342,60.0,46.4,0.077
+Sunset Blocks,high-end,High,603,60.0,50.4,0.074
+Sunset Blocks,high-end,Ultra,294,59.4,48.4,0.087

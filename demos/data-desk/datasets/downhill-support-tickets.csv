@@ -1,0 +1,155 @@
+ticket,minutes_since_launch,category,topic,channel,browser,status,minutes_to_resolve,csat
+T-0001,1.6,unlock,Pending payment,In-game,Chrome,resolved,9,5
+T-0002,8.2,unlock,Pending payment,In-game,Firefox,resolved,15,3
+T-0003,10.6,game-help,Controller,Email,Chrome,resolved,7,5
+T-0004,14.9,refund,Refund request,In-game,Safari,resolved,11,5
+T-0005,16.6,refund,Refund request,Email,Chrome,resolved,9,5
+T-0006,17.5,unlock,Look missing in game,In-game,Safari,resolved,10,4
+T-0007,18.2,question,Other question,In-game,Chrome,resolved,11,3
+T-0008,18.9,refund,Refund request,In-game,Edge,resolved,10,5
+T-0009,19.0,shop-problem,Promo code rejected,In-game,Edge,resolved,34,2
+T-0010,20.7,game-help,Choppy frame rate,Email,Chrome,resolved,17,4
+T-0011,31.0,unlock,Pending payment,Email,Chrome,resolved,8,4
+T-0012,33.1,question,Other question,Email,Edge,resolved,7,3
+T-0013,33.3,refund,Refund request,In-game,Chrome,resolved,6,3
+T-0014,33.6,unlock,Look missing in game,Email,Edge,resolved,21,3
+T-0015,34.8,unlock,Pending payment,In-game,Chrome,resolved,11,3
+T-0016,36.4,unlock,Pending payment,In-game,Safari,resolved,12,3
+T-0017,36.6,cancellation,Cancel order,In-game,Chrome,resolved,9,4
+T-0018,39.8,cancellation,Cancel order,In-game,Firefox,resolved,11,5
+T-0019,41.1,unlock,Look missing in game,Email,Safari,resolved,16,4
+T-0020,41.6,question,Other question,In-game,Safari,resolved,10,5
+T-0021,43.3,game-help,Choppy frame rate,In-game,Chrome,resolved,10,4
+T-0022,47.4,game-help,Choppy frame rate,Email,Edge,resolved,11,3
+T-0023,49.9,unlock,Look missing in game,Email,Chrome,resolved,18,3
+T-0024,50.2,unlock,Look missing in game,Email,Firefox,resolved,10,4
+T-0025,51.1,game-help,Sound,Email,Chrome,resolved,6,5
+T-0026,51.6,question,Other question,In-game,Edge,resolved,6,3
+T-0027,51.8,game-help,Choppy frame rate,In-game,Chrome,resolved,12,3
+T-0028,52.6,question,Other question,In-game,Chrome,resolved,5,5
+T-0029,53.6,cancellation,Cancel order,Email,Chrome,resolved,5,4
+T-0030,57.0,unlock,Pending payment,Email,Chrome,resolved,19,4
+T-0031,60.5,cancellation,Cancel order,In-game,Chrome,resolved,5,4
+T-0032,61.7,refund,Refund request,In-game,Chrome,resolved,15,4
+T-0033,62.2,refund,Refund request,Email,Chrome,resolved,12,4
+T-0034,62.9,game-help,Sound,Email,Firefox,resolved,6,4
+T-0035,63.8,unlock,Look missing in game,Email,Safari,resolved,16,2
+T-0036,65.6,question,Other question,In-game,Safari,resolved,8,4
+T-0037,66.3,game-help,Choppy frame rate,In-game,Chrome,resolved,8,4
+T-0038,67.3,refund,Refund request,In-game,Chrome,resolved,8,5
+T-0039,67.8,unlock,Look missing in game,In-game,Chrome,resolved,12,3
+T-0040,69.0,game-help,Choppy frame rate,In-game,Safari,resolved,13,5
+T-0041,69.8,unlock,Look missing in game,In-game,Chrome,resolved,10,3
+T-0042,71.9,cancellation,Cancel order,Email,Chrome,resolved,13,5
+T-0043,73.4,shop-problem,Promo code rejected,Email,Edge,resolved,35,3
+T-0044,73.6,refund,Refund request,In-game,Safari,resolved,10,5
+T-0045,77.7,game-help,Choppy frame rate,Email,Firefox,resolved,9,5
+T-0046,77.9,unlock,Look missing in game,In-game,Safari,resolved,18,4
+T-0047,79.1,shop-problem,My purchases page wrong,In-game,Chrome,resolved,32,3
+T-0048,80.5,game-help,Choppy frame rate,In-game,Firefox,resolved,13,5
+T-0049,82.4,refund,Refund request,In-game,Chrome,resolved,9,4
+T-0050,82.7,game-help,Choppy frame rate,In-game,Safari,resolved,17,5
+T-0051,84.7,game-help,Sound,Email,Chrome,resolved,4,5
+T-0052,85.2,shop-problem,Promo code rejected,In-game,Chrome,resolved,56,2
+T-0053,88.8,question,Other question,Email,Chrome,resolved,10,5
+T-0054,88.9,cancellation,Cancel order,In-game,Firefox,resolved,13,4
+T-0055,89.3,unlock,Pending payment,In-game,Edge,resolved,10,2
+T-0056,92.6,unlock,Pending payment,Email,Edge,resolved,10,2
+T-0057,93.3,game-help,Choppy frame rate,In-game,Safari,resolved,13,5
+T-0058,94.9,unlock,Pending payment,Email,Edge,resolved,9,5
+T-0059,95.3,question,Other question,In-game,Firefox,resolved,9,5
+T-0060,98.2,shop-problem,Charged twice,In-game,Safari,resolved,43,4
+T-0061,98.3,shop-problem,Charged twice,In-game,Safari,resolved,32,3
+T-0062,101.8,game-help,Controller,In-game,Edge,resolved,7,5
+T-0063,103.1,game-help,Choppy frame rate,In-game,Chrome,resolved,12,4
+T-0064,104.3,shop-problem,Charged twice,In-game,Edge,resolved,36,3
+T-0065,105.4,cancellation,Cancel order,In-game,Safari,resolved,8,4
+T-0066,106.1,game-help,Choppy frame rate,Email,Chrome,resolved,8,5
+T-0067,107.4,question,Other question,In-game,Chrome,resolved,6,4
+T-0068,108.8,shop-problem,Charged twice,In-game,Chrome,resolved,19,4
+T-0069,109.8,question,Other question,In-game,Chrome,resolved,11,4
+T-0070,112.5,unlock,Look missing in game,Email,Safari,resolved,15,2
+T-0071,113.3,shop-problem,Charged twice,In-game,Safari,resolved,28,4
+T-0072,114.0,unlock,Look missing in game,Email,Safari,resolved,23,2
+T-0073,117.6,unlock,Look missing in game,In-game,Chrome,resolved,24,4
+T-0074,119.0,game-help,Choppy frame rate,In-game,Firefox,resolved,10,4
+T-0075,119.8,refund,Refund request,In-game,Safari,resolved,11,4
+T-0076,120.9,game-help,Sound,In-game,Safari,resolved,8,5
+T-0077,121.4,shop-problem,Charged twice,In-game,Edge,resolved,39,2
+T-0078,121.4,question,Other question,Email,Chrome,resolved,5,4
+T-0079,121.6,shop-problem,Promo code rejected,Email,Chrome,open,,
+T-0080,121.8,unlock,Look missing in game,In-game,Edge,resolved,18,3
+T-0081,123.3,game-help,Choppy frame rate,In-game,Safari,resolved,12,4
+T-0082,124.8,game-help,Choppy frame rate,In-game,Chrome,resolved,7,5
+T-0083,126.1,game-help,Controller,In-game,Chrome,resolved,6,5
+T-0084,128.8,question,Other question,Email,Chrome,resolved,7,3
+T-0085,129.5,unlock,Look missing in game,Email,Safari,resolved,11,4
+T-0086,129.7,unlock,Look missing in game,In-game,Firefox,resolved,15,5
+T-0087,130.4,unlock,Look missing in game,Email,Safari,resolved,16,3
+T-0088,131.3,shop-problem,Charged twice,In-game,Chrome,resolved,36,2
+T-0089,133.0,unlock,Pending payment,In-game,Chrome,resolved,18,3
+T-0090,133.4,unlock,Look missing in game,In-game,Safari,resolved,12,4
+T-0091,135.6,game-help,Choppy frame rate,In-game,Chrome,resolved,8,4
+T-0092,135.8,question,Other question,Email,Chrome,resolved,6,3
+T-0093,136.5,shop-problem,Promo code rejected,In-game,Chrome,open,,
+T-0094,137.8,shop-problem,Promo code rejected,Email,Chrome,resolved,34,1
+T-0095,138.6,shop-problem,Promo code rejected,Email,Chrome,open,,
+T-0096,138.7,shop-problem,Promo code rejected,In-game,Chrome,open,,
+T-0097,139.1,unlock,Look missing in game,In-game,Chrome,resolved,22,5
+T-0098,139.8,question,Other question,Email,Firefox,resolved,8,4
+T-0099,140.1,game-help,Choppy frame rate,In-game,Firefox,resolved,15,4
+T-0100,141.2,shop-problem,Promo code rejected,In-game,Safari,open,,
+T-0101,142.0,shop-problem,Promo code rejected,Email,Edge,open,,
+T-0102,143.8,shop-problem,Promo code rejected,Email,Chrome,open,,
+T-0103,143.8,unlock,Look missing in game,In-game,Safari,resolved,20,2
+T-0104,143.8,shop-problem,Promo code rejected,In-game,Chrome,open,,
+T-0105,144.3,game-help,Choppy frame rate,In-game,Safari,resolved,15,4
+T-0106,145.3,unlock,Pending payment,In-game,Firefox,resolved,17,4
+T-0107,146.4,shop-problem,Promo code rejected,In-game,Chrome,open,,
+T-0108,146.5,shop-problem,Promo code rejected,Email,Edge,open,,
+T-0109,147.0,game-help,Choppy frame rate,In-game,Chrome,resolved,16,4
+T-0110,147.0,shop-problem,Promo code rejected,In-game,Chrome,open,,
+T-0111,147.4,cancellation,Cancel order,In-game,Chrome,resolved,6,5
+T-0112,147.7,shop-problem,Promo code rejected,In-game,Edge,open,,
+T-0113,148.7,shop-problem,Promo code rejected,In-game,Edge,open,,
+T-0114,150.9,shop-problem,Promo code rejected,In-game,Chrome,open,,
+T-0115,150.9,shop-problem,Promo code rejected,In-game,Safari,open,,
+T-0116,151.8,game-help,Sound,In-game,Chrome,resolved,6,4
+T-0117,153.7,game-help,Choppy frame rate,In-game,Chrome,resolved,10,4
+T-0118,154.0,shop-problem,Promo code rejected,In-game,Chrome,open,,
+T-0119,155.2,refund,Refund request,In-game,Chrome,resolved,12,5
+T-0120,156.8,question,Other question,In-game,Safari,resolved,9,4
+T-0121,157.0,shop-problem,Promo code rejected,In-game,Firefox,open,,
+T-0122,160.3,question,Other question,In-game,Firefox,resolved,5,4
+T-0123,160.8,unlock,Pending payment,In-game,Firefox,resolved,13,3
+T-0124,161.1,shop-problem,Promo code rejected,In-game,Safari,open,,
+T-0125,161.9,shop-problem,Promo code rejected,In-game,Firefox,open,,
+T-0126,162.2,shop-problem,Promo code rejected,Email,Safari,open,,
+T-0127,162.6,game-help,Controller,In-game,Chrome,resolved,5,5
+T-0128,163.2,shop-problem,Promo code rejected,In-game,Chrome,open,,
+T-0129,163.3,question,Other question,In-game,Chrome,resolved,10,4
+T-0130,164.6,shop-problem,Promo code rejected,Email,Edge,open,,
+T-0131,167.1,shop-problem,Promo code rejected,Email,Safari,open,,
+T-0132,168.2,shop-problem,Promo code rejected,In-game,Safari,open,,
+T-0133,168.8,shop-problem,Promo code rejected,Email,Edge,open,,
+T-0134,169.9,shop-problem,Promo code rejected,In-game,Edge,open,,
+T-0135,169.9,shop-problem,Promo code rejected,In-game,Chrome,open,,
+T-0136,170.0,game-help,Choppy frame rate,Email,Chrome,resolved,9,3
+T-0137,170.4,shop-problem,Charged twice,In-game,Edge,open,,
+T-0138,171.2,unlock,Look missing in game,In-game,Safari,open,,
+T-0139,171.8,shop-problem,Promo code rejected,Email,Chrome,open,,
+T-0140,172.2,shop-problem,Promo code rejected,Email,Firefox,open,,
+T-0141,172.2,shop-problem,Promo code rejected,In-game,Edge,open,,
+T-0142,172.8,refund,Refund request,In-game,Firefox,open,,
+T-0143,172.9,shop-problem,Promo code rejected,In-game,Edge,open,,
+T-0144,173.3,shop-problem,Promo code rejected,Email,Edge,open,,
+T-0145,173.4,shop-problem,Promo code rejected,In-game,Safari,open,,
+T-0146,174.8,shop-problem,Promo code rejected,In-game,Edge,open,,
+T-0147,174.9,game-help,Choppy frame rate,Email,Edge,open,,
+T-0148,175.4,shop-problem,Charged twice,In-game,Chrome,open,,
+T-0149,175.4,shop-problem,Promo code rejected,Email,Chrome,open,,
+T-0150,176.1,unlock,Pending payment,In-game,Edge,open,,
+T-0151,176.3,shop-problem,Promo code rejected,In-game,Chrome,open,,
+T-0152,177.2,unlock,Look missing in game,In-game,Chrome,open,,
+T-0153,178.2,unlock,Pending payment,In-game,Chrome,open,,
+T-0154,178.5,game-help,Choppy frame rate,Email,Edge,open,,

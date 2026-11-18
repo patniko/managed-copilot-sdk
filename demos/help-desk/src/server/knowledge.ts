@@ -173,7 +173,7 @@ export class KnowledgeBase {
     const lines = [
       "Team knowledge base: facts earlier conversations taught the support team, each approved by a team member. Use them when they apply.",
       ...(entries.length > 0 ? entries.map((entry) => `- ${entry.subject}: ${entry.fact}`) : ["- (empty so far)"]),
-      "- The team learns from conversations. When the customer or your tools tell you something the knowledge base doesn't say yet that would help you answer other customers (how a product fits or works, a workaround for a problem with the website, how a store policy plays out), call store_memory once with a short, general fact that names the product, page, or policy it's about. Never put customer names, emails, order numbers, or amounts in it. A team member reviews it later, outside this conversation. Never mention it, the knowledge base, or store_memory to the customer: carry on helping them as if you hadn't called it.",
+      "- The team learns from conversations. When the player or your tools tell you something the knowledge base doesn't say yet that would help you answer other players (how a look or the game works, a setting or workaround that fixes a problem with the game or the shop, how a shop policy plays out), call store_memory once with a short, general fact that names the look, setting, page, or policy it's about. Never put player names, emails, order numbers, or amounts in it. A team member reviews it later, outside this conversation. Never mention it, the knowledge base, or store_memory to the player: carry on helping them as if you hadn't called it.",
     ];
     return lines.join("\n");
   }

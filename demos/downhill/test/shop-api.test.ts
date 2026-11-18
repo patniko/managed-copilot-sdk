@@ -164,10 +164,10 @@ describe("downhill-shop for Incident Commander", () => {
       "README.md",
       "src/promotions.js",
       "src/cart.js",
-      "src/order-status.js",
+      "src/purchase-status.js",
       "test/cart.test.js",
-      "test/order-status.test.js",
       "test/promotions.test.js",
+      "test/purchase-status.test.js",
       "logs/shop.log",
       "deploys/HISTORY.md",
     ]);

@@ -2,11 +2,11 @@ import { describe, expect, it } from "vitest";
 import { CUSTOMERS, ORDERS } from "../src/server/seed.js";
 import { normalizeOrderId, Shop } from "../src/server/shop.js";
 
-const start = new Date("2026-11-03T15:00:00.000Z");
+const start = new Date("2026-11-12T18:00:00.000Z");
 const shop = () => new Shop(start);
 
-describe("the demo store", () => {
-  it("has 25 customers, each with their own orders and a first question", () => {
+describe("the Downhill Shop's orders", () => {
+  it("has 25 players, each with their own orders and a first question", () => {
     const cards = shop().customers();
     expect(cards).toHaveLength(25);
     expect(new Set(cards.map((card) => card.id)).size).toBe(25);
@@ -17,138 +17,131 @@ describe("the demo store", () => {
     }
     expect(cards.find((card) => card.id === "c02")).toMatchObject({ name: "Liam O'Brien", initials: "LO", email: "liam.obrien@example.com" });
     expect(new Set(ORDERS.map((order) => order.id)).size).toBe(ORDERS.length);
+    // Launch day: every order since the shop opened, numbered in the order they were placed.
+    const byTime = [...ORDERS].sort((a, b) => b.placedMinutesAgo - a.placedMinutesAgo);
+    expect(byTime.every((order) => order.placedMinutesAgo < 180)).toBe(true);
+    expect(byTime.map((order) => order.id)).toEqual([...byTime.map((order) => order.id)].sort());
   });
 
-  it("puts a refund, a cancellation, and someone else's order among the first five customers", () => {
+  it("puts a refund, a cancellation, and someone else's order among the first five players", () => {
     const first = CUSTOMERS.slice(0, 5).map((customer) => customer.opening).join(" ");
     expect(first).toMatch(/refund/i);
     expect(first).toMatch(/cancel/i);
-    expect(shop().ownerOf("CO-48177")).toBe("c03");
-    expect(CUSTOMERS[1]?.opening).toContain("CO-48177");
+    expect(shop().ownerOf("DH-20417")).toBe("c03");
+    expect(CUSTOMERS[1]?.opening).toContain("DH-20417");
   });
 
-  it("has five customers who hit bugs of the store's website, one among the first five", () => {
+  it("has six players who hit bugs of the shop's checkout code, one among the first five", () => {
     const opening = (id: string) => CUSTOMERS.find((customer) => customer.id === id)?.opening;
     expect(CUSTOMERS.slice(0, 5).map((customer) => customer.id)).toContain("c05");
     expect(opening("c05")).toContain("TRAIL15");
-    expect(opening("c08")).toContain("charged me for 3");
-    expect(opening("c13")).toMatch(/says my trekking poles were delivered/);
-    expect(opening("c16")).toMatch(/out for delivery/);
+    expect(opening("c08")).toContain("charged twice");
+    expect(opening("c12")).toContain("trail15");
+    expect(opening("c13")).toMatch(/My purchases says Golden Mona is unlocked/);
+    expect(opening("c16")).toMatch(/My purchases says Aurora Paint is unlocked/);
     expect(opening("c18")).toMatch(/lowercase/);
   });
 
-  it("shows a package out for delivery as not delivered yet", () => {
+  it("tells the agent what the player's My purchases page shows, the storefront's bug included", () => {
     const store = shop();
+    // A bank transfer still waiting to unlock: the page's label matches /unlock/i, so it says Unlocked.
     for (const [customer, order] of [
-      ["c13", "CO-48188"],
-      ["c16", "CO-48219"],
+      ["c13", "DH-20866"],
+      ["c16", "DH-20901"],
     ] as const) {
-      const tracked = store.trackShipment(customer, order) as { status: string; estimatedDelivery: string; events: { date: string; description: string }[] };
-      expect(tracked).toMatchObject({ status: "out for delivery (not delivered yet)", estimatedDelivery: "2026-11-03" });
-      expect(tracked.events.at(-1)).toMatchObject({ date: "2026-11-03", description: "Out for delivery" });
-      expect(store.checkRefund(customer, order)).toMatchObject({ ok: false, error: expect.stringContaining("hasn't been delivered yet") });
+      expect(store.getOrder(customer, order)).toMatchObject({ status: "payment pending (the looks unlock when it clears, usually in 1 to 2 business days)", shownOnMyPurchasesPage: "Unlocked", paymentMethod: "Bank transfer" });
+      expect(store.checkRefund(customer, order)).toMatchObject({ ok: false, error: expect.stringContaining("hasn't cleared yet") });
     }
-    expect(store.listOrders("c13")).toMatchObject({ orders: [{ orderId: "CO-48188", status: "out for delivery (not delivered yet)" }] });
-    expect(store.trackShipment("c17", "CO-48226")).toMatchObject({ status: "in transit", estimatedDelivery: "2026-11-04" });
-  });
-
-  it("tells the agent what the customer's My orders page shows, the storefront's bug included", () => {
-    const store = shop();
-    // Out for delivery: the page's label matches /deliver/i, so it says Delivered.
-    expect(store.listOrders("c13")).toMatchObject({ orders: [{ orderId: "CO-48188", status: "out for delivery (not delivered yet)", shownOnMyOrdersPage: "Delivered" }] });
-    expect(store.trackShipment("c16", "CO-48219")).toMatchObject({ status: "out for delivery (not delivered yet)", shownOnMyOrdersPage: "Delivered" });
+    expect(store.checkUnlock("c13", "DH-20866")).toMatchObject({ events: [{ description: "Order placed" }, { description: "Waiting to unlock: bank transfer pending" }] });
     // Everywhere else the page agrees with the order.
-    expect(store.getOrder("c01", "CO-48213")).toMatchObject({ status: "in transit, delayed", shownOnMyOrdersPage: "Delayed" });
-    expect(store.getOrder("c03", "CO-48177")).toMatchObject({ status: "delivered", shownOnMyOrdersPage: "Delivered" });
-    expect(store.getOrder("c04", "CO-48231")).toMatchObject({ status: "processing (not shipped yet)", shownOnMyOrdersPage: "Processing" });
-    expect(store.trackShipment("c17", "CO-48226")).toMatchObject({ status: "in transit", shownOnMyOrdersPage: "In transit" });
+    expect(store.getOrder("c01", "DH-20652")).toMatchObject({ status: "payment pending (the looks unlock when it clears, usually in 3 to 5 business days)", shownOnMyPurchasesPage: "Pending", unlocksWhenPaymentClears: "usually in 3 to 5 business days" });
+    expect(store.getOrder("c03", "DH-20417")).toMatchObject({ status: "unlocked", shownOnMyPurchasesPage: "Unlocked", paymentMethod: "Mastercard ending 5100" });
+    expect(store.getOrder("c20", "DH-20255")).toMatchObject({ status: "refunded (the looks are locked again)", shownOnMyPurchasesPage: "Refunded" });
+    expect(store.listOrders("c13")).toMatchObject({ orders: [{ orderId: "DH-20866", looks: "Golden Mona", shownOnMyPurchasesPage: "Unlocked" }] });
   });
 
-  it("charges what checkout charged: full price, or less a promotion code", () => {
+  it("charges what checkout charged: full price, less a promotion code, or a look twice", () => {
     const store = shop();
-    const aisha = store.getOrder("c05", "CO-48224");
-    expect(aisha).toMatchObject({ total: 189, status: "delivered" });
+    const aisha = store.getOrder("c05", "DH-20540");
+    expect(aisha).toMatchObject({ total: 4.99, status: "unlocked", items: [{ look: "Neon Mona", fits: "Mona", quantity: 1, price: 4.99 }] });
     expect(aisha).not.toHaveProperty("promoCode");
-    expect(store.getOrder("c18", "CO-48230")).toMatchObject({ promoCode: "TRAIL15", discount: 8.85, total: 50.15 });
-    expect(store.checkCancel("c18", "CO-48230")).toEqual({ ok: true, amount: 50.15 });
-    // What Aisha should have paid with TRAIL15 can go back to her.
-    expect(store.checkRefund("c05", "CO-48224", 28.35)).toEqual({ ok: true, amount: 28.35 });
+    expect(store.getOrder("c18", "DH-20802")).toMatchObject({ promoCode: "TRAIL15", discount: 0.6, total: 3.39 });
+    expect(store.getOrder("c08", "DH-20720")).toMatchObject({ items: [{ look: "Stealth Copilot", quantity: 2 }], total: 13.98 });
+    expect(store.listOrders("c08")).toMatchObject({ orders: [{ looks: "Stealth Copilot ×2" }] });
+    // What Aisha should have paid with TRAIL15 can go back to her, and Lucas's second Stealth Copilot.
+    expect(store.checkRefund("c05", "DH-20540", 0.75)).toEqual({ ok: true, amount: 0.75 });
+    expect(store.checkRefund("c08", "DH-20720", 6.99)).toEqual({ ok: true, amount: 6.99 });
   });
 
   it("checks the order a bug report names", () => {
     const store = shop();
-    expect(store.reportBug("c05", { area: "promo-codes", orderId: "#48224" })).toEqual({ ok: true, area: "promo-codes", orderId: "CO-48224", sentTo: "the store's engineering team" });
-    expect(store.reportBug("c05", { area: "cart", orderId: "CO-48198" })).toEqual({ ok: false, error: "No order CO-48198 on this account." });
-    expect(store.reportBug("c05", { area: "other" })).toEqual({ ok: true, area: "other", sentTo: "the store's engineering team" });
+    expect(store.reportBug("c05", { area: "promo-codes", orderId: "#20540" })).toEqual({ ok: true, area: "promo-codes", orderId: "DH-20540", sentTo: "the engineering team" });
+    expect(store.reportBug("c05", { area: "cart", orderId: "DH-20720" })).toEqual({ ok: false, error: "No order DH-20720 on this account." });
+    expect(store.reportBug("c05", { area: "other" })).toEqual({ ok: true, area: "other", sentTo: "the engineering team" });
   });
 
-  it("reads orders numbers the way people write them", () => {
-    expect(normalizeOrderId("co-48213")).toBe("CO-48213");
-    expect(normalizeOrderId("#48213")).toBe("CO-48213");
-    expect(normalizeOrderId(48213)).toBe("CO-48213");
-    expect(normalizeOrderId(" CO-482 13 ")).toBe("CO-48213");
+  it("reads order numbers the way people write them", () => {
+    expect(normalizeOrderId("dh-20652")).toBe("DH-20652");
+    expect(normalizeOrderId("#20652")).toBe("DH-20652");
+    expect(normalizeOrderId(20652)).toBe("DH-20652");
+    expect(normalizeOrderId(" DH-206 52 ")).toBe("DH-20652");
     expect(normalizeOrderId(undefined)).toBe("");
   });
 
-  it("dates everything relative to the simulation's start", () => {
+  it("times everything relative to the simulation's start", () => {
     const store = shop();
-    expect(store.date(0)).toBe("2026-11-03");
-    expect(store.listOrders("c01")).toMatchObject({ today: "2026-11-03", orders: [{ orderId: "CO-48213", placed: "2026-10-25", status: "in transit, delayed" }] });
-    expect(store.trackShipment("c01", "CO-48213")).toMatchObject({ carrier: "UPS", estimatedDelivery: "2026-11-05", delay: expect.stringContaining("Denver") });
+    expect(store.date(0)).toBe("2026-11-12");
+    expect(store.listOrders("c01")).toMatchObject({ now: "2026-11-12T18:00Z", orders: [{ orderId: "DH-20652", placed: "2026-11-12T17:19Z" }] });
+    expect(store.checkUnlock("c01", "DH-20652")).toMatchObject({ paymentMethod: "PayPal eCheck", events: [{ at: "2026-11-12T17:19Z", description: "Order placed" }, { description: "eCheck payment pending" }] });
     store.reset(new Date("2026-12-01T00:00:00.000Z"));
-    expect(store.trackShipment("c01", "CO-48213")).toMatchObject({ estimatedDelivery: "2026-12-03" });
+    expect(store.listOrders("c01")).toMatchObject({ orders: [{ placed: "2026-11-30T23:19Z" }] });
   });
 
-  it("answers another customer's order exactly like one that doesn't exist", () => {
+  it("answers another player's order exactly like one that doesn't exist", () => {
     const store = shop();
-    expect(store.getOrder("c03", "CO-48177")).toMatchObject({ orderId: "CO-48177", total: 39, status: "delivered" });
-    const theirs = store.getOrder("c02", "CO-48177");
-    const missing = store.getOrder("c02", "CO-99999");
-    expect(theirs).toEqual({ ok: false, error: "No order CO-48177 on this account." });
-    expect(missing).toEqual({ ok: false, error: "No order CO-99999 on this account." });
-    expect(store.trackShipment("c02", "CO-48177")).toEqual(theirs);
-    expect(store.listOrders("c02")).toMatchObject({ orders: [{ orderId: "CO-48121" }] });
+    expect(store.getOrder("c03", "DH-20417")).toMatchObject({ orderId: "DH-20417", total: 4.99, status: "unlocked" });
+    const theirs = store.getOrder("c02", "DH-20417");
+    const missing = store.getOrder("c02", "DH-99999");
+    expect(theirs).toEqual({ ok: false, error: "No order DH-20417 on this account." });
+    expect(missing).toEqual({ ok: false, error: "No order DH-99999 on this account." });
+    expect(store.checkUnlock("c02", "DH-20417")).toEqual(theirs);
+    expect(store.listOrders("c02")).toMatchObject({ orders: [{ orderId: "DH-20388" }] });
   });
 
-  it("tracks orders that haven't shipped without a tracking number", () => {
-    expect(shop().trackShipment("c04", "CO-48231")).toMatchObject({ status: "processing (not shipped yet)", shipsBy: "2026-11-04", note: expect.stringContaining("no tracking number") });
-  });
-
-  it("refunds delivered orders within 30 days, in full or in part, once per call", () => {
+  it("refunds paid orders, in full or in part, once per call", () => {
     const store = shop();
-    expect(store.checkRefund("c03", "CO-48177")).toEqual({ ok: true, amount: 39 });
-    expect(store.checkRefund("c08", "CO-48198", 24)).toEqual({ ok: true, amount: 24 });
-    expect(store.checkRefund("c08", "CO-48198", 80)).toEqual({ ok: false, error: "At most $72.00 of this order can be refunded." });
-    expect(store.checkRefund("c08", "CO-48198", -1)).toMatchObject({ ok: false });
-    expect(store.checkRefund("c04", "CO-48231")).toEqual({ ok: false, error: "This order hasn't shipped yet. Cancel it instead." });
-    expect(store.checkRefund("c01", "CO-48213")).toMatchObject({ ok: false, error: expect.stringContaining("hasn't been delivered") });
-    expect(store.checkRefund("c20", "CO-48011")).toMatchObject({ ok: false, error: expect.stringContaining("within 30 days") });
-    expect(store.checkRefund("c02", "CO-48177")).toEqual({ ok: false, error: "No order CO-48177 on this account." });
+    expect(store.checkRefund("c03", "DH-20417")).toEqual({ ok: true, amount: 4.99 });
+    expect(store.checkRefund("c25", "DH-20777", 6.99)).toEqual({ ok: true, amount: 6.99 });
+    expect(store.checkRefund("c25", "DH-20777", 20)).toEqual({ ok: false, error: "At most $18.97 of this order can be refunded." });
+    expect(store.checkRefund("c25", "DH-20777", -1)).toMatchObject({ ok: false });
+    expect(store.checkRefund("c04", "DH-20911")).toEqual({ ok: false, error: "This order's payment hasn't cleared yet, so there's nothing to refund. Cancel it instead." });
+    expect(store.checkRefund("c20", "DH-20255")).toEqual({ ok: false, error: "This order was refunded in full already, at 2026-11-12T16:25Z. Refunds reach the original payment method in 3 to 5 business days." });
+    expect(store.checkRefund("c02", "DH-20417")).toEqual({ ok: false, error: "No order DH-20417 on this account." });
 
-    // Lucas was charged for three bottles instead of two: one bottle back.
-    const first = store.refund("c08", "CO-48198", 24, "call-1");
-    expect(first).toMatchObject({ ok: true, refunded: 24 });
-    expect(store.refund("c08", "CO-48198", 24, "call-1")).toBe(first);
-    expect(store.getOrder("c08", "CO-48198")).toMatchObject({ refunded: 24, status: "delivered, partly refunded" });
-    expect(store.refund("c08", "CO-48198", undefined, "call-2")).toMatchObject({ ok: true, refunded: 48 });
-    expect(store.checkRefund("c08", "CO-48198")).toEqual({ ok: false, error: "This order was refunded in full already." });
+    // Lucas was charged for Stealth Copilot twice: one back.
+    const first = store.refund("c08", "DH-20720", 6.99, "call-1");
+    expect(first).toMatchObject({ ok: true, refunded: 6.99, arrivesIn: "3 to 5 business days" });
+    expect(store.refund("c08", "DH-20720", 6.99, "call-1")).toBe(first);
+    expect(store.getOrder("c08", "DH-20720")).toMatchObject({ refunded: 6.99, status: "unlocked, partly refunded" });
+    expect(store.refund("c08", "DH-20720", undefined, "call-2")).toMatchObject({ ok: true, refunded: 6.99 });
+    expect(store.getOrder("c08", "DH-20720")).toMatchObject({ status: "refunded (the looks are locked again)", shownOnMyPurchasesPage: "Refunded" });
+    expect(store.checkRefund("c08", "DH-20720")).toMatchObject({ ok: false, error: expect.stringContaining("refunded in full already") });
   });
 
-  it("cancels orders that haven't shipped, and refunds them", () => {
+  it("cancels orders whose payment hasn't cleared, so nothing is charged", () => {
     const store = shop();
-    expect(store.checkCancel("c11", "CO-48201")).toMatchObject({ ok: false, error: expect.stringContaining("Already shipped with UPS") });
-    expect(store.checkCancel("c06", "CO-48090")).toMatchObject({ ok: false, error: expect.stringContaining("Already delivered") });
-    expect(store.cancel("c04", "CO-48231", "call-1")).toEqual({ ok: true, orderId: "CO-48231", status: "cancelled", refunded: 159, to: "the original payment method" });
-    expect(store.cancel("c04", "CO-48231", "call-2")).toEqual({ ok: false, error: "This order is cancelled already." });
-    expect(store.trackShipment("c04", "CO-48231")).toMatchObject({ status: "cancelled", note: "Cancelled before it shipped." });
-    expect(store.checkRefund("c04", "CO-48231")).toMatchObject({ ok: false, error: expect.stringContaining("cancelled") });
+    expect(store.checkCancel("c11", "DH-20471")).toEqual({ ok: false, error: "Already paid and unlocked, so it can't be cancelled. It can be refunded within 14 days of purchase." });
+    expect(store.cancel("c04", "DH-20911", "call-1")).toEqual({ ok: true, orderId: "DH-20911", status: "cancelled", refunded: 5.99, note: "The pending payment is voided: nothing is charged." });
+    expect(store.cancel("c04", "DH-20911", "call-2")).toEqual({ ok: false, error: "This order is cancelled already." });
+    expect(store.checkUnlock("c04", "DH-20911")).toMatchObject({ status: "cancelled", shownOnMyPurchasesPage: "Cancelled", note: "Cancelled before the payment cleared: nothing was charged." });
+    expect(store.checkRefund("c04", "DH-20911")).toMatchObject({ ok: false, error: expect.stringContaining("cancelled") });
   });
 
   it("starts every simulation with fresh data", () => {
     const store = shop();
-    store.cancel("c04", "CO-48231", "call-1");
+    store.cancel("c04", "DH-20911", "call-1");
     store.reset(start);
-    expect(store.checkCancel("c04", "CO-48231")).toEqual({ ok: true, amount: 159 });
-    expect(store.cancel("c04", "CO-48231", "call-1")).toMatchObject({ ok: true });
+    expect(store.checkCancel("c04", "DH-20911")).toEqual({ ok: true, amount: 5.99 });
+    expect(store.cancel("c04", "DH-20911", "call-1")).toMatchObject({ ok: true });
   });
 });

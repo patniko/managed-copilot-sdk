@@ -15,19 +15,19 @@ const ALERT: AlertInfo = {
   source: "simulated",
   name: "CheckoutHighErrorRate",
   summary: "Checkout 5xx error rate is 13.4% (threshold 2%)",
-  service: "checkout",
+  service: "downhill-orders",
   severity: "SEV2",
-  labels: { alertname: "CheckoutHighErrorRate", service: "checkout" },
+  labels: { alertname: "CheckoutHighErrorRate", service: "downhill-orders" },
   startsAt: "2026-11-04T06:57:00.000Z",
   fingerprint: "abc123",
   links: [],
 };
 
-const ORIGINAL = readFileSync(join(testConfig().demoServicesDir, "checkout", "src", "discounts.js"), "utf8").replace(/\r\n/g, "\n");
+const ORIGINAL = readFileSync(join(testConfig().demoServicesDir, "downhill-orders", "src", "discounts.js"), "utf8").replace(/\r\n/g, "\n");
 /** The real file with the one-line guard the fix worker adds. */
 const FIXED = ORIGINAL.replace("  const coupon = findCoupon(code, now);\n", "  const coupon = findCoupon(code, now);\n  if (!coupon) return subtotalCents;\n");
 const NEW_TEST = `test("expired coupons are ignored", () => {});\n`;
-const DEPLOY_ARGS = { summary: "Treat expired coupons as no discount", files: ["src/discounts.js", "checkout/test/expired.test.js"], tests: "10 passed, 0 failed" };
+const DEPLOY_ARGS = { summary: "Treat expired coupons as no discount", files: ["src/discounts.js", "downhill-orders/test/expired.test.js"], tests: "10 passed, 0 failed" };
 
 interface Harness {
   readonly platform: FakePlatform;
@@ -50,8 +50,8 @@ async function started(options?: Parameters<typeof harness>[0]): Promise<Harness
   const h = harness(options);
   await h.run.start();
   h.platform.workerList = [worker({ id: "hands-1", name: "hands", role: "hands", state: "idle", environment: "incident-commander-triage" })];
-  h.platform.files.set("hands-1:checkout/src/discounts.js", FIXED);
-  h.platform.files.set("hands-1:checkout/test/expired.test.js", NEW_TEST);
+  h.platform.files.set("hands-1:downhill-orders/src/discounts.js", FIXED);
+  h.platform.files.set("hands-1:downhill-orders/test/expired.test.js", NEW_TEST);
   return h;
 }
 
@@ -92,10 +92,10 @@ describe("an incident's coordinator", () => {
 
     platform.workerList = [worker({ id: "hands-1", name: "hands", role: "hands", state: "idle" })];
     const result = await platform.session.call("open_workspace", {});
-    expect(result).toContain("/workspace/checkout");
-    expect(platform.files.get("hands-1:checkout/src/discounts.js")).toContain("coupon.percent");
-    expect(platform.files.get("hands-1:checkout/logs/checkout.log")).toContain("TypeError: Cannot read properties of undefined (reading 'percent')");
-    expect(platform.files.get("hands-1:checkout/deploys/HISTORY.md")).toContain("v1.4.2");
+    expect(result).toContain("/workspace/downhill-orders");
+    expect(platform.files.get("hands-1:downhill-orders/src/discounts.js")).toContain("coupon.percent");
+    expect(platform.files.get("hands-1:downhill-orders/logs/orders.log")).toContain("TypeError: Cannot read properties of undefined (reading 'percent')");
+    expect(platform.files.get("hands-1:downhill-orders/deploys/HISTORY.md")).toContain("v1.4.2");
   });
 
   it("works without asking in sandboxes", async () => {
@@ -147,8 +147,8 @@ describe("the deploy approval", () => {
 
   it("ships only the files that changed, and refuses a request where none did", async () => {
     const { platform, incident } = await started();
-    const cart = readFileSync(join(testConfig().demoServicesDir, "checkout", "src", "cart.js"), "utf8").replace(/\r\n/g, "\n");
-    platform.files.set("hands-1:checkout/src/cart.js", cart);
+    const cart = readFileSync(join(testConfig().demoServicesDir, "downhill-orders", "src", "cart.js"), "utf8").replace(/\r\n/g, "\n");
+    platform.files.set("hands-1:downhill-orders/src/cart.js", cart);
     const unchanged = await platform.session.permission(deployRequest({ summary: "Fix it", files: ["src/cart.js"] }, "unchanged-call"));
     expect(unchanged).toMatchObject({ kind: "reject", feedback: expect.stringContaining("None of the files you listed differ from what runs in production now (src/cart.js)") });
     expect(incident().approval).toBeUndefined();
@@ -196,14 +196,14 @@ describe("the deploy approval", () => {
     platform.onResume = async (session) => void (await session.permission(deployRequest(DEPLOY_ARGS)));
     await run.decide(true, undefined, "octocat");
     // Changed in the sandbox after the person approved: not what ships.
-    platform.files.set("hands-1:checkout/src/discounts.js", "// something else\n");
+    platform.files.set("hands-1:downhill-orders/src/discounts.js", "// something else\n");
     const first = await platform.session.call("deploy_fix", DEPLOY_ARGS, "deploy-call");
     const again = await platform.session.call("deploy_fix", DEPLOY_ARGS, "deploy-call");
     expect(first).toBe(again);
     expect(posted).toHaveLength(1);
     const files = posted[0]!.body.files as { path: string; content: string }[];
     expect(files.find((file) => file.path === "src/discounts.js")?.content).toBe(FIXED);
-    expect(posted[0]!.body).toMatchObject({ type: "incident.deploy_approved", incident: incident().id, service: "checkout", approvedBy: "octocat" });
+    expect(posted[0]!.body).toMatchObject({ type: "incident.deploy_approved", incident: incident().id, service: "downhill-orders", approvedBy: "octocat" });
     expect(posted[0]!.headers.get("x-incident-commander-signature")).toMatch(/^t=\d+,v1=[0-9a-f]{64}$/);
     expect(posted[0]!.headers.get("idempotency-key")).toBe(`${incident().sessionId}:deploy-call`);
     expect(incident().deploy).toMatchObject({ ok: true, target: "webhook", version: "2.0.1" });

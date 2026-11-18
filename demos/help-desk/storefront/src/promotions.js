@@ -1,11 +1,11 @@
-// Promotion codes. Customers get them from the Contoso Trail newsletter, the welcome email, and in-store signs, and
+// Promotion codes. Players get them from the Contoso Trail newsletter, the welcome email, and the shop's banners, and
 // enter them in the "Promo code" field at checkout, which calls applyPromoCode.
 
-/** This month's codes. `minSubtotalCents`: the smallest subtotal a code applies to. */
+/** The shop's codes. `minSubtotalCents`: the smallest subtotal a code applies to. */
 export const PROMOTIONS = {
-  TRAIL15: { percent: 15, description: "15% off everything, from the Contoso Trail newsletter" },
+  TRAIL15: { percent: 15, description: "15% off everything, from the Contoso Trail newsletter and the launch-week banner" },
   WELCOME10: { percent: 10, description: "10% off a first order" },
-  GEARUP20: { percent: 20, minSubtotalCents: 15_000, description: "20% off orders of $150 or more" },
+  SET20: { percent: 20, minSubtotalCents: 1_000, description: "20% off orders of $10 or more" },
 };
 
 /** Why checkout couldn't apply a code. Checkout shows the message under the "Promo code" field. */

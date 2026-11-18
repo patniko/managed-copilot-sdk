@@ -1,7 +1,7 @@
-// Software issues: bug reports grouped by the part of the store's checkout code they're about, from the current
-// simulation's customers and from live Downhill players (the Downhill Shop's checkout runs on the same code), and the
-// work order Software Factory gets for one issue: a brief, the reports and conversations as context, and the storefront
-// codebase to fix. Pure: the desk supplies the tickets and the codebase's files.
+// Software issues: bug reports grouped by the part of the Downhill Shop's checkout code they're about, from the current
+// simulation's players and from live Downhill players, and the work order Software Factory gets for one issue: a brief,
+// the reports and conversations as context, and the storefront codebase to fix. Pure: the desk supplies the tickets and
+// the codebase's files.
 import {
   BUG_AREA_INFO,
   BUG_AREAS,
@@ -27,7 +27,7 @@ const BRIEF_REPORTS = 8;
 /** Each context file stays well under Software Factory's limits (256 KB a file, 512 KB together). */
 const MAX_CONTEXT = 60_000;
 
-/** A ticket's bug report: a store customer's of the simulation (`customerId`), or a Downhill player's (`ticketId`). */
+/** A ticket's bug report: a simulated player's (`customerId`), or a live Downhill player's (`ticketId`). */
 export interface Reported {
   readonly customerId?: string;
   readonly ticketId?: string;
@@ -111,7 +111,6 @@ export function issueWorkOrder({ area, scope, appUrl, reports, project }: IssueW
   const sorted = oldestFirst(reports);
   const info = BUG_AREA_INFO[area];
   const first = sorted[0];
-  const players = sorted.some(isPlayer);
   return {
     title: `Fix: ${lowerFirst(info.issue)}`,
     brief: brief(area, sorted),
@@ -128,15 +127,15 @@ export function issueWorkOrder({ area, scope, appUrl, reports, project }: IssueW
       {
         path: "BUG_REPORT.md",
         content: bugReport(area, sorted),
-        description: `Contoso Outdoors support's reports of this issue: each ${players ? "customer's or player's" : "customer's"} words, the order, and what should have happened`,
+        description: "Contoso Outdoors support's reports of this issue: each player's words, the order, and what should have happened",
       },
-      { path: "transcripts.md", content: transcripts(sorted), description: `The reporting ${players ? "customers' and players'" : "customers'"} support conversations, as plain text` },
+      { path: "transcripts.md", content: transcripts(sorted), description: "The reporting players' support conversations, as plain text" },
     ],
     project: { name: STOREFRONT, files: project },
   };
 }
 
-/** What the customer or player wrote up to the report (their last three messages): the words to quote. */
+/** What the player wrote up to the report (their last three messages): the words to quote. */
 function customerWords(report: ReportedConversation): string {
   const said = report.items
     .filter((item): item is MessageItem => item.kind === "message" && item.from === "customer" && item.at <= report.bug.at)
@@ -149,18 +148,19 @@ function customerWords(report: ReportedConversation): string {
 const quote = (text: string, indent = ""): string[] => text.split("\n").map((line) => `${indent}>${line.trim() ? ` ${line.trim()}` : ""}`);
 const sentence = (text: string) => text.trim().replace(/[.!?…]+$/, "");
 
-/** Who reported it, counted: "2 customers of the store's website and 1 player in the Downhill Shop". */
+/** Who reported it, counted: "2 players who wrote in and 1 player in Downhill". */
 function sources(reports: readonly ReportedConversation[]): string {
-  const players = reports.filter(isPlayer).length;
-  const customers = reports.length - players;
-  return and([...(customers > 0 ? [`${plural(customers, "customer")} of the store's website`] : []), ...(players > 0 ? [`${plural(players, "player")} in the ${SHOP_NAME}`] : [])]);
+  const live = reports.filter(isPlayer).length;
+  const wrote = reports.length - live;
+  return and([...(wrote > 0 ? [`${plural(wrote, "player")} who wrote in`] : []), ...(live > 0 ? [`${plural(live, "player")} in ${PRODUCT_NAME}`] : [])]);
 }
 
-/** What the reports from the Downhill Shop have in common with the website's: the same checkout code. */
+/** What live players' games sent: what each one tried at the Downhill Shop's checkout. */
 function shopSection(area: BugArea, reports: readonly ReportedConversation[]): string[] {
   const tried = reports.flatMap((report) => (report.shop ? [report.shop.checkout] : []));
-  if (!reports.some(isPlayer)) return [];
-  const shared = area === "promo-codes" ? `: it applies promotion codes with the same \`applyPromoCode\` (\`src/promotions.js\`) as the store's website` : "";
+  const live = reports.filter(isPlayer).length;
+  if (live === 0) return [];
+  const shared = area === "promo-codes" ? `, where \`applyPromoCode\` (\`src/promotions.js\`) checks the code` : "";
   const seen = new Set<string>();
   const attempts = tried.flatMap((checkout) => {
     const offer = checkout.offer ? `The shop's offer banner (“${checkout.offer}”)` : "";
@@ -172,9 +172,9 @@ function shopSection(area: BugArea, reports: readonly ReportedConversation[]): s
     return [line];
   });
   return [
-    `## The ${SHOP_NAME}`,
+    "## From the game",
     "",
-    `${PRODUCT_NAME} is Contoso Outdoors' free mountain-biking browser game, and the ${SHOP_NAME} is its in-game shop, which sells rider outfits and bike paint. Its checkout runs on this same storefront code${shared}.`,
+    `${plural(live, "player")} opened Support in ${PRODUCT_NAME}, which sent what they tried at the ${SHOP_NAME}'s checkout${shared}.`,
     ...(attempts.length > 0 ? ["", ...attempts] : []),
     "",
   ];
@@ -184,17 +184,15 @@ function brief(area: BugArea, reports: readonly ReportedConversation[]): string 
   const issue = lowerFirst(BUG_AREA_INFO[area].issue);
   const count = reports.length === 1 ? "a report" : `${reports.length} reports`;
   const players = reports.filter(isPlayer).length;
-  const customers = reports.length - players;
   const head = [
     players === 0
-      ? `Contoso Outdoors support received ${count} from customers who ran into the same problem on the store's website: ${issue}. Each customer's support agent checked their order and reported it to engineering.`
-      : `Contoso Outdoors support received ${count} of the same problem, ${issue}, from ${sources(reports)}. Each support agent checked what happened and reported it to engineering.`,
+      ? `Contoso Outdoors support received ${count} from ${PRODUCT_NAME} players who ran into the same problem in the ${SHOP_NAME}: ${issue}. Each player's support agent checked their order and reported it to engineering.`
+      : `Contoso Outdoors support received ${count} of the same problem in the ${SHOP_NAME}, ${issue}, from ${sources(reports)}. Each support agent checked what happened and reported it to engineering.`,
     "",
     ...shopSection(area, reports),
-    players === 0 ? "## What customers reported" : "## What they reported",
+    "## What they reported",
     "",
   ];
-  const reporters = customers === 0 ? "players" : players === 0 ? "customers" : "customers and players";
   const tail = [
     "## Expected behavior",
     "",
@@ -204,10 +202,10 @@ function brief(area: BugArea, reports: readonly ReportedConversation[]): string 
     "",
     "## What to do",
     "",
-    `The attached project, \`${STOREFRONT}\`, is the code behind the store's website${players > 0 ? ` and the ${SHOP_NAME}'s checkout` : ""} (Node 22 or later, no dependencies; \`npm test\` runs its tests).`,
+    `The attached project, \`${STOREFRONT}\`, is the ${SHOP_NAME}'s checkout code (Node 22 or later, no dependencies; \`npm test\` runs its tests).`,
     "",
     "1. Find the cause of these reports in the code, and fix it.",
-    `2. Add regression tests that reproduce what the ${reporters} reported${players > 0 ? `, with each code exactly as the ${SHOP_NAME} sent it` : ""}: they fail without the fix and pass with it.`,
+    `2. Add regression tests that reproduce what the players reported${players > 0 ? `, with each code exactly as the game sent it` : ""}: they fail without the fix and pass with it.`,
     "3. Keep the existing tests passing.",
     "",
     "The structured reports are in `.factory/context/BUG_REPORT.md`, and the support conversations in `.factory/context/transcripts.md`.",
@@ -216,7 +214,7 @@ function brief(area: BugArea, reports: readonly ReportedConversation[]): string 
   let budget = MAX_BRIEF - [...head, ...tail].join("\n").length - 100;
   const quoted: string[] = [];
   for (const [index, report] of reports.slice(0, BRIEF_REPORTS).entries()) {
-    const where = isPlayer(report) ? ` (${SHOP_NAME})` : "";
+    const where = isPlayer(report) ? ` (in ${PRODUCT_NAME})` : "";
     const block = [
       `${index + 1}. **${report.name}**${where}${report.bug.orderId ? `, order ${report.bug.orderId}` : ""}, wrote:`,
       "",
@@ -233,18 +231,18 @@ function brief(area: BugArea, reports: readonly ReportedConversation[]): string 
   return clip([...head, ...quoted, ...(more > 0 ? [`${plural(more, "more report")} in BUG_REPORT.md.`, ""] : []), ...tail].join("\n"), MAX_BRIEF);
 }
 
-/** A customer's report in BUG_REPORT.md. */
+/** A simulated player's report in BUG_REPORT.md. */
 function customerEntry(report: ReportedConversation): string[] {
   return [
-    `- Customer: ${report.name}`,
+    `- Player: ${report.name}, who wrote in`,
     ...(report.bug.orderId ? [`- Order: ${report.bug.orderId}`] : []),
     `- Reported: ${report.bug.at}`,
     "",
-    "What the customer wrote:",
+    "What the player wrote:",
   ];
 }
 
-/** A player's report in BUG_REPORT.md: what they tried at the Downhill Shop's checkout. */
+/** A live player's report in BUG_REPORT.md: what they tried at the Downhill Shop's checkout. */
 function playerEntry(report: ReportedConversation): string[] {
   const shop = report.shop;
   const checkout = shop?.checkout;
@@ -272,7 +270,7 @@ function bugReport(area: BugArea, reports: readonly ReportedConversation[]): str
     `# ${info.issue}`,
     "",
     players === 0
-      ? `Reported to Contoso Outdoors support by ${plural(reports.length, "customer")}, through Help Desk. Each customer's support agent wrote the report during the conversation, after checking the customer's order with the store's tools.`
+      ? `Reported to Contoso Outdoors support by ${plural(reports.length, `${PRODUCT_NAME} player`)}, through Help Desk. Each player's support agent wrote the report during the conversation, after checking the player's order with its tools.`
       : `Reported to Contoso Outdoors support through Help Desk by ${sources(reports)}. Each support agent wrote the report during the conversation, after checking what happened with their tools.`,
     "",
     `- Area: ${info.label} (\`${area}\`)`,
@@ -303,19 +301,18 @@ function bugReport(area: BugArea, reports: readonly ReportedConversation[]): str
 
 const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
 
-/** transcripts.md: each reporting customer's or player's conversation, as plain text. */
+/** transcripts.md: each reporting player's conversation, as plain text. */
 function transcripts(reports: readonly ReportedConversation[]): string {
-  const players = reports.some(isPlayer);
   const lines = [
     "# Support conversations",
     "",
-    `The conversations of the ${players ? "customers and players" : "customers"} who reported this issue. \`Tool\` lines are the support agent's calls to the store's systems, and what they returned.`,
+    "The conversations of the players who reported this issue. `Tool` lines are the support agent's calls to the shop's systems, and what they returned.",
   ];
   for (const report of reports) {
     const player = isPlayer(report);
-    lines.push("", `## ${report.name}${player ? ` (${SHOP_NAME})` : ""}`, "");
+    lines.push("", `## ${report.name}${player ? ` (in ${PRODUCT_NAME})` : ""}`, "");
     for (const item of report.items) {
-      if (item.kind === "message") lines.push(`${item.from === "customer" ? (player ? "Player" : "Customer") : "Agent"}: ${clip(oneLine(item.text), 1_000)}`, "");
+      if (item.kind === "message") lines.push(`${item.from === "customer" ? "Player" : "Agent"}: ${clip(oneLine(item.text), 1_000)}`, "");
       else lines.push(`Tool: ${item.name} ${clip(JSON.stringify(item.args), 400)} → ${item.status}${item.result ? `: ${clip(JSON.stringify(item.result), 300)}` : ""}`, "");
     }
   }

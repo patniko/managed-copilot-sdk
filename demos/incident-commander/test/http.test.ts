@@ -58,7 +58,7 @@ function put(path: string, body: unknown): Promise<Response> {
   return fetch(`${base}${path}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 }
 
-const ALERT = { title: "Checkout errors", service: "checkout", severity: "major", summary: "5xx rate is 12%", id: "checkout-5xx" };
+const ALERT = { title: "Checkout errors", service: "downhill-orders", severity: "major", summary: "5xx rate is 12%", id: "checkout-5xx" };
 
 describe("the API", () => {
   it("answers only loopback names and the deployment's hosts", () => {
@@ -101,7 +101,7 @@ describe("the API", () => {
     const resolved = (await (await post("/api/alerts", { ...ALERT, status: "resolved" }, { authorization: "Bearer alert-secret" })).json()) as AlertsAccepted;
     expect(resolved.incidents).toEqual(["INC-1001"]);
     const view = (await (await fetch(`${base}/api/incidents/INC-1001`)).json()) as IncidentView;
-    expect(view).toMatchObject({ demo: true, service: "checkout", severity: "SEV2", alert: { source: "generic", resolvedAt: expect.any(String) } });
+    expect(view).toMatchObject({ demo: true, service: "downhill-orders", severity: "SEV2", alert: { source: "generic", resolvedAt: expect.any(String) } });
     expect((await post("/api/alerts", { hello: "world" }, { authorization: "Bearer alert-secret" })).status).toBe(400);
   });
 

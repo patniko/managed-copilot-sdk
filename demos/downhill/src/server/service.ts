@@ -18,7 +18,7 @@ export interface IncidentService {
 }
 
 const LOG_WINDOW = 2 * 60 * MINUTE;
-const FIRST = ["package.json", "README.md", "src/promotions.js", "src/cart.js", "src/order-status.js"];
+const FIRST = ["package.json", "README.md", "src/promotions.js", "src/cart.js", "src/purchase-status.js"];
 
 function order(paths: readonly string[]): string[] {
   const rank = (path: string) => (FIRST.includes(path) ? FIRST.indexOf(path) : path.startsWith("src/") ? FIRST.length : path.startsWith("test/") ? FIRST.length + 1 : FIRST.length + 2);

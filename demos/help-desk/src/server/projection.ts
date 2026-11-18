@@ -1,6 +1,6 @@
 // One customer's conversation, projected from the stock session events: live as they arrive, or from
 // `session.getEvents()` after a restart (history has no `session.idle`, so the last turn is settled from the session's
-// platform record). A problem with the store's website the agent reported is a completed `report_bug` call, so it comes
+// platform record). A problem with the Downhill Shop the agent reported is a completed `report_bug` call, so it comes
 // back after a restart like everything else. Pure: no I/O, so tests drive it with plain events.
 import { BUG_AREAS, type BugArea, type BugReport, type MessageItem, type ToolCallStatus, type ToolItem, type TranscriptItem } from "../shared/types.js";
 import { readTeamNote } from "./notes.js";
@@ -102,7 +102,7 @@ export class Transcript {
     );
   }
 
-  /** The problem with the store's website the agent reported last (`report_bug`), if any. */
+  /** The problem with the shop the agent reported last (`report_bug`), if any. */
   get bug(): BugReport | undefined {
     for (let index = this.#items.length - 1; index >= 0; index--) {
       const item = this.#items[index]!;

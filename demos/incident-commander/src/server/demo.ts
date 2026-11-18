@@ -2,7 +2,8 @@
 // current), and the Alertmanager notification the "Simulate an incident" button posts. Deterministic for a seed, so
 // the numbers in the alert are the ones the agent finds in the logs.
 
-export const DEMO_SERVICE = "checkout";
+/** Downhill's order service: it prices the shop's carts again server side and hands each order to payment. */
+export const DEMO_SERVICE = "downhill-orders";
 
 /** What makes one simulated incident's logs: a seed and the moment the alert fired. */
 export interface DemoSeed {
@@ -27,7 +28,7 @@ export interface DemoStats {
 }
 
 export interface DemoProduction {
-  /** `logs/checkout.log`. */
+  /** `logs/orders.log`. */
   readonly log: string;
   /** `deploys/HISTORY.md`. */
   readonly history: string;
@@ -55,8 +56,8 @@ function random(seed: number): () => number {
 function position(source: string, file: string, needle: string, at: string = needle): string {
   const lines = source.replace(/\r\n/g, "\n").split("\n");
   const index = lines.findIndex((line) => line.includes(needle));
-  if (index < 0) return `file:///srv/checkout/${file}`;
-  return `file:///srv/checkout/${file}:${index + 1}:${lines[index]!.indexOf(at) + 1}`;
+  if (index < 0) return `file:///srv/${DEMO_SERVICE}/${file}`;
+  return `file:///srv/${DEMO_SERVICE}/${file}:${index + 1}:${lines[index]!.indexOf(at) + 1}`;
 }
 
 const stamp = (ms: number): string => new Date(ms).toISOString();
@@ -78,7 +79,7 @@ export function demoProduction(sources: DemoSources, demo: DemoSeed): DemoProduc
 
   for (let at = start + 20_000; at < end; at += MINUTE) add(at, "level=info msg=request req=health method=GET path=/health status=200 duration_ms=1");
   add(deployAt - 2_400, 'level=info msg="shutting down" version=1.4.1');
-  add(deployAt, 'level=info msg="starting checkout-service" version=1.4.2 commit=a1c9e3f port=8080');
+  add(deployAt, 'level=info msg="starting downhill-orders" version=1.4.2 commit=a1c9e3f port=8080');
   // An unrelated payment-provider blip long before the deploy: noise the triage should rule out.
   const blip = start + 31 * MINUTE + 12_000;
   for (const offset of [0, 2_100]) add(blip + offset, `level=error msg="payment provider error" provider=acmepay status=502 req=${hex()} retry=1`);
@@ -88,15 +89,16 @@ export function demoProduction(sources: DemoSources, demo: DemoSeed): DemoProduc
   let failedSinceDeploy = 0;
   for (let at = start + 3_000; at < end; at += 1_500 + rand() * 3_500) {
     const roll = rand();
-    const coupon = roll < 0.13 ? "SUMMER24" : roll < 0.15 ? "SPRING25" : roll < 0.32 ? "WELCOME10" : roll < 0.4 ? "LOYAL15" : roll < 0.41 ? "BLACKFRIDAY" : "none";
+    // EARLYRIDER (the pre-registration reward) and BETA25 ended before launch; FREELOOKS was never a code.
+    const coupon = roll < 0.13 ? "EARLYRIDER" : roll < 0.15 ? "BETA25" : roll < 0.32 ? "TRAIL15" : roll < 0.4 ? "WELCOME10" : roll < 0.41 ? "FREELOOKS" : "none";
     const items = 1 + Math.floor(rand() * 4);
     const id = hex();
     const recent = at >= end - 5 * MINUTE;
     if (recent) checkoutsLast5m++;
     const common = `req=${id} method=POST path=/checkout`;
-    if (coupon === "BLACKFRIDAY") {
+    if (coupon === "FREELOOKS") {
       add(at, `level=warn msg="request rejected" ${common} status=400 duration_ms=${3 + Math.floor(rand() * 5)} items=${items} coupon=${coupon} error="CheckoutError: Unknown coupon ${coupon}."`);
-    } else if ((coupon === "SUMMER24" || coupon === "SPRING25") && at >= deployAt) {
+    } else if ((coupon === "EARLYRIDER" || coupon === "BETA25") && at >= deployAt) {
       failedSinceDeploy++;
       if (recent) failedLast5m++;
       add(
@@ -112,13 +114,13 @@ export function demoProduction(sources: DemoSources, demo: DemoSeed): DemoProduc
 
   const day = (ms: number) => stamp(ms).replace("T", " ").slice(0, 19);
   const history = [
-    "# Deploys: checkout-service (production)",
+    "# Deploys: downhill-orders (production)",
     "",
     "| When (UTC) | Version | Commit | Change |",
     "| --- | --- | --- | --- |",
     `| ${day(deployAt)} | v1.4.2 | a1c9e3f | Move the coupon expiry check into findCoupon (#482) |`,
     `| ${day(deployAt - 11 * 60 * MINUTE - 7 * MINUTE)} | v1.4.1 | 77b02d4 | Show savings on the receipt (#479) |`,
-    `| ${day(deployAt - 37 * 60 * MINUTE - 31 * MINUTE)} | v1.4.0 | e5d1c08 | Free shipping from $50 (#471) |`,
+    `| ${day(deployAt - 37 * 60 * MINUTE - 31 * MINUTE)} | v1.4.0 | e5d1c08 | Unlock looks as soon as payment clears (#471) |`,
     "",
     "What v1.4.2 changed: deploys/v1.4.2.diff",
     "",
@@ -139,11 +141,11 @@ export function demoProduction(sources: DemoSources, demo: DemoSeed): DemoProduc
 
 /** The Alertmanager notification "Simulate an incident" sends: the shape a real Alertmanager or Grafana posts. */
 export function sampleNotification(stats: DemoStats, demo: DemoSeed, fingerprint: string): Record<string, unknown> {
-  const labels = { alertname: "CheckoutHighErrorRate", service: DEMO_SERVICE, severity: "major", env: "production", team: "storefront" };
+  const labels = { alertname: "CheckoutHighErrorRate", service: DEMO_SERVICE, severity: "major", env: "production", team: "shop" };
   const annotations = {
     summary: `Checkout 5xx error rate is ${stats.errorRate}% (threshold 2%)`,
     description: `${stats.failedLast5m} of ${stats.checkoutsLast5m} checkouts failed in the last 5 minutes.`,
-    runbook_url: "https://runbooks.example.com/storefront/checkout-errors",
+    runbook_url: "https://runbooks.example.com/shop/checkout-errors",
   };
   return {
     version: "4",

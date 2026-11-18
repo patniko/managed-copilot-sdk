@@ -288,7 +288,7 @@ export class ServiceCatalog {
       { discounts: files.get("src/discounts.js") ?? "", cart: files.get("src/cart.js") ?? "", server: files.get("src/server.js") ?? "" },
       demo,
     );
-    files.set("logs/checkout.log", production.log);
+    files.set("logs/orders.log", production.log);
     files.set("deploys/HISTORY.md", production.history);
     return { files, stats: production.stats };
   }

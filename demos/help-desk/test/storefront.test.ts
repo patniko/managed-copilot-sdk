@@ -17,13 +17,15 @@ describe("the storefront codebase", () => {
 
   it("has the bugs Help Desk's customers run into, for Software Factory to fix", async () => {
     const { applyPromoCode } = await load("src/promotions.js");
-    const { addItem, createCart, updateQuantity } = await load("src/cart.js");
-    const { statusLabel } = await load("src/order-status.js");
-    expect(applyPromoCode("TRAIL15", 18_900)).toMatchObject({ discountCents: 2_835 });
-    expect(() => applyPromoCode("TRAIL15 ", 18_900)).toThrow("Invalid code.");
-    expect(() => applyPromoCode("trail15", 18_900)).toThrow("Invalid code.");
-    const cart = addItem(createCart(), { sku: "BTL-32", name: "Canyon Water Bottle 32 oz", priceCents: 2_400 });
-    expect(updateQuantity(cart, "BTL-32", 2).lines[0].quantity).toBe(3);
-    expect(statusLabel([{ at: "2026-11-03T08:00:00Z", location: "Denver, CO", description: "Out for delivery" }])).toBe("Delivered");
+    const { addItem, createCart, subtotalCents } = await load("src/cart.js");
+    const { statusLabel } = await load("src/purchase-status.js");
+    expect(applyPromoCode("TRAIL15", 499)).toMatchObject({ discountCents: 75 });
+    expect(() => applyPromoCode("TRAIL15 ", 499)).toThrow("Invalid code.");
+    expect(() => applyPromoCode("trail15", 499)).toThrow("Invalid code.");
+    const stealth = { sku: "copilot-stealth", name: "Stealth Copilot", priceCents: 699 };
+    const twice = addItem(addItem(createCart(), stealth), stealth);
+    expect(twice.lines[0].quantity).toBe(2);
+    expect(subtotalCents(twice)).toBe(1_398);
+    expect(statusLabel([{ at: "2026-11-12T17:41:00Z", description: "Waiting to unlock: bank transfer pending" }])).toBe("Unlocked");
   });
 });
