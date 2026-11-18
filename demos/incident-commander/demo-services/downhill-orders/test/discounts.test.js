@@ -9,13 +9,13 @@ test("finds a live coupon, in any case", () => {
 });
 
 test("doesn't return an expired coupon", () => {
-  assert.equal(findCoupon("SUMMER24", NOW), undefined);
+  assert.equal(findCoupon("EARLYRIDER", NOW), undefined);
 });
 
 test("takes a percentage off", () => {
-  assert.equal(applyDiscount(10_000, "LOYAL15", NOW), 8_500);
+  assert.equal(applyDiscount(1_000, "TRAIL15", NOW), 850);
 });
 
 test("leaves the subtotal alone without a code", () => {
-  assert.equal(applyDiscount(10_000, undefined, NOW), 10_000);
+  assert.equal(applyDiscount(1_000, undefined, NOW), 1_000);
 });

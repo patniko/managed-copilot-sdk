@@ -28,7 +28,7 @@ async function simulate(desk: HelpDesk, platform: FakePlatform, size = 5) {
   return run;
 }
 
-const refund = (toolCallId: string, orderId: string) => ({ kind: "custom-tool", toolName: "request_refund", toolCallId, args: { orderId, reason: "broken" }, toolDescription: "Refund" });
+const refund = (toolCallId: string, orderId: string) => ({ kind: "custom-tool", toolName: "request_refund", toolCallId, args: { orderId, reason: "bought by mistake" }, toolDescription: "Refund" });
 
 /** What Mona writes when she opens support in Downhill. */
 const MONA_WORDS = "The launch code trail15 says “Invalid code.” at checkout, so I paid full price for Neon Mona.";
@@ -80,10 +80,10 @@ describe("a simulation", () => {
     expect(liam.systemMessage?.content).toContain("Team knowledge base:");
     expect(liam.tools?.map((tool) => tool.name)).toHaveLength(8);
     expect(liam.systemMessage?.content).toContain("chatting with Liam");
-    expect(platform.sessions.get(sessionIdFor(run.id, "c02"))?.sent).toEqual([{ prompt: "Can you check the status of order CO-48177?" }]);
+    expect(platform.sessions.get(sessionIdFor(run.id, "c02"))?.sent).toEqual([{ prompt: "Can you check the status of order DH-20417?" }]);
     expect(events.some((published) => published.type === "run" && published.run?.id === run.id)).toBe(true);
     // Liam's tools refuse Sofia's order, whatever the model asks for.
-    expect(await platform.sessions.get(sessionIdFor(run.id, "c02"))!.call("get_order", { orderId: "CO-48177" })).toEqual({ ok: false, error: "No order CO-48177 on this account." });
+    expect(await platform.sessions.get(sessionIdFor(run.id, "c02"))!.call("get_order", { orderId: "DH-20417" })).toEqual({ ok: false, error: "No order DH-20417 on this account." });
   });
 
   it("accepts 5, 10, or 25 customers, and only while connected", async () => {
@@ -115,16 +115,16 @@ describe("a simulation", () => {
     const { desk, platform } = setup();
     const run = await simulate(desk, platform);
     const sofia = platform.sessions.get(sessionIdFor(run.id, "c03"))!;
-    const pending = sofia.ask(refund("call-1", "CO-48177")) as Promise<PermissionRequestResult>;
+    const pending = sofia.ask(refund("call-1", "DH-20417")) as Promise<PermissionRequestResult>;
     await settle();
-    expect(desk.ticket("c03")).toMatchObject({ status: "approval", approval: { id: "call-1", action: "refund", orderId: "CO-48177", amount: 39, reason: "broken" } });
+    expect(desk.ticket("c03")).toMatchObject({ status: "approval", approval: { id: "call-1", action: "refund", orderId: "DH-20417", amount: 4.99, reason: "bought by mistake" } });
     desk.answer("c03", "call-1", true);
     expect(await pending).toEqual({ kind: "approve-once", approvedInteractively: true });
     expect(desk.ticket("c03").approval).toBeUndefined();
     expect(() => desk.answer("c03", "call-1", true)).toThrow(/answered already/);
 
     const noah = platform.sessions.get(sessionIdFor(run.id, "c04"))!;
-    const cancel = noah.ask({ kind: "custom-tool", toolName: "cancel_order", toolCallId: "call-2", args: { orderId: "CO-48231" } }) as Promise<PermissionRequestResult>;
+    const cancel = noah.ask({ kind: "custom-tool", toolName: "cancel_order", toolCallId: "call-2", args: { orderId: "DH-20911" } }) as Promise<PermissionRequestResult>;
     await settle();
     desk.answer("c04", "call-2", false);
     expect(await cancel).toMatchObject({ kind: "reject", feedback: expect.stringContaining("declined") });
@@ -134,7 +134,7 @@ describe("a simulation", () => {
     const { desk, platform, events } = setup();
     const run = await simulate(desk, platform);
     const maya = platform.sessions.get(sessionIdFor(run.id, "c01"))!;
-    const proposal = { subject: "Weather holds", fact: "UPS weather holds in Denver usually clear within 48 hours.", citations: "Tracking for a delayed tent" };
+    const proposal = { subject: "PayPal eCheck", fact: "PayPal eCheck payments take 3 to 5 business days to clear; the looks unlock then.", citations: "A pending Golden Mona order" };
     // The runtime's permission is granted at once: the agent's turn never waits for the team's decision.
     expect(await maya.ask({ kind: "memory", action: "store", toolCallId: "mem-1", ...proposal })).toEqual({ kind: "approve-once" });
     await maya.config.memory!.storeMemory!({ sessionId: maya.sessionId, ...proposal, reason: "Saves a lookup" }, { signal: new AbortController().signal });
@@ -147,14 +147,14 @@ describe("a simulation", () => {
 
     desk.answer("c01", memory.id, true);
     expect(desk.ticket("c01").memory).toBeUndefined();
-    expect(desk.knowledge.list()).toMatchObject([{ subject: "Weather holds", fact: proposal.fact, reason: "Saves a lookup", source: { customerId: "c01" } }]);
-    expect(events.filter((published) => published.type === "knowledge").at(-1)).toMatchObject({ knowledge: [{ subject: "Weather holds" }], proposals: [] });
+    expect(desk.knowledge.list()).toMatchObject([{ subject: "PayPal eCheck", fact: proposal.fact, reason: "Saves a lookup", source: { customerId: "c01" } }]);
+    expect(events.filter((published) => published.type === "knowledge").at(-1)).toMatchObject({ knowledge: [{ subject: "PayPal eCheck" }], proposals: [] });
     expect(() => desk.answer("c01", memory.id, true)).toThrow(HelpDeskError);
 
     const next = await simulate(desk, platform, 5);
     const later = () => platform.created.find((config) => config.sessionId === sessionIdFor(next.id, "c05"));
     for (let tries = 0; tries < 50 && !later(); tries++) await settle(5);
-    expect(later()?.systemMessage?.content).toContain("Weather holds: UPS weather holds in Denver usually clear within 48 hours.");
+    expect(later()?.systemMessage?.content).toContain("PayPal eCheck: PayPal eCheck payments take 3 to 5 business days to clear; the looks unlock then.");
 
     const id = desk.knowledge.list()[0]!.id;
     desk.forget(id);
@@ -167,12 +167,12 @@ describe("a simulation", () => {
     const run = await simulate(desk, platform);
     const noah = platform.sessions.get(sessionIdFor(run.id, "c04"))!;
     // The cancellation and the memory come in the same step; the cancellation waits for the operator.
-    const cancel = noah.ask({ kind: "custom-tool", toolName: "cancel_order", toolCallId: "call-1", args: { orderId: "CO-48231" } }) as Promise<PermissionRequestResult>;
-    expect(await noah.ask({ kind: "memory", action: "store", toolCallId: "mem-1", subject: "Boots", fact: "Ridgeline boots run small." })).toEqual({ kind: "approve-once" });
-    await noah.config.memory!.storeMemory!({ sessionId: noah.sessionId, subject: "Boots", fact: "Ridgeline boots run small.", citations: "", reason: "" }, { signal: new AbortController().signal });
+    const cancel = noah.ask({ kind: "custom-tool", toolName: "cancel_order", toolCallId: "call-1", args: { orderId: "DH-20911" } }) as Promise<PermissionRequestResult>;
+    expect(await noah.ask({ kind: "memory", action: "store", toolCallId: "mem-1", subject: "Painterly filter", fact: "Turning off the Painterly filter in Settings makes Downhill run smoothly on laptops." })).toEqual({ kind: "approve-once" });
+    await noah.config.memory!.storeMemory!({ sessionId: noah.sessionId, subject: "Painterly filter", fact: "Turning off the Painterly filter in Settings makes Downhill run smoothly on laptops.", citations: "", reason: "" }, { signal: new AbortController().signal });
     await settle();
     const ticket = desk.ticket("c04");
-    expect(ticket).toMatchObject({ status: "approval", approval: { id: "call-1", action: "cancel" }, memory: { subject: "Boots" } });
+    expect(ticket).toMatchObject({ status: "approval", approval: { id: "call-1", action: "cancel" }, memory: { subject: "Painterly filter" } });
 
     desk.answer("c04", ticket.memory!.id, false);
     expect(desk.ticket("c04")).toMatchObject({ status: "approval", approval: { id: "call-1" } });
@@ -187,11 +187,11 @@ describe("a simulation", () => {
     await expect(noah.config.memory!.storeMemory!({ sessionId: noah.sessionId, subject: " ", fact: "x", citations: "", reason: "" }, { signal: new AbortController().signal })).rejects.toThrow();
   });
 
-  it("lets the store refuse a request no one needs to see", async () => {
+  it("lets the shop refuse a request no one needs to see", async () => {
     const { desk, platform } = setup();
     const run = await simulate(desk, platform);
     const liam = platform.sessions.get(sessionIdFor(run.id, "c02"))!;
-    expect(await liam.ask(refund("call-1", "CO-48177"))).toEqual({ kind: "approve-once" });
+    expect(await liam.ask(refund("call-1", "DH-20417"))).toEqual({ kind: "approve-once" });
     expect(desk.ticket("c02").approval).toBeUndefined();
     expect(await liam.ask({ kind: "custom-tool", toolName: "get_order", toolCallId: "call-2", args: {} })).toEqual({ kind: "approve-once" });
   });
@@ -200,11 +200,11 @@ describe("a simulation", () => {
     const { desk, platform } = setup();
     const run = await simulate(desk, platform);
     const maya = platform.sessions.get(sessionIdFor(run.id, "c01"))!;
-    maya.emit(event("user.message", { content: "Where's my tent?" }));
+    maya.emit(event("user.message", { content: "Where's my Golden Mona?" }));
     expect(desk.ticket("c01").status).toBe("answering");
-    maya.emit(event("tool.execution_start", { toolCallId: "t1", toolName: "track_shipment", arguments: { orderId: "CO-48213" } }));
-    maya.emit(event("tool.execution_complete", { toolCallId: "t1", success: true, result: { content: JSON.stringify({ orderId: "CO-48213", carrier: "UPS" }) } }));
-    maya.emit(event("assistant.message", { messageId: "m1", content: "It's held in Denver by weather." }));
+    maya.emit(event("tool.execution_start", { toolCallId: "t1", toolName: "check_unlock", arguments: { orderId: "DH-20652" } }));
+    maya.emit(event("tool.execution_complete", { toolCallId: "t1", success: true, result: { content: JSON.stringify({ orderId: "DH-20652", paymentMethod: "PayPal eCheck" }) } }));
+    maya.emit(event("assistant.message", { messageId: "m1", content: "Your eCheck payment is still clearing." }));
     maya.premium = 0.33;
     maya.emit(event("session.idle", {}, { ephemeral: true }));
     await settle(5);
@@ -260,13 +260,13 @@ describe("after a restart", () => {
     const older = runIdAt(new Date("2026-11-03T09:00:00.000Z"));
     const latest = runIdAt(new Date("2026-11-03T10:00:00.000Z"));
     platform.seed(sessionIdFor(older, "c01"));
-    platform.seed(sessionIdFor(latest, "c01"), [event("user.message", { content: "Where's my tent?" }), event("assistant.message", { messageId: "m1", content: "In Denver." })]);
+    platform.seed(sessionIdFor(latest, "c01"), [event("user.message", { content: "Where's my Golden Mona?" }), event("assistant.message", { messageId: "m1", content: "Still clearing." })]);
     platform.seed(sessionIdFor(latest, "c03"), [
       event("user.message", { content: "Refund please" }),
-      event("tool.execution_start", { toolCallId: "t1", toolName: "request_refund", arguments: { orderId: "CO-48177", reason: "broken" } }),
+      event("tool.execution_start", { toolCallId: "t1", toolName: "request_refund", arguments: { orderId: "DH-20417", reason: "bought by mistake" } }),
       event("permission.requested", { permissionRequest: { kind: "custom-tool", toolCallId: "t1", toolName: "request_refund" } }),
       event("permission.completed", { toolCallId: "t1", result: { kind: "approved" } }),
-      event("tool.execution_complete", { toolCallId: "t1", success: true, result: { content: JSON.stringify({ ok: true, orderId: "CO-48177", refunded: 39 }) } }),
+      event("tool.execution_complete", { toolCallId: "t1", success: true, result: { content: JSON.stringify({ ok: true, orderId: "DH-20417", refunded: 4.99 }) } }),
     ]);
     platform.seed("someone-elses-session");
     const { desk } = setup(platform);
@@ -275,9 +275,9 @@ describe("after a restart", () => {
     await settle(5);
 
     expect(desk.state().run).toMatchObject({ id: latest, size: 2, startedAt: "2026-11-03T10:00:00.000Z" });
-    expect(desk.ticket("c01")).toMatchObject({ status: "waiting", items: [{ text: "Where's my tent?" }, { text: "In Denver." }] });
+    expect(desk.ticket("c01")).toMatchObject({ status: "waiting", items: [{ text: "Where's my Golden Mona?" }, { text: "Still clearing." }] });
     expect(desk.ticket("c03").items[1]).toMatchObject({ kind: "tool", status: "done" });
-    expect(desk.shop.getOrder("c03", "CO-48177")).toMatchObject({ refunded: 39 });
+    expect(desk.shop.getOrder("c03", "DH-20417")).toMatchObject({ refunded: 4.99 });
     expect(platform.resumed.sort()).toEqual([sessionIdFor(latest, "c01"), sessionIdFor(latest, "c03")]);
     expect(platform.deleted).toEqual([sessionIdFor(older, "c01")]);
     expect(platform.listed.has("someone-elses-session")).toBe(true);
@@ -293,19 +293,25 @@ describe("after a restart", () => {
   });
 });
 
-// What three customers write, and what their agents report with report_bug.
-const AISHA = "The code TRAIL15 from your newsletter says 'invalid code' when I paste it at checkout, so I paid full price for my jacket.";
+// What three players write, and what their agents report with report_bug.
+const AISHA = "The code TRAIL15 from your newsletter says 'Invalid code.' when I paste it at checkout, so I paid full price for Neon Mona.";
 const AISHA_REPORT = {
   area: "promo-codes",
   title: "TRAIL15 rejected when pasted from the newsletter",
-  whatHappened: "She pasted TRAIL15 from the newsletter at checkout and got 'invalid code', so she paid full price ($189.00) for her jacket.",
+  whatHappened: "She pasted TRAIL15 from the newsletter at checkout and got 'Invalid code.', so she paid full price ($4.99) for Neon Mona.",
   expected: "TRAIL15 takes 15% off, however it's pasted.",
-  orderId: "CO-48224",
+  orderId: "DH-20540",
 };
 const BEN = "Your promo code TRAIL15 doesn't work if I type it in lowercase.";
 const BEN_REPORT = { area: "promo-codes", title: "Lowercase trail15 rejected", whatHappened: "Typing trail15 in lowercase says the code is invalid.", expected: "Codes work in any case." };
-const LUCAS = "I changed the water bottles from 1 to 2 in my cart, but my order charged me for 3.";
-const LUCAS_REPORT = { area: "cart", title: "Changing a quantity adds to it", whatHappened: "He changed the bottles from 1 to 2 and was charged for 3.", expected: "Charged for the 2 he chose.", orderId: "CO-48198" };
+const LUCAS = "I double-tapped Add to cart on my phone and got charged twice for Stealth Copilot.";
+const LUCAS_REPORT = {
+  area: "cart",
+  title: "Double-tapping Add to cart charges a look twice",
+  whatHappened: "He tapped Add to cart twice and was charged for Stealth Copilot twice ($13.98).",
+  expected: "A look is in the cart once, however often it's tapped.",
+  orderId: "DH-20720",
+};
 const APP = "http://localhost:7440";
 
 /** Waits until `done` holds (polls and publishing run on timers). */
@@ -321,7 +327,7 @@ describe("software issues", () => {
     return { ...desk, run, session };
   }
 
-  it("group the agents' reports of problems with the website by area, oldest first, and follow the tickets", async () => {
+  it("group the agents' reports of problems with the shop by area, oldest first, and follow the tickets", async () => {
     const { desk, events, session } = await reported();
     await reportBug(session("c05"), AISHA, AISHA_REPORT);
     await reportBug(session("c08"), LUCAS, LUCAS_REPORT);
@@ -332,11 +338,11 @@ describe("software issues", () => {
         area: "promo-codes",
         title: "Promo codes rejected at checkout",
         reports: [
-          { customerId: "c05", name: "Aisha Khan", whatHappened: AISHA_REPORT.whatHappened, orderId: "CO-48224", at: expect.any(String) },
+          { customerId: "c05", name: "Aisha Khan", whatHappened: AISHA_REPORT.whatHappened, orderId: "DH-20540", at: expect.any(String) },
           { customerId: "c18", name: "Ben Carter", whatHappened: BEN_REPORT.whatHappened, at: expect.any(String) },
         ],
       },
-      { area: "cart", title: "Wrong quantities in the cart", reports: [{ customerId: "c08", name: "Lucas Silva", whatHappened: LUCAS_REPORT.whatHappened, orderId: "CO-48198", at: expect.any(String) }] },
+      { area: "cart", title: "The same look charged twice", reports: [{ customerId: "c08", name: "Lucas Silva", whatHappened: LUCAS_REPORT.whatHappened, orderId: "DH-20720", at: expect.any(String) }] },
     ]);
     expect(desk.state().issues).toEqual(desk.issues());
     await until(() => events.some((published) => published.type === "issues" && published.issues.length === 2));
@@ -362,16 +368,16 @@ describe("software issues", () => {
     expect(sent.mode).toBeUndefined();
     expect(sent.brief.length).toBeLessThanOrEqual(8_000);
     expect(sent.brief).toContain("received 2 reports");
-    expect(sent.brief).toContain(`**Aisha Khan**, order CO-48224, wrote:\n\n   > ${AISHA}`);
+    expect(sent.brief).toContain(`**Aisha Khan**, order DH-20540, wrote:\n\n   > ${AISHA}`);
     expect(sent.brief).toContain(`   > ${BEN}`);
     expect(sent.brief).toContain("Their support agent found: TRAIL15 rejected when pasted from the newsletter.");
     expect(sent.brief).toContain("- TRAIL15 takes 15% off, however it's pasted.");
-    expect(sent.brief).toContain("Add regression tests that reproduce what the customers reported");
+    expect(sent.brief).toContain("Add regression tests that reproduce what the players reported");
     expect(sent.brief).toContain("Keep the existing tests passing");
 
     expect(sent.project?.name).toBe("contoso-storefront");
     const files = new Map(sent.project!.files.map((file) => [file.path, file.content]));
-    expect([...files.keys()]).toEqual(expect.arrayContaining(["package.json", "README.md", "src/promotions.js", "src/cart.js", "src/order-status.js", "test/promotions.test.js", "test/cart.test.js"]));
+    expect([...files.keys()]).toEqual(expect.arrayContaining(["package.json", "README.md", "src/promotions.js", "src/cart.js", "src/purchase-status.js", "test/promotions.test.js", "test/cart.test.js"]));
     expect(JSON.parse(files.get("package.json")!)).toMatchObject({ name: "contoso-storefront", scripts: { test: "node --test" } });
     expect(files.get("src/promotions.js")).toContain("export function applyPromoCode(code, subtotalCents)");
     expect([...files.values()].some((content) => content.includes("\r"))).toBe(false);
@@ -379,9 +385,9 @@ describe("software issues", () => {
     expect(sent.context?.map((file) => file.path)).toEqual(["BUG_REPORT.md", "transcripts.md"]);
     const [bugReport, transcripts] = sent.context!;
     expect(bugReport!.content).toContain("# Promo codes rejected at checkout");
-    expect(bugReport!.content).toContain("- Customer: Aisha Khan\n- Order: CO-48224");
+    expect(bugReport!.content).toContain("- Player: Aisha Khan, who wrote in\n- Order: DH-20540");
     expect(bugReport!.content).toContain("Expected: Codes work in any case.");
-    expect(transcripts!.content).toContain(`## Ben Carter\n\nCustomer: ${BEN}`);
+    expect(transcripts!.content).toContain(`## Ben Carter\n\nPlayer: ${BEN}`);
     expect(transcripts!.content).toContain('Tool: report_bug {"area":"promo-codes"');
 
     await expect(desk.routeIssue("promo-codes", APP)).rejects.toMatchObject({ code: "conflict", status: 409, message: expect.stringContaining("WO-0001") });
@@ -421,12 +427,12 @@ describe("software issues", () => {
     platform.seed(sessionIdFor(latest, "c05"), [
       event("user.message", { content: AISHA }),
       event("tool.execution_start", { toolCallId: "t1", toolName: "report_bug", arguments: AISHA_REPORT }),
-      event("tool.execution_complete", { toolCallId: "t1", success: true, result: { content: JSON.stringify({ ok: true, area: "promo-codes", orderId: "CO-48224" }) } }),
+      event("tool.execution_complete", { toolCallId: "t1", success: true, result: { content: JSON.stringify({ ok: true, area: "promo-codes", orderId: "DH-20540" }) } }),
     ]);
     factory.workOrders = [
       { id: "wo_9", number: 9, title: "Fix: checkout", status: "building", origin: { app: "incident-commander", name: "Incident Commander", key: `${latest}:promo-codes` } },
       { id: "wo_8", number: 8, title: "Fix: promo codes rejected at checkout", status: "building", origin: { app: "help-desk", name: "Help Desk", key: `${latest}:promo-codes` } },
-      { id: "wo_7", number: 7, title: "Fix: wrong quantities in the cart", status: "completed", origin: { app: "help-desk", name: "Help Desk", key: `${older}:cart` } },
+      { id: "wo_7", number: 7, title: "Fix: the same look charged twice", status: "completed", origin: { app: "help-desk", name: "Help Desk", key: `${older}:cart` } },
     ];
     const { desk } = setup(platform, factory);
     platform.connect();
@@ -434,7 +440,7 @@ describe("software issues", () => {
     await settle(5);
     await desk.pollFactory();
 
-    expect(desk.ticket("c05").bug).toMatchObject({ area: "promo-codes", orderId: "CO-48224" });
+    expect(desk.ticket("c05").bug).toMatchObject({ area: "promo-codes", orderId: "DH-20540" });
     expect(desk.issues()).toEqual([
       {
         area: "promo-codes",
@@ -454,9 +460,9 @@ describe("software issues", () => {
     platform.seed(sessionIdFor(latest, "c08"), [
       event("user.message", { content: LUCAS }),
       event("tool.execution_start", { toolCallId: "t1", toolName: "report_bug", arguments: LUCAS_REPORT }),
-      event("tool.execution_complete", { toolCallId: "t1", success: true, result: { content: JSON.stringify({ ok: true, area: "cart", orderId: "CO-48198" }) } }),
+      event("tool.execution_complete", { toolCallId: "t1", success: true, result: { content: JSON.stringify({ ok: true, area: "cart", orderId: "DH-20720" }) } }),
     ]);
-    factory.workOrders = [{ id: "wo_3", number: 3, title: "Fix: wrong quantities in the cart", status: "planning", origin: { app: "help-desk", name: "Help Desk", key: `${latest}:cart` } }];
+    factory.workOrders = [{ id: "wo_3", number: 3, title: "Fix: the same look charged twice", status: "planning", origin: { app: "help-desk", name: "Help Desk", key: `${latest}:cart` } }];
     factory.failWith = new HelpDeskError("factory_unreachable", "Software Factory didn't answer.", 502);
     const { desk } = setup(platform, factory);
     platform.connect();
@@ -551,8 +557,8 @@ describe("player tickets", () => {
 
     // Its tools reach only Mona's checkout and order.
     expect(await session.call("get_checkout", {})).toMatchObject({ ok: true, player: "Mona", code: "trail15", bought: true });
-    expect(await session.call("request_refund", { orderId: "CO-48224", reason: "code" })).toEqual({ ok: false, error: "No order CO-48224 on this account." });
-    expect(await reportBug(session, undefined, MONA_REPORT)).toEqual({ ok: true, area: "promo-codes", orderId: "DH-1042", sentTo: "the store's engineering team" });
+    expect(await session.call("request_refund", { orderId: "DH-20540", reason: "code" })).toEqual({ ok: false, error: "No order DH-20540 on this account." });
+    expect(await reportBug(session, undefined, MONA_REPORT)).toEqual({ ok: true, area: "promo-codes", orderId: "DH-1042", sentTo: "the engineering team" });
     expect(desk.playerTicket(ticketId).bug).toMatchObject({ area: "promo-codes", orderId: "DH-1042" });
 
     // The same opening sent again (the game retried it) gets the same ticket.
@@ -840,18 +846,18 @@ describe("software issues with players", () => {
     expect(sent.origin).toEqual({ app: "help-desk", name: "Help Desk", label: "Promo codes · 1 ticket", url: `${APP}/#/p/${mona.ticketId}`, key: `player-${mona.ticketId}:promo-codes` });
     expect(sent.project?.name).toBe("contoso-storefront");
     expect(sent.project?.files.map((file) => file.path)).toContain("src/promotions.js");
-    expect(sent.brief).toContain("from 1 player in the Downhill Shop.");
-    expect(sent.brief).toContain("same `applyPromoCode` (`src/promotions.js`) as the store's website");
+    expect(sent.brief).toContain("from 1 player in Downhill.");
+    expect(sent.brief).toContain("where `applyPromoCode` (`src/promotions.js`) checks the code");
     expect(sent.brief).toContain("The shop's offer banner (“Launch week: 15% off everything with code trail15”) applies the code \"trail15\", and checkout said “Invalid code.”");
-    expect(sent.brief).toContain("**Mona** (Downhill Shop), order DH-1042, wrote:");
+    expect(sent.brief).toContain("**Mona** (in Downhill), order DH-1042, wrote:");
     expect(sent.brief).toContain(`> ${MONA_WORDS}`);
     expect(sent.brief).not.toContain("downhill_checkout");
-    expect(sent.brief).toContain("reproduce what the players reported, with each code exactly as the Downhill Shop sent it");
+    expect(sent.brief).toContain("reproduce what the players reported, with each code exactly as the game sent it");
     const [bugReport, transcripts] = sent.context!;
     expect(bugReport!.content).toContain("- Player: Mona, in the Downhill Shop (Downhill 1.0.0)");
     expect(bugReport!.content).toContain("- Code: \"trail15\", from the shop's offer banner (“Launch week: 15% off everything with code trail15”)");
     expect(bugReport!.content).toContain("- Checkout said: Invalid code.\n- Cart: Neon Mona (`mona-neon`, $4.99); subtotal $4.99\n- Order: DH-1042, $4.99 paid at full price");
-    expect(transcripts!.content).toContain(`## Mona (Downhill Shop)\n\nPlayer: ${MONA_WORDS}`);
+    expect(transcripts!.content).toContain(`## Mona (in Downhill)\n\nPlayer: ${MONA_WORDS}`);
     expect(bugReport!.content + transcripts!.content).not.toContain("downhill_checkout");
 
     // A later player's report joins the issue, which stays sent while the first player's ticket is open.
@@ -876,10 +882,10 @@ describe("software issues with players", () => {
     await desk.routeIssue("promo-codes", APP);
     const sent = factory.created[0]!;
     expect(sent.origin).toMatchObject({ label: "Promo codes · 2 tickets", url: `${APP}/#/c/c05`, key: `${run.id}:promo-codes` });
-    expect(sent.brief).toContain("received 2 reports of the same problem, promo codes rejected at checkout, from 1 customer of the store's website and 1 player in the Downhill Shop.");
-    expect(sent.brief).toContain("the code behind the store's website and the Downhill Shop's checkout");
-    expect(sent.brief).toContain("reproduce what the customers and players reported");
-    expect(sent.context?.[0]?.content).toContain("- Customer: Aisha Khan\n- Order: CO-48224");
+    expect(sent.brief).toContain("received 2 reports of the same problem in the Downhill Shop, promo codes rejected at checkout, from 1 player who wrote in and 1 player in Downhill.");
+    expect(sent.brief).toContain("is the Downhill Shop's checkout code");
+    expect(sent.brief).toContain("reproduce what the players reported");
+    expect(sent.context?.[0]?.content).toContain("- Player: Aisha Khan, who wrote in\n- Order: DH-20540");
 
     // Ending the simulation ends its scope: the player's report makes an issue of its own again.
     await desk.end();

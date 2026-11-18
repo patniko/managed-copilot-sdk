@@ -206,7 +206,7 @@ function KnownIssueMark({ known }: { readonly known: TicketKnownIssue }) {
 function Blocked({ ticket }: { readonly ticket: Ticket }) {
   const orders = [...new Set(ticket.items.filter((item): item is ToolItem => item.kind === "tool" && item.blocked === true).map((item) => String(item.args["orderId"]).toUpperCase()))];
   return (
-    <Tooltip content={`Asked for ${orders.join(", ")}, another customer's order. The store's tools refused.`} className="relative z-10">
+    <Tooltip content={`Asked for ${orders.join(", ")}, another customer's order. The support tools refused.`} className="relative z-10">
       <span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-fg-danger">
         <ShieldLockIcon size={14} className="shrink-0" />
         <span className="truncate">Blocked: not their order</span>

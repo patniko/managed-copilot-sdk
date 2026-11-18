@@ -45,11 +45,11 @@ export function ledgerItem(product: Product): LedgerItem {
 
 // ---------------------------------------------------------------- simulation
 
-/** Simulated players' names (their rows say `source: simulated`). */
+/** Simulated players' names (their rows say `source: simulated`): Help Desk's 25 customers, as "First L.", and five more. */
 const PLAYERS = [
-  "Ava R.", "Liam K.", "Sofia M.", "Noah P.", "Mia L.", "Lucas B.", "Aisha D.", "Mateo G.", "Emma S.", "Kenji T.",
-  "Zara H.", "Diego F.", "Priya N.", "Elias W.", "Hana Y.", "Omar A.", "Chloe V.", "Ravi C.", "Freya O.", "Tomás E.",
-  "Leila Q.", "Jonas U.", "Nia J.", "Felix Z.", "Yuki I.", "Sam X.", "Ines R.", "Kai M.", "Maya T.", "Theo B.",
+  "Maya C.", "Liam O.", "Sofia M.", "Noah W.", "Aisha K.", "Ethan B.", "Yuki T.", "Lucas S.", "Emma J.", "Omar H.",
+  "Chloe D.", "Mateo R.", "Hannah S.", "Daniel K.", "Grace L.", "Arjun P.", "Fatima A.", "Ben C.", "Zoe N.", "Kwame M.",
+  "Isabella G.", "Mohammed R.", "Olivia B.", "Lars N.", "Priya S.", "Ravi C.", "Kenji T.", "Freya O.", "Tomás E.", "Nia J.",
 ] as const;
 
 /** A simulated shopper at checkout: what they want, and what they do. */

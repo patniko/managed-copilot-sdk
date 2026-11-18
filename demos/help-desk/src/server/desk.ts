@@ -2,10 +2,10 @@
 // tickets from the Downhill Shop (independent of simulations), and the counters the wall shows. Session IDs name what
 // they belong to (`hd-<simulation>-<customer>`, `hd-player-<ticket>`), so after a restart Help Desk adopts the latest
 // simulation and every player ticket from the platform, rebuilds each conversation from its history, and deletes older
-// simulations' leftovers. Problems with the store's checkout code that the agents report are grouped into software
-// issues, which the operator sends to Software Factory; each work order's origin carries the issue's scope and area, so
-// a restart finds them again. Facts the customers' agents propose wait in the team knowledge base until the operator
-// adds or declines them, outside the agents' turns; added facts outlive simulations and are part of every later
+// simulations' leftovers. Problems with the Downhill Shop's checkout code that the agents report are grouped into
+// software issues, which the operator sends to Software Factory; each work order's origin carries the issue's scope and
+// area, so a restart finds them again. Facts the customers' agents propose wait in the team knowledge base until the
+// operator adds or declines them, outside the agents' turns; added facts outlive simulations and are part of every later
 // customer session's instructions. A team member can also write to a ticket's agent (a team note): when it tells the
 // agent about an ongoing problem, the agent proposes a known issue, which a team member records for the whole desk;
 // Answer matching tickets then has the decision model pick the open tickets about it and sends each one's agent the
@@ -132,7 +132,7 @@ export class HelpDesk implements TicketHost {
   readonly #publish: (event: ServerEvent) => void;
   readonly #factory: FactoryClient;
   #run: Run | undefined;
-  /** The simulation's customers' tickets, by customer ID, in the store's customer order. */
+  /** The simulation's customers' tickets, by customer ID, in the seed's customer order. */
   readonly #tickets = new Map<string, CustomerTicket>();
   /** Live players' tickets, by ticket ID. Simulations never touch them. */
   readonly #players = new Map<string, PlayerTicketSession>();

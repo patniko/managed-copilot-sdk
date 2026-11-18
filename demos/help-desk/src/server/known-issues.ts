@@ -135,10 +135,10 @@ export class KnownIssues {
 export function matchQuestions(issue: Pick<KnownIssue, "title" | "symptoms">): QuestionSpecs {
   return {
     matches: {
-      instructions: `Is this outdoor gear shop customer's message about a known problem the support team is handling? The problem: ${issue.title}. Customers describe it like this: ${issue.symptoms}`,
+      instructions: `Is this Downhill player's message about a known problem the support team is handling? The problem: ${issue.title}. Players describe it like this: ${issue.symptoms}`,
       criteria: {
-        true: `The customer ran into this problem: ${issue.symptoms}`,
-        false: "The customer needs help with something else, even if they mention the same product, order, or page.",
+        true: `The player ran into this problem: ${issue.symptoms}`,
+        false: "The player needs help with something else, even if they mention the same look, order, or page.",
       },
     },
   };

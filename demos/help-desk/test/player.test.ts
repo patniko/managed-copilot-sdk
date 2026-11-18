@@ -143,7 +143,7 @@ describe("a player's tools", () => {
     return { list, run, account };
   };
 
-  it("are the store's report and refund tools, bound to the player's checkout; only refunds need approval", () => {
+  it("are the shop's report and refund tools, bound to the player's checkout; only refunds need approval", () => {
     const { list } = tools();
     expect(list.map((tool) => tool.name)).toEqual([...PLAYER_TOOL_NAMES]);
     expect(PLAYER_TOOLS.map((tool) => tool.name)).toEqual([...PLAYER_TOOL_NAMES]);
@@ -182,7 +182,7 @@ describe("a player's tools", () => {
 
   it("refund only the player's latest order, once per call, up to its total", async () => {
     const { run, account } = tools();
-    expect(await run("request_refund", { orderId: "CO-48224", amount: 0.75, reason: "code" })).toEqual({ ok: false, error: "No order CO-48224 on this account." });
+    expect(await run("request_refund", { orderId: "DH-20540", amount: 0.75, reason: "code" })).toEqual({ ok: false, error: "No order DH-20540 on this account." });
     expect(await run("request_refund", { orderId: "dh-1042", amount: 0.75, reason: "the 15% TRAIL15 should have taken off" }, "r1")).toEqual({
       ok: true,
       orderId: "DH-1042",
@@ -203,12 +203,12 @@ describe("a player's tools", () => {
     expect(browsing.checkRefund("DH-1042", 0.75)).toEqual({ ok: false, error: "The game sent no Downhill Shop order for this player: there's nothing to refund." });
   });
 
-  it("report the problem with the store's areas, naming only the player's own order", async () => {
+  it("report the problem with the shop's areas, naming only the player's own order", async () => {
     const { run } = tools();
     const report = { area: "promo-codes", title: "Launch code rejected", whatHappened: "trail15 says invalid.", expected: "15% off." };
-    expect(await run("report_bug", { ...report, orderId: "DH-1042" })).toEqual({ ok: true, area: "promo-codes", orderId: "DH-1042", sentTo: "the store's engineering team" });
-    expect(await run("report_bug", report)).toEqual({ ok: true, area: "promo-codes", sentTo: "the store's engineering team" });
-    expect(await run("report_bug", { ...report, orderId: "CO-48224" })).toEqual({ ok: false, error: "No order CO-48224 on this account." });
+    expect(await run("report_bug", { ...report, orderId: "DH-1042" })).toEqual({ ok: true, area: "promo-codes", orderId: "DH-1042", sentTo: "the engineering team" });
+    expect(await run("report_bug", report)).toEqual({ ok: true, area: "promo-codes", sentTo: "the engineering team" });
+    expect(await run("report_bug", { ...report, orderId: "DH-20540" })).toEqual({ ok: false, error: "No order DH-20540 on this account." });
     expect(await run("report_bug", { ...report, area: "game" })).toMatchObject({ ok: false, error: expect.stringContaining("area") });
   });
 

@@ -59,7 +59,7 @@ export function checkoutLine(checkout: ShopCheckout): string {
   return checkout.order ? `Paid full price · ${checkout.order.id}` : "No code applied";
 }
 
-/** What an approval would do: "Refund $39.00 · CO-48177", or for a player "Refund $0.75 of DH-1042 to Mona". */
+/** What an approval would do: "Refund $4.99 · DH-20417", or for a player "Refund $0.75 of DH-1042 to Mona". */
 export function approvalTitle(approval: ApprovalRequest, to?: string): string {
   const what = approval.action === "refund" ? "Refund" : "Cancel";
   return to ? `${what} ${money(approval.amount)} of ${approval.orderId} to ${to}` : `${what} ${money(approval.amount)} · ${approval.orderId}`;
@@ -155,8 +155,8 @@ export function customerLine(item: ToolItem): { readonly text: string; readonly 
       return { text: item.status === "running" ? "Looking up your orders…" : "Looked up your orders", tone: "muted" };
     case "get_order":
       return { text: item.status === "running" ? `Opening ${order}…` : `Opened ${order}`, tone: "muted" };
-    case "track_shipment":
-      return { text: item.status === "running" ? `Tracking ${order}…` : `Tracked ${order}`, tone: "muted" };
+    case "check_unlock":
+      return { text: item.status === "running" ? `Checking ${order}'s payment…` : `Checked ${order}'s payment`, tone: "muted" };
     case "request_refund":
     case "cancel_order": {
       const what = item.name === "request_refund" ? "Refund" : "Cancellation";
@@ -182,7 +182,7 @@ export function customerLine(item: ToolItem): { readonly text: string; readonly 
   }
 }
 
-/** What a tool call did, for the operator: one or two words, or the store's own short answer. */
+/** What a tool call did, for the operator: one or two words, or the shop's own short answer. */
 export function operatorOutcome(item: ToolItem): { readonly text: string; readonly tone: Tone } {
   const result = item.result ?? {};
   switch (item.status) {
@@ -209,8 +209,8 @@ export function operatorOutcome(item: ToolItem): { readonly text: string; readon
       return { text: `${count} order${count === 1 ? "" : "s"}`, tone: "success" };
     }
     case "get_order":
-    case "track_shipment":
-      return { text: [result["carrier"], result["status"]].filter((part) => typeof part === "string").join(" · ") || "Done", tone: "success" };
+    case "check_unlock":
+      return { text: [result["paymentMethod"], result["status"]].filter((part) => typeof part === "string").join(" · ") || "Done", tone: "success" };
     case "request_refund": {
       const amount = amountOf(item);
       return { text: amount !== undefined ? `${money(amount)} refunded` : "Refunded", tone: "success" };

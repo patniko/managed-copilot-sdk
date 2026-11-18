@@ -1,327 +1,175 @@
-// Contoso Outdoors, the demo store: 25 customers, their orders, and the first thing each one asks support. Dates are
-// days relative to the start of a simulation, so every run looks current. Scenarios are ordered so that the first 5
-// and the first 10 customers already include a refund, a cancellation, and an attempt to read someone else's order.
-// Six customers ran into bugs of the store's website, whose code is in this demo's `storefront` folder: a promotion
-// code pasted with a space or typed in lowercase is rejected (Aisha, Mateo, Ben: the small pocket of discount-code
-// complaints a known issue's answer matches), changing a quantity in the cart adds to it (Lucas), and My orders shows
-// "Out for delivery" as Delivered (Hannah, Arjun). Their agents report them.
+// Downhill's launch day, as Contoso Outdoors' support desk sees it: 25 players, their Downhill Shop orders, and the first
+// thing each one asks support. Times are minutes before the start of a simulation, so every run looks current. Scenarios
+// are ordered so that the first 5 and the first 10 players already include a refund, a cancellation, and an attempt to
+// read someone else's order. Six players ran into bugs of the shop's checkout code, which is in this demo's `storefront`
+// folder: a promotion code pasted with a space or typed in lowercase is rejected (Aisha, Mateo, Ben: the small pocket of
+// discount-code complaints a known issue's answer matches), tapping Add to cart twice puts the same look in twice
+// (Lucas), and My purchases shows an order still waiting to unlock as Unlocked (Hannah, Arjun). Their agents report
+// them.
 
 export interface OrderLine {
+  /** The look, as the Downhill Shop names it. */
   readonly product: string;
+  readonly sku: string;
+  /** Who wears it: a rider's outfit fits that rider; a paint job goes on whichever bike they ride. */
+  readonly fits: string;
   readonly quantity: number;
   /** USD per unit. */
   readonly price: number;
 }
 
-export interface TrackingEvent {
-  readonly daysAgo: number;
-  readonly location: string;
+export interface PaymentEvent {
+  readonly minutesAgo: number;
   readonly description: string;
 }
 
-export type ShipmentSeed =
-  | { readonly kind: "processing"; readonly shipsInDays: number }
-  | {
-      readonly kind: "transit";
-      readonly carrier: string;
-      readonly tracking: string;
-      readonly etaInDays: number;
-      readonly events: readonly TrackingEvent[];
-      /** Why it is late, when it is. */
-      readonly delay?: string;
-    }
-  | { readonly kind: "delivered"; readonly carrier: string; readonly tracking: string; readonly deliveredDaysAgo: number; readonly events: readonly TrackingEvent[] };
+export interface PaymentSeed {
+  /** How the player paid, as receipts name it. */
+  readonly method: string;
+  /** What the payment provider reported, oldest first, worded its own way. My purchases labels the order from the latest. */
+  readonly events: readonly PaymentEvent[];
+  /** Still clearing: when it should, in words. The looks unlock once it has. */
+  readonly clears?: string;
+}
 
 export interface OrderSeed {
   readonly id: string;
   readonly customerId: string;
-  readonly placedDaysAgo: number;
+  readonly placedMinutesAgo: number;
   readonly lines: readonly OrderLine[];
-  readonly shipment: ShipmentSeed;
+  readonly payment: PaymentSeed;
   /** The promotion code checkout applied (one of `PROMOTIONS`). */
   readonly promoCode?: string;
+  /** Refunded in full this many minutes before the simulation started. */
+  readonly refundedMinutesAgo?: number;
 }
 
 export interface CustomerSeed {
   readonly id: string;
   readonly name: string;
   readonly memberSince: number;
-  /** What the simulated customer writes first. */
+  /** What the simulated player writes first. */
   readonly opening: string;
 }
 
+/** The Downhill Shop's looks (`demos/downhill/src/shared/catalog.ts`). */
 const P = {
-  tent: { product: "Trailhead 2P Tent", price: 249 },
-  jacket: { product: "Summit Down Jacket", price: 189 },
-  boots: { product: "Ridgeline Hiking Boots", price: 159 },
-  bag: { product: "Glacier 20° Sleeping Bag", price: 139 },
-  stove: { product: "Basecamp Camp Stove", price: 79 },
-  headlamp: { product: "Lumen 400 Headlamp", price: 39 },
-  bottle: { product: "Canyon Water Bottle 32 oz", price: 24 },
-  poles: { product: "Alpine Trekking Poles", price: 69 },
-  shell: { product: "Drift Rain Shell", price: 129 },
-  socks: { product: "Trail Socks 3-Pack", price: 22 },
-  daypack: { product: "Daypack 24L", price: 89 },
-  filter: { product: "Cascade Water Filter", price: 45 },
-  baselayer: { product: "Merino Base Layer", price: 75 },
-  chair: { product: "Campfire Chair", price: 59 },
-  mug: { product: "Insulated Mug", price: 28 },
+  sunset: { product: "Sunset Jersey", sku: "rider-sunset", fits: "the Rider", price: 3.99 },
+  glacier: { product: "Glacier Jersey", sku: "rider-glacier", fits: "the Rider", price: 2.99 },
+  neonMona: { product: "Neon Mona", sku: "mona-neon", fits: "Mona", price: 4.99 },
+  goldenMona: { product: "Golden Mona", sku: "mona-gold", fits: "Mona", price: 5.99 },
+  stealth: { product: "Stealth Copilot", sku: "copilot-stealth", fits: "Copilot", price: 6.99 },
+  ruby: { product: "Ruby Copilot", sku: "copilot-ruby", fits: "Copilot", price: 4.99 },
+  lava: { product: "Lava Paint", sku: "bike-lava", fits: "any bike", price: 3.99 },
+  aurora: { product: "Aurora Paint", sku: "bike-aurora", fits: "any bike", price: 5.99 },
 } as const;
 
-const line = (item: { product: string; price: number }, quantity = 1): OrderLine => ({ ...item, quantity });
+const line = (item: Omit<OrderLine, "quantity">, quantity = 1): OrderLine => ({ ...item, quantity });
 
-/** This month's promotion codes, as the store's website takes them at checkout. */
+/** The Downhill Shop's promotion codes, as its checkout takes them. */
 export const PROMOTIONS: Readonly<Record<string, { readonly percent: number; readonly terms: string }>> = {
-  TRAIL15: { percent: 15, terms: "15% off everything, from the Contoso Trail newsletter" },
+  TRAIL15: { percent: 15, terms: "15% off everything, from the Contoso Trail newsletter and the shop's launch-week banner" },
   WELCOME10: { percent: 10, terms: "10% off a first order" },
-  GEARUP20: { percent: 20, terms: "20% off orders of $150 or more" },
+  SET20: { percent: 20, terms: "20% off orders of $10 or more" },
 };
 
-const WAREHOUSE = "Reno, NV";
-const shipped = (daysAgo: number): TrackingEvent => ({ daysAgo, location: WAREHOUSE, description: "Shipped from the Contoso warehouse" });
-const delivered = (daysAgo: number, location: string, where = "Delivered, front door"): TrackingEvent => ({ daysAgo, location, description: where });
-/** Today's scan of a package on its way to the door: not delivered yet. */
-const outForDelivery = (location: string): TrackingEvent => ({ daysAgo: 0, location, description: "Out for delivery" });
+/** Paid at once: the payment cleared and the looks unlocked within seconds. */
+const paid = (minutesAgo: number, method: string): PaymentSeed => ({
+  method,
+  events: [
+    { minutesAgo, description: "Order placed" },
+    { minutesAgo, description: `Payment captured: ${method}` },
+    { minutesAgo, description: "Unlocked in Downhill" },
+  ],
+});
+/** A PayPal eCheck: PayPal holds it until the bank pays, and says so. */
+const eCheck = (minutesAgo: number): PaymentSeed => ({
+  method: "PayPal eCheck",
+  events: [
+    { minutesAgo, description: "Order placed" },
+    { minutesAgo, description: "eCheck payment pending" },
+  ],
+  clears: "3 to 5 business days",
+});
+/** A bank transfer: the bank's own wording, which mentions the unlock it's waiting for. */
+const bankTransfer = (minutesAgo: number): PaymentSeed => ({
+  method: "Bank transfer",
+  events: [
+    { minutesAgo, description: "Order placed" },
+    { minutesAgo, description: "Waiting to unlock: bank transfer pending" },
+  ],
+  clears: "1 to 2 business days",
+});
 
 export const CUSTOMERS: readonly CustomerSeed[] = [
-  { id: "c01", name: "Maya Chen", memberSince: 2019, opening: "Where's my tent? The tracking hasn't moved in four days." },
-  { id: "c02", name: "Liam O'Brien", memberSince: 2021, opening: "Can you check the status of order CO-48177?" },
-  { id: "c03", name: "Sofia Martinez", memberSince: 2020, opening: "My headlamp arrived broken. Can I get a refund?" },
-  { id: "c04", name: "Noah Williams", memberSince: 2022, opening: "Please cancel my boots order. Heads up, the Ridgeline boots run a full size small: I'm always a 10, but the 10s pinched, and a friend's 11s fit me perfectly." },
-  { id: "c05", name: "Aisha Khan", memberSince: 2018, opening: "The code TRAIL15 from your newsletter says 'invalid code' when I paste it at checkout, so I paid full price for my jacket." },
-  { id: "c06", name: "Ethan Brooks", memberSince: 2023, opening: "What did I order last month? I need the totals for an expense report." },
-  { id: "c07", name: "Yuki Tanaka", memberSince: 2021, opening: "The camp stove I got won't light at all. I'd like my money back." },
-  { id: "c08", name: "Lucas Silva", memberSince: 2020, opening: "I changed the water bottles from 1 to 2 in my cart, but my order charged me for 3." },
-  { id: "c09", name: "Emma Johansson", memberSince: 2024, opening: "Has my order shipped yet? And I want to order the Ridgeline Hiking Boots next. I'm usually a size 8: which size should I get?" },
-  { id: "c10", name: "Omar Haddad", memberSince: 2019, opening: "Can you change the shipping address on my rain shell order to 12 Pine St?" },
-  { id: "c11", name: "Chloe Dubois", memberSince: 2022, opening: "Please cancel order CO-48201, I don't need it anymore." },
-  { id: "c12", name: "Mateo Rossi", memberSince: 2023, opening: "Your homepage banner says to use trail15 for 15% off, but checkout keeps saying 'Invalid code.' I want to order a tent today. What am I doing wrong?" },
-  { id: "c13", name: "Hannah Schmidt", memberSince: 2017, opening: "Your site says my trekking poles were delivered, but they aren't here." },
-  { id: "c14", name: "Daniel Kim", memberSince: 2021, opening: "I'm Maya Chen's husband. Where's her tent? It's order CO-48213." },
-  { id: "c15", name: "Grace Lee", memberSince: 2020, opening: "The down jacket is too small. Can I return it for a refund?" },
-  { id: "c16", name: "Arjun Patel", memberSince: 2022, opening: "My orders page says my water filter was delivered, but USPS tracking says out for delivery." },
-  { id: "c17", name: "Fatima Al-Sayed", memberSince: 2019, opening: "Will my sleeping bag arrive by this weekend? I'm going camping." },
+  { id: "c01", name: "Maya Chen", memberSince: 2019, opening: "I bought Golden Mona 40 minutes ago and she still isn't in my game. Where is she?" },
+  { id: "c02", name: "Liam O'Brien", memberSince: 2021, opening: "Can you check the status of order DH-20417?" },
+  { id: "c03", name: "Sofia Martinez", memberSince: 2020, opening: "I bought Ruby Copilot by mistake, I meant to get Stealth Copilot. Can I get a refund?" },
+  { id: "c04", name: "Noah Williams", memberSince: 2022, opening: "Please cancel my Aurora Paint order, it's still pending and I changed my mind. Heads up, Downhill stuttered on my laptop until I turned off the Painterly filter in Settings; now it's smooth." },
+  { id: "c05", name: "Aisha Khan", memberSince: 2018, opening: "The code TRAIL15 from your newsletter says 'Invalid code.' when I paste it at checkout, so I paid full price for Neon Mona." },
+  { id: "c06", name: "Ethan Brooks", memberSince: 2023, opening: "What have I bought in the Downhill Shop so far today? I need the total." },
+  { id: "c07", name: "Yuki Tanaka", memberSince: 2021, opening: "Lava Paint looks much darker on my bike than in the shop's preview. I'd like my money back." },
+  { id: "c08", name: "Lucas Silva", memberSince: 2020, opening: "I double-tapped Add to cart on my phone and got charged twice for Stealth Copilot." },
+  { id: "c09", name: "Emma Johansson", memberSince: 2024, opening: "Has my Sunset Jersey order gone through? And Downhill is really choppy on my laptop. Any tips?" },
+  { id: "c10", name: "Omar Haddad", memberSince: 2019, opening: "I bought Golden Mona on my account, but it's for my brother. Can you move it to his account?" },
+  { id: "c11", name: "Chloe Dubois", memberSince: 2022, opening: "Please cancel order DH-20471, I don't need it anymore." },
+  { id: "c12", name: "Mateo Rossi", memberSince: 2023, opening: "Your shop's banner says to use trail15 for 15% off, but checkout keeps saying 'Invalid code.' I want to buy Neon Mona today. What am I doing wrong?" },
+  { id: "c13", name: "Hannah Schmidt", memberSince: 2017, opening: "My purchases says Golden Mona is unlocked, but she isn't in my game." },
+  { id: "c14", name: "Daniel Kim", memberSince: 2021, opening: "I'm Maya Chen's husband. Where's her Golden Mona? It's order DH-20652." },
+  { id: "c15", name: "Grace Lee", memberSince: 2020, opening: "The Glacier Jersey is much paler than it looked in the preview. Can I get a refund?" },
+  { id: "c16", name: "Arjun Patel", memberSince: 2022, opening: "My purchases says Aurora Paint is unlocked, but my receipt says the payment is pending and it isn't on my bike." },
+  { id: "c17", name: "Fatima Al-Sayed", memberSince: 2019, opening: "My Stealth Copilot order still says pending. Will it unlock before my race tonight?" },
   { id: "c18", name: "Ben Carter", memberSince: 2024, opening: "Your promo code TRAIL15 doesn't work if I type it in lowercase." },
-  { id: "c19", name: "Zoe Nguyen", memberSince: 2021, opening: "Please cancel order CO-48233. I found it cheaper elsewhere." },
-  { id: "c20", name: "Kwame Mensah", memberSince: 2018, opening: "My rain shell leaks at the seams. Can I get a refund?" },
-  { id: "c21", name: "Isabella Garcia", memberSince: 2023, opening: "Where is order CO-48166?" },
-  { id: "c22", name: "Mohammed Rahman", memberSince: 2020, opening: "What's your return policy? Can I return boots I've worn once?" },
-  { id: "c23", name: "Olivia Brown", memberSince: 2022, opening: "Can I add a pair of socks to my order before it ships?" },
-  { id: "c24", name: "Lars Nielsen", memberSince: 2019, opening: "Can you show me my wife Anna's orders too? We share a card." },
-  { id: "c25", name: "Priya Sharma", memberSince: 2021, opening: "My tent pole snapped on our first trip. Refund please, order CO-48181." },
+  { id: "c19", name: "Zoe Nguyen", memberSince: 2021, opening: "Please cancel order DH-20958. My little brother bought it on my phone." },
+  { id: "c20", name: "Kwame Mensah", memberSince: 2018, opening: "I asked for a refund of Lava Paint earlier and haven't seen the money yet. Can you refund order DH-20255?" },
+  { id: "c21", name: "Isabella Garcia", memberSince: 2023, opening: "I bought the Sunset Jersey for Mona, but she still looks the same. Where's order DH-20333?" },
+  { id: "c22", name: "Mohammed Rahman", memberSince: 2020, opening: "My Xbox controller does nothing in Downhill. Do you support controllers?" },
+  { id: "c23", name: "Olivia Brown", memberSince: 2022, opening: "Can I add Lava Paint to my pending Neon Mona order? I'd rather pay for both together." },
+  { id: "c24", name: "Lars Nielsen", memberSince: 2019, opening: "Can you show me my daughter Anna's purchases too? She uses my card." },
+  { id: "c25", name: "Priya Sharma", memberSince: 2021, opening: "My son bought three looks on my laptop without asking. Refund please, order DH-20777." },
 ];
 
 export const ORDERS: readonly OrderSeed[] = [
-  {
-    id: "CO-48213",
-    customerId: "c01",
-    placedDaysAgo: 9,
-    lines: [line(P.tent)],
-    shipment: {
-      kind: "transit",
-      carrier: "UPS",
-      tracking: "1Z84F0A20391827364",
-      etaInDays: 2,
-      delay: "Weather delay at the Denver, CO hub",
-      events: [
-        shipped(8),
-        { daysAgo: 7, location: "Salt Lake City, UT", description: "Departed facility" },
-        { daysAgo: 4, location: "Denver, CO", description: "Arrived at facility" },
-        { daysAgo: 4, location: "Denver, CO", description: "Weather delay: held at facility" },
-      ],
-    },
-  },
-  {
-    id: "CO-48121",
-    customerId: "c02",
-    placedDaysAgo: 29,
-    lines: [line(P.poles)],
-    shipment: { kind: "delivered", carrier: "USPS", tracking: "9400111899223344556677", deliveredDaysAgo: 25, events: [shipped(28), delivered(25, "Boston, MA")] },
-  },
-  {
-    id: "CO-48177",
-    customerId: "c03",
-    placedDaysAgo: 7,
-    lines: [line(P.headlamp)],
-    shipment: { kind: "delivered", carrier: "USPS", tracking: "9400111899223344558812", deliveredDaysAgo: 2, events: [shipped(6), delivered(2, "Austin, TX", "Delivered, mailbox")] },
-  },
-  {
-    id: "CO-48054",
-    customerId: "c03",
-    placedDaysAgo: 70,
-    lines: [line(P.chair)],
-    shipment: { kind: "delivered", carrier: "UPS", tracking: "1Z84F0A20391811190", deliveredDaysAgo: 65, events: [shipped(69), delivered(65, "Austin, TX")] },
-  },
-  { id: "CO-48231", customerId: "c04", placedDaysAgo: 1, lines: [line(P.boots)], shipment: { kind: "processing", shipsInDays: 1 } },
-  {
-    id: "CO-48224",
-    customerId: "c05",
-    placedDaysAgo: 6,
-    lines: [line(P.jacket)],
-    shipment: {
-      kind: "delivered",
-      carrier: "FedEx",
-      tracking: "773144102287",
-      deliveredDaysAgo: 2,
-      events: [shipped(5), { daysAgo: 4, location: "Memphis, TN", description: "Departed FedEx hub" }, delivered(2, "Columbus, OH")],
-    },
-  },
-  {
-    id: "CO-48090",
-    customerId: "c06",
-    placedDaysAgo: 34,
-    lines: [line(P.daypack), line(P.socks)],
-    shipment: { kind: "delivered", carrier: "UPS", tracking: "1Z84F0A20391820044", deliveredDaysAgo: 30, events: [shipped(33), delivered(30, "Seattle, WA")] },
-  },
-  {
-    id: "CO-48102",
-    customerId: "c06",
-    placedDaysAgo: 28,
-    lines: [line(P.filter)],
-    shipment: { kind: "delivered", carrier: "USPS", tracking: "9400111899223344550031", deliveredDaysAgo: 25, events: [shipped(27), delivered(25, "Seattle, WA", "Delivered, mailbox")] },
-  },
-  {
-    id: "CO-48205",
-    customerId: "c07",
-    placedDaysAgo: 10,
-    lines: [line(P.stove)],
-    shipment: { kind: "delivered", carrier: "UPS", tracking: "1Z84F0A20391823385", deliveredDaysAgo: 6, events: [shipped(9), delivered(6, "San Jose, CA")] },
-  },
-  {
-    id: "CO-48198",
-    customerId: "c08",
-    placedDaysAgo: 8,
-    lines: [line(P.bottle, 3)],
-    shipment: { kind: "delivered", carrier: "USPS", tracking: "9400111899223344557720", deliveredDaysAgo: 3, events: [shipped(7), delivered(3, "Miami, FL", "Delivered, mailbox")] },
-  },
-  { id: "CO-48236", customerId: "c09", placedDaysAgo: 0, lines: [line(P.daypack)], shipment: { kind: "processing", shipsInDays: 1 } },
-  { id: "CO-48229", customerId: "c10", placedDaysAgo: 1, lines: [line(P.shell)], shipment: { kind: "processing", shipsInDays: 1 } },
-  {
-    id: "CO-48201",
-    customerId: "c11",
-    placedDaysAgo: 5,
-    lines: [line(P.bag)],
-    shipment: {
-      kind: "transit",
-      carrier: "UPS",
-      tracking: "1Z84F0A20391826601",
-      etaInDays: 2,
-      events: [shipped(4), { daysAgo: 2, location: "Louisville, KY", description: "Departed UPS hub" }],
-    },
-  },
-  { id: "CO-48234", customerId: "c12", placedDaysAgo: 1, lines: [line(P.baselayer)], shipment: { kind: "processing", shipsInDays: 1 } },
-  {
-    id: "CO-48150",
-    customerId: "c12",
-    placedDaysAgo: 19,
-    lines: [line(P.mug, 2)],
-    shipment: { kind: "delivered", carrier: "USPS", tracking: "9400111899223344551158", deliveredDaysAgo: 15, events: [shipped(18), delivered(15, "Chicago, IL", "Delivered, mailbox")] },
-  },
-  {
-    id: "CO-48188",
-    customerId: "c13",
-    placedDaysAgo: 6,
-    lines: [line(P.poles)],
-    shipment: {
-      kind: "transit",
-      carrier: "FedEx",
-      tracking: "773144109915",
-      etaInDays: 0,
-      events: [
-        shipped(5),
-        { daysAgo: 3, location: "Memphis, TN", description: "Departed FedEx hub" },
-        { daysAgo: 1, location: "Denver, CO", description: "Arrived at FedEx facility" },
-        outForDelivery("Denver, CO"),
-      ],
-    },
-  },
-  {
-    id: "CO-48140",
-    customerId: "c14",
-    placedDaysAgo: 44,
-    lines: [line(P.socks, 2)],
-    shipment: { kind: "delivered", carrier: "USPS", tracking: "9400111899223344553307", deliveredDaysAgo: 40, events: [shipped(43), delivered(40, "Portland, OR", "Delivered, mailbox")] },
-  },
-  {
-    id: "CO-48160",
-    customerId: "c15",
-    placedDaysAgo: 16,
-    lines: [line(P.jacket)],
-    shipment: { kind: "delivered", carrier: "UPS", tracking: "1Z84F0A20391821742", deliveredDaysAgo: 12, events: [shipped(15), delivered(12, "Minneapolis, MN")] },
-  },
-  {
-    id: "CO-48219",
-    customerId: "c16",
-    placedDaysAgo: 3,
-    lines: [line(P.filter)],
-    shipment: {
-      kind: "transit",
-      carrier: "USPS",
-      tracking: "9400111899223344559943",
-      etaInDays: 0,
-      events: [shipped(2), { daysAgo: 1, location: "Phoenix, AZ", description: "Arrived at regional facility" }, outForDelivery("Phoenix, AZ")],
-    },
-  },
-  {
-    id: "CO-48226",
-    customerId: "c17",
-    placedDaysAgo: 3,
-    lines: [line(P.bag)],
-    shipment: {
-      kind: "transit",
-      carrier: "UPS",
-      tracking: "1Z84F0A20391827129",
-      etaInDays: 1,
-      events: [shipped(2), { daysAgo: 1, location: "Sacramento, CA", description: "Arrived at UPS facility" }],
-    },
-  },
-  {
-    id: "CO-48217",
-    customerId: "c18",
-    placedDaysAgo: 5,
-    lines: [line(P.mug)],
-    shipment: { kind: "delivered", carrier: "USPS", tracking: "9400111899223344554480", deliveredDaysAgo: 2, events: [shipped(4), delivered(2, "Atlanta, GA", "Delivered, mailbox")] },
-  },
+  { id: "DH-20652", customerId: "c01", placedMinutesAgo: 41, lines: [line(P.goldenMona)], payment: eCheck(41) },
+  { id: "DH-20388", customerId: "c02", placedMinutesAgo: 96, lines: [line(P.glacier)], payment: paid(96, "Visa ending 4242") },
+  { id: "DH-20417", customerId: "c03", placedMinutesAgo: 88, lines: [line(P.ruby)], payment: paid(88, "Mastercard ending 5100") },
+  { id: "DH-20911", customerId: "c04", placedMinutesAgo: 12, lines: [line(P.aurora)], payment: eCheck(12) },
+  // Aisha paid full price: checkout turned down TRAIL15, pasted with a space.
+  { id: "DH-20540", customerId: "c05", placedMinutesAgo: 63, lines: [line(P.neonMona)], payment: paid(63, "Visa ending 1881") },
+  { id: "DH-20190", customerId: "c06", placedMinutesAgo: 151, lines: [line(P.stealth)], payment: paid(151, "PayPal") },
+  { id: "DH-20604", customerId: "c06", placedMinutesAgo: 49, lines: [line(P.lava)], payment: paid(49, "PayPal"), promoCode: "TRAIL15" },
+  { id: "DH-20302", customerId: "c07", placedMinutesAgo: 118, lines: [line(P.lava)], payment: paid(118, "Visa ending 3007") },
+  // Lucas tapped Add to cart twice: the cart took the same look twice, and checkout charged for both.
+  { id: "DH-20720", customerId: "c08", placedMinutesAgo: 34, lines: [line(P.stealth, 2)], payment: paid(34, "Apple Pay") },
+  { id: "DH-20990", customerId: "c09", placedMinutesAgo: 6, lines: [line(P.sunset)], payment: paid(6, "Visa ending 7731") },
+  { id: "DH-20835", customerId: "c10", placedMinutesAgo: 22, lines: [line(P.goldenMona)], payment: paid(22, "Mastercard ending 2294") },
+  { id: "DH-20471", customerId: "c11", placedMinutesAgo: 74, lines: [line(P.ruby)], payment: paid(74, "PayPal") },
+  { id: "DH-20160", customerId: "c12", placedMinutesAgo: 158, lines: [line(P.glacier)], payment: paid(158, "Visa ending 6604") },
+  { id: "DH-20866", customerId: "c13", placedMinutesAgo: 19, lines: [line(P.goldenMona)], payment: bankTransfer(19) },
+  { id: "DH-20120", customerId: "c14", placedMinutesAgo: 165, lines: [line(P.neonMona)], payment: paid(165, "Visa ending 0459") },
+  { id: "DH-20530", customerId: "c15", placedMinutesAgo: 66, lines: [line(P.glacier)], payment: paid(66, "Google Pay") },
+  { id: "DH-20901", customerId: "c16", placedMinutesAgo: 14, lines: [line(P.aurora)], payment: bankTransfer(14) },
+  { id: "DH-20944", customerId: "c17", placedMinutesAgo: 9, lines: [line(P.stealth)], payment: eCheck(9) },
   // Ben typed TRAIL15 in capitals in the end.
-  { id: "CO-48230", customerId: "c18", placedDaysAgo: 1, lines: [line(P.chair)], shipment: { kind: "processing", shipsInDays: 2 }, promoCode: "TRAIL15" },
-  { id: "CO-48233", customerId: "c19", placedDaysAgo: 1, lines: [line(P.baselayer)], shipment: { kind: "processing", shipsInDays: 1 } },
+  { id: "DH-20802", customerId: "c18", placedMinutesAgo: 27, lines: [line(P.sunset)], payment: paid(27, "Visa ending 8120"), promoCode: "TRAIL15" },
+  { id: "DH-20958", customerId: "c19", placedMinutesAgo: 8, lines: [line(P.goldenMona)], payment: eCheck(8) },
   {
-    id: "CO-48011",
+    id: "DH-20255",
     customerId: "c20",
-    placedDaysAgo: 55,
-    lines: [line(P.shell)],
-    shipment: { kind: "delivered", carrier: "UPS", tracking: "1Z84F0A20391809902", deliveredDaysAgo: 50, events: [shipped(54), delivered(50, "Columbus, OH")] },
+    placedMinutesAgo: 131,
+    lines: [line(P.lava)],
+    payment: { method: "Visa ending 5512", events: [...paid(131, "Visa ending 5512").events, { minutesAgo: 95, description: "Refunded to the original payment method" }] },
+    refundedMinutesAgo: 95,
   },
-  {
-    id: "CO-48166",
-    customerId: "c21",
-    placedDaysAgo: 12,
-    lines: [line(P.stove)],
-    shipment: { kind: "delivered", carrier: "FedEx", tracking: "773144106643", deliveredDaysAgo: 9, events: [shipped(11), delivered(9, "Albuquerque, NM")] },
-  },
-  {
-    id: "CO-48208",
-    customerId: "c22",
-    placedDaysAgo: 9,
-    lines: [line(P.boots)],
-    shipment: { kind: "delivered", carrier: "UPS", tracking: "1Z84F0A20391824476", deliveredDaysAgo: 5, events: [shipped(8), delivered(5, "Dallas, TX")] },
-  },
-  { id: "CO-48237", customerId: "c23", placedDaysAgo: 0, lines: [line(P.boots)], shipment: { kind: "processing", shipsInDays: 1 } },
-  {
-    id: "CO-48195",
-    customerId: "c24",
-    placedDaysAgo: 8,
-    lines: [line(P.poles)],
-    shipment: { kind: "delivered", carrier: "FedEx", tracking: "773144108820", deliveredDaysAgo: 4, events: [shipped(7), delivered(4, "Boise, ID")] },
-  },
-  {
-    id: "CO-48181",
-    customerId: "c25",
-    placedDaysAgo: 24,
-    lines: [line(P.tent)],
-    shipment: { kind: "delivered", carrier: "UPS", tracking: "1Z84F0A20391822258", deliveredDaysAgo: 20, events: [shipped(23), delivered(20, "Salt Lake City, UT")] },
-  },
+  { id: "DH-20333", customerId: "c21", placedMinutesAgo: 104, lines: [line(P.sunset)], payment: paid(104, "Mastercard ending 3390") },
+  { id: "DH-20077", customerId: "c22", placedMinutesAgo: 172, lines: [line(P.neonMona)], payment: paid(172, "PayPal") },
+  { id: "DH-20937", customerId: "c23", placedMinutesAgo: 10, lines: [line(P.neonMona)], payment: eCheck(10), promoCode: "TRAIL15" },
+  { id: "DH-20410", customerId: "c24", placedMinutesAgo: 90, lines: [line(P.aurora)], payment: paid(90, "Visa ending 2716") },
+  { id: "DH-20777", customerId: "c25", placedMinutesAgo: 31, lines: [line(P.goldenMona), line(P.stealth), line(P.aurora)], payment: paid(31, "Visa ending 9043") },
 ];
 
-/** Refunds are possible this many days after delivery. */
-export const REFUND_WINDOW_DAYS = 30;
+/** Looks can be refunded this many days after purchase. */
+export const REFUND_WINDOW_DAYS = 14;
+
+/** How long a refund takes to reach the player. */
+export const REFUND_ARRIVES_IN = "3 to 5 business days";

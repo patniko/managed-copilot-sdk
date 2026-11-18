@@ -19,49 +19,43 @@ export interface Sample {
   readonly prompts: readonly SuggestedPrompt[];
 }
 
-/** The bundled datasets (`datasets/*.csv`), each with a question the app's tools answer and one that needs code. */
+/**
+ * The bundled datasets (`datasets/*.csv`), each with a question the app's tools answer and one that needs code. They're
+ * Contoso Outdoors' own data about Downhill: its open beta before launch, and launch day's support tickets so far.
+ */
 export const SAMPLES: readonly Sample[] = [
   {
-    // The cross-demo story: mobile carts just under free shipping drop out at the shipping step, which leads to a UX
-    // experiment Data Desk sends to Software Factory.
-    id: "sample-checkout-funnel",
-    file: "checkout-funnel.csv",
-    name: "Storefront checkout funnel",
-    description: "Contoso Outdoors, 12 weeks",
+    // Dune Coast's crash rate doubles with build 0.9.4, which changed landings; the other courses hold steady.
+    id: "sample-downhill-runs",
+    file: "downhill-beta-runs.csv",
+    name: "Downhill beta runs",
+    description: "Open beta, 6 weeks, by course",
     prompts: [
-      // "By cart value" makes the first answer find the $40–$49 band; by device alone, the gap looks like payment friction.
-      { text: "Where do mobile shoppers drop out of checkout, by cart value?", needs: "tools" },
-      { text: "Chart shipping-step drop-off by cart value for each device", needs: "code" },
+      { text: "Which course has the highest crash rate?", needs: "tools" },
+      { text: "Chart crash rate by course for each beta week", needs: "code" },
     ],
   },
   {
-    id: "sample-coffee-sales",
-    file: "coffee-sales.csv",
-    name: "Coffee shop sales",
-    description: "Three stores, four products, 2025",
+    // The cross-demo story: on integrated graphics, Auto runs as slowly as High (it only lowers the render scale) and
+    // first-minute quits triple, which leads to an adaptive-quality fix Data Desk sends to Software Factory.
+    id: "sample-downhill-frame-rate",
+    file: "downhill-beta-frame-rate.csv",
+    name: "Downhill beta frame rate",
+    description: "Open beta, by course, GPU, and quality",
     prompts: [
-      { text: "Which store made the most revenue in 2025?", needs: "tools" },
-      { text: "Chart monthly revenue for each store", needs: "code" },
+      { text: "On integrated graphics, how does Auto compare with the other quality settings?", needs: "tools" },
+      { text: "Chart median frame rate by quality for each GPU tier", needs: "code" },
     ],
   },
   {
-    id: "sample-bike-rides",
-    file: "bike-rides.csv",
-    name: "City bike rides",
-    description: "Daily rides and the weather",
+    // Promo-code tickets surge once the launch banner goes live (minute 135), take longest to resolve, and score lowest.
+    id: "sample-downhill-tickets",
+    file: "downhill-support-tickets.csv",
+    name: "Downhill support tickets",
+    description: "Launch day so far, by topic",
     prompts: [
-      { text: "Which weekday has the most rides on average?", needs: "tools" },
-      { text: "Plot rides against temperature with a trend line", needs: "code" },
-    ],
-  },
-  {
-    id: "sample-support-tickets",
-    file: "support-tickets.csv",
-    name: "Support tickets",
-    description: "Resolution times and satisfaction",
-    prompts: [
-      { text: "Which team takes longest to resolve tickets?", needs: "tools" },
-      { text: "Does resolution time affect satisfaction? Show a chart", needs: "code" },
+      { text: "Which topic takes longest to resolve?", needs: "tools" },
+      { text: "Chart tickets every 15 minutes by topic since launch", needs: "code" },
     ],
   },
 ];

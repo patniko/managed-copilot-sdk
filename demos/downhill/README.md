@@ -78,7 +78,7 @@ Downhill opens at <http://localhost:7455>. To demo launch day:
    worker has written the repro, and the fix is a work order in Software Factory. Click **Open in Software Factory**.
 8. **Ship the fix.** In Software Factory, watch the work order build, then click **Deploy** on its gate. Incident
    Commander sends the deploy.
-   - With the shop still open, its footer changes to *Checkout: storefront v2.3.1 · deployed from INC-1004*.
+   - With the shop still open, its footer changes to *Checkout: storefront v2.3.1 · deployed from INC-1001*.
    - **Apply code** now takes 15% off.
 
 A few more things work along the way:
@@ -274,7 +274,7 @@ Data Desk reads it with `DOWNHILL_URL` set to Downhill's address.
 
 `GET /api/incident/service` answers `{ "name": "downhill-shop", "version": "2.3.0", "files": [{ "path", "content" }] }`.
 The files are the storefront code as checkout runs it now (the originals, overlaid with the latest deploy's):
-`package.json`, `README.md`, `src/promotions.js`, `src/cart.js`, `src/order-status.js`, and the tests. Two more files
+`package.json`, `README.md`, `src/promotions.js`, `src/cart.js`, `src/purchase-status.js`, and the tests. Two more files
 come with them:
 
 - **`logs/shop.log`** holds the last two hours of checkout events, newest last, one structured line each, plus release
@@ -337,7 +337,7 @@ x-incident-commander-signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<bo
 
 {
   "type": "incident.deploy_approved",
-  "incident": "INC-1004",
+  "incident": "INC-1001",
   "service": "downhill-shop",
   "version": "2.3.1",
   "previousVersion": "2.3.0",

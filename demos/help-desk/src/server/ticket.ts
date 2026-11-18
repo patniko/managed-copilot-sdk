@@ -418,7 +418,7 @@ export abstract class TicketSession {
   }
 }
 
-/** A store customer of the current simulation, with the store's tools bound to their orders. */
+/** A simulated player of the current simulation, with the support tools bound to their orders. */
 export class CustomerTicket extends TicketSession {
   readonly customer: CustomerSeed;
 

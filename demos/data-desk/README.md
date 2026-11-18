@@ -6,7 +6,7 @@ following it. It is the **promotable** pattern ([promotion](../../docs/concepts/
 [spec section 9](../../docs/spec/developer-experience.md#9-promotable-start-cheap-move-when-needed)) in an app:
 ordinary Node code on the stock `@github/copilot-sdk` and `@managed-copilot/sdk`.
 
-![Data Desk after the move: the placement track shows the session docked at its sandbox with the same ID it started with, a published chart above the data grid, and the conversation with a "Moved into a sandbox" marker](docs/screenshots/workspace.png)
+![Data Desk after the move, on Downhill beta runs: the placement track shows the session docked at its sandbox with the same ID it started with, a published chart of crash rate by course for each beta week above the data grid, and the conversation with a "Moved into a sandbox" marker and Dune Coast doubling from week 4](docs/screenshots/workspace.png)
 
 *After the move. The first question was answered on the shared runtime with Data Desk's tools; the chart request moved
 the session into its sandbox in a few seconds. The session ID on the track never changed, and the premium request count
@@ -36,7 +36,7 @@ carried across the move.*
   **Live**: each pick fetches the sales from the [Downhill](../downhill/README.md) game's server, and the analysis
   starts on that copy, which works like an upload: the tools, the move, charts, and Send to Software Factory.
 
-<img src="docs/screenshots/shared.png" alt="On the shared runtime: the aggregate tool's table of revenue by store fills the grid with bars, and the meter shows one premium request" width="900">
+<img src="docs/screenshots/shared.png" alt="On the shared runtime: the aggregate tool's table of crashes and runs by course fills the grid with bars, Copilot names Dune Coast as the highest crash rate, and the meter shows one premium request" width="900">
 
 *Before the move: Data Desk's `aggregate` tool answered on the shared runtime, and its table fills the grid.*
 
@@ -50,39 +50,43 @@ carried across the move.*
 
 ## Demo it
 
-1. Open Data Desk and pick **Coffee shop sales**.
-2. Click **Which store made the most revenue in 2025?** It's answered on the shared runtime, and the table shows in the
-   grid. The meter shows one premium request, on the shared runtime.
+The bundled samples are Contoso Outdoors' own data about [Downhill](../downhill/README.md), its mountain-biking game:
+six weeks of open beta before today's launch, and launch day's support tickets so far.
+
+1. Open Data Desk and pick **Downhill beta runs**.
+2. Click **Which course has the highest crash rate?** It's answered on the shared runtime, and the table shows in the
+   grid: Dune Coast, by a distance. The meter shows one premium request, on the shared runtime.
 3. Click the terminal icon to open the session in Copilot CLI (on Windows it opens a window; elsewhere copy the
    command).
-4. Click **Chart monthly revenue for each store**, then **Move**. Watch the track: the session slides into its sandbox
-   with the same ID, and Copilot CLI reconnects.
-5. Open the chart. Ask a follow-up, such as "Add a three-month moving average", here or in Copilot CLI: it runs in the
-   sandbox right away.
+4. Click **Chart crash rate by course for each beta week**, then **Move**. Watch the track: the session slides into its
+   sandbox with the same ID, and Copilot CLI reconnects.
+5. Open the chart: Dune Coast's crashes double in week 4, when build 0.9.4 changed landings. Ask a follow-up, such as
+   "Mark where each build shipped", here or in Copilot CLI: it runs in the sandbox right away.
 
-The other samples work the same way: **City bike rides** (ask for rides against temperature with a trend line) and
-**Support tickets** (does resolution time affect satisfaction?). **Upload a CSV** to bring your own, up to 5 MB.
+**Downhill support tickets** works the same way: which topic takes longest to resolve, and a chart of tickets every 15
+minutes, where the launch code's rejections surge once the shop's banner goes live. **Upload a CSV** to bring your own,
+up to 5 MB.
 
-### From an insight to a UX experiment
+### From an insight to a fix
 
-**Storefront checkout funnel** is twelve weeks of Contoso Outdoors checkouts by device and cart value, with how many
-shoppers reached the shipping step, the payment step, and an order. Free shipping starts at $50; below that, the
-shipping step adds a $5.99 fee. The story continues in [Software Factory](../software-factory/README.md), which
-`aspire run` starts too.
+**Downhill beta frame rate** is the open beta's frame rate on each course, by GPU (integrated, mid-range, high-end)
+and graphics quality (Auto, Low, Medium, High, Ultra), with how many players quit in their first minute. Auto is the
+default. The story continues in [Software Factory](../software-factory/README.md), which `aspire run` starts too.
 
-1. Pick **Storefront checkout funnel** and click **Where do mobile shoppers drop out of checkout, by cart value?** Data
-   Desk's tools answer on the shared runtime, and the table shows in the grid.
-2. The insight: mobile shoppers with $40–$49 carts drop out at the shipping step, where the fee appears. Fewer than half
-   of them go on to payment, against about 80% on desktop in the same band and about 85% for mobile carts at $50–$74,
-   which ship free. It holds every week.
+1. Pick **Downhill beta frame rate** and click **On integrated graphics, how does Auto compare with the other quality
+   settings?** Data Desk's tools answer on the shared runtime, and the table shows in the grid.
+2. The insight: on integrated graphics, Auto runs about as slowly as High, under 30 fps, and about a quarter of those
+   players quit in the first minute, three times as many as on Low. Low and Medium hold about 42–54 fps. On mid-range
+   and high-end GPUs, Auto keeps up. It's true to the game's code: Auto starts at High and only lowers the render scale,
+   never the grass, shadows, or painterly filter.
 3. Select the rows that tell it in the grid (click a row's checkbox, shift-click for a range, or use the arrow keys), or
-   keep Copilot's whole table. **Chart shipping-step drop-off by cart value for each device** adds a chart, which goes
-   with the current view.
+   keep Copilot's whole table. **Chart median frame rate by quality for each GPU tier** adds a chart, which goes with the
+   current view.
 4. Click **Send to Software Factory** (the workflow icon in the top bar, or in the bar that counts the selected rows).
    Keep the current view, the selected rows, and Copilot's latest answer; add the whole dataset if you like. Say what to
-   build, for example: *Build a free-shipping progress bar experiment for mobile carts under $50 ("Add $6.50 for free
-   shipping"): variant assignment, the bar's copy and threshold logic, and the metrics to watch: mobile checkout
-   conversion, with average order value as a guardrail.*
+   build, for example: *Make Downhill's Auto graphics quality adaptive: when the frame rate stays under 30 fps for 5
+   seconds, step down a preset (grass, shadow map, painterly radius), and step back up above 50, with hysteresis and
+   tests. The metrics to watch: first-minute quits on integrated graphics, with mid-range frame rate as a guardrail.*
 5. The conversation shows **Sent to Software Factory: WO-0012 · Queued**, and the status follows the work order.
    **Open in Software Factory**: the factory's floor shows the work order came from Data Desk, with a link back to the
    analysis, and its planner reads the insight and the data you sent.
@@ -206,10 +210,10 @@ deployment must declare Data Desk's environments ([`apphost.mts`](apphost.mts) e
 | Path | Contents |
 | --- | --- |
 | `apphost.mts` | AppHost fragment: the promotable environment, its Python sandbox environment, and the app resource |
-| `datasets` | The four sample CSV files |
+| `datasets` | The three sample CSV files: Downhill's open beta and launch-day support tickets |
 | `src/server` | Platform connection, analyses (one session each), the tools and tables, the event projection, live samples from other apps (`remote.ts`), the hand-off to Software Factory (`handoff.ts`, `factory.ts`), REST and server-sent events |
 | `src/shared` | Types, routes, and Software Factory's limits, shared with the UI |
 | `src/web` | The UI (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS) |
 | `src/scripts/happy-path.ts` | The scripted real run |
-| `test` | Unit tests: tables, datasets (the checkout funnel's insight included), Downhill's live sales against a fake `fetch` and a fixture shaped like its export (`test/fixtures/downhill-sales.csv`), the projection, analyses and the move against an in-memory platform, the hand-off against an in-memory Software Factory, the API, and the fragment |
+| `test` | Unit tests: tables, datasets (the findings planted in Downhill's samples included), Downhill's live sales against a fake `fetch` and a fixture shaped like its export (`test/fixtures/downhill-sales.csv`), the projection, analyses and the move against an in-memory platform, the hand-off against an in-memory Software Factory, the API, and the fragment |
 | `Dockerfile` | The container `aspire deploy` publishes |

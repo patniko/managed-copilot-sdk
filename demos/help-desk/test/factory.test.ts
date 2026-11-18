@@ -83,7 +83,7 @@ describe("Software Factory client", () => {
 
   it("reads the storefront as a project: package.json, README.md, src, and test, with POSIX paths and LF line endings", async () => {
     const files = await readProject(STOREFRONT_DIR);
-    expect(files.map((file) => file.path)).toEqual(["package.json", "README.md", "src/cart.js", "src/order-status.js", "src/promotions.js", "test/cart.test.js", "test/order-status.test.js", "test/promotions.test.js"]);
+    expect(files.map((file) => file.path)).toEqual(["package.json", "README.md", "src/cart.js", "src/promotions.js", "src/purchase-status.js", "test/cart.test.js", "test/promotions.test.js", "test/purchase-status.test.js"]);
     for (const file of files) expect(file.content, file.path).not.toContain("\r");
     await expect(readProject(join(STOREFRONT_DIR, "missing"))).rejects.toMatchObject({ code: "project_missing", status: 500 });
   });

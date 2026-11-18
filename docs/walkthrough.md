@@ -131,8 +131,8 @@ pnpm --filter @managed-copilot/demo-repo-doctor happy-path
 
 ### 1.7 Data Desk (promotable: a move into a sandbox)
 
-1. Pick **Coffee shop sales** and ask **Which store made the most revenue in 2025?**
-2. Ask **Chart monthly revenue for each store**, then press **Move**.
+1. Pick **Downhill beta runs** and ask **Which course has the highest crash rate?**
+2. Ask **Chart crash rate by course for each beta week**, then press **Move**.
 
 - [ ] The first answer comes from the app's own tools on the shared runtime.
 - [ ] The track moves the same session ID into a sandbox, and the chart appears; the meter shows premium requests on

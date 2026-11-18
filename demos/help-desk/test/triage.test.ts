@@ -28,7 +28,7 @@ import { sessionIdFor } from "../src/server/ticket.js";
 import { event, FakeFactory, FakePlatform, MONA, settle, testConfig, TRAIL15_ISSUE } from "./fakes.js";
 
 /** A chat completion as the stock runtime sends it for `sendAndWait(prompt, schema)` on an `openai` provider. */
-function completion(overrides: Record<string, unknown> = {}, user = "<current_datetime>2026-11-03T10:00:00Z</current_datetime>\n\nMy tent never arrived and I leave Friday!") {
+function completion(overrides: Record<string, unknown> = {}, user = "<current_datetime>2026-11-03T10:00:00Z</current_datetime>\n\nMy Golden Mona still isn't in my game and I race on Friday!") {
   return {
     model: "ms-decision-1",
     messages: [
@@ -44,7 +44,7 @@ function completion(overrides: Record<string, unknown> = {}, user = "<current_da
         strict: true,
         schema: {
           type: "object",
-          properties: { category: { type: "string", enum: ["delivery", "refund", "cancellation", "order-change", "website-problem", "question"] }, urgent: { type: "boolean" } },
+          properties: { category: { type: "string", enum: ["unlock", "refund", "cancellation", "shop-problem", "game-help", "question"] }, urgent: { type: "boolean" } },
           required: ["category", "urgent"],
           additionalProperties: false,
         },
@@ -56,7 +56,7 @@ function completion(overrides: Record<string, unknown> = {}, user = "<current_da
 
 class FakeDecider implements Decider {
   readonly requests: DecisionRequest[] = [];
-  answers: Record<string, unknown> = { category: { type: "choice", choice: "delivery", confidence: 0.97 }, urgent: { type: "noul", noul: 0.91 } };
+  answers: Record<string, unknown> = { category: { type: "choice", choice: "unlock", confidence: 0.97 }, urgent: { type: "noul", noul: 0.91 } };
   failWith: Error | undefined;
 
   async decide(request: DecisionRequest) {
@@ -69,9 +69,9 @@ class FakeDecider implements Decider {
 describe("the triage endpoint's requests", () => {
   it("ask the schema's properties as decision questions about the last user message", () => {
     const parsed = parseRequest(completion());
-    expect(parsed.state).toBe("My tent never arrived and I leave Friday!");
+    expect(parsed.state).toBe("My Golden Mona still isn't in my game and I race on Friday!");
     expect(parsed.questions["category"]).toMatchObject({ type: "choice", instructions: TRIAGE_QUESTIONS["category"]!.instructions });
-    expect(Object.keys((parsed.questions["category"] as { criteria: object }).criteria)).toEqual(["delivery", "refund", "cancellation", "order-change", "website-problem", "question"]);
+    expect(Object.keys((parsed.questions["category"] as { criteria: object }).criteria)).toEqual(["unlock", "refund", "cancellation", "shop-problem", "game-help", "question"]);
     expect(parsed.questions["urgent"]).toMatchObject({ type: "noul", criteria: { true: expect.any(String), false: expect.any(String) } });
   });
 
@@ -110,15 +110,15 @@ describe("the triage endpoint's answers", () => {
   it("are the schema's values in an assistant message", async () => {
     const decider = new FakeDecider();
     const response = await complete(completion(), decider);
-    expect(decider.requests[0]!.state).toBe("My tent never arrived and I leave Friday!");
+    expect(decider.requests[0]!.state).toBe("My Golden Mona still isn't in my game and I race on Friday!");
     expect(response).toMatchObject({ object: "chat.completion", model: "ms-decision-1", usage: { prompt_tokens: 70, completion_tokens: 2, total_tokens: 72 } });
     const choice = (response["choices"] as { message: { role: string; content: string } }[])[0]!;
     expect(choice.message.role).toBe("assistant");
-    expect(JSON.parse(choice.message.content)).toEqual({ category: "delivery", urgent: true });
+    expect(JSON.parse(choice.message.content)).toEqual({ category: "unlock", urgent: true });
   });
 
   it("turn a noul's probability into a boolean, and refuse answers outside the schema", () => {
-    const properties = { urgent: { kind: "noul" as const }, category: { kind: "choice" as const, values: ["delivery", "refund"] } };
+    const properties = { urgent: { kind: "noul" as const }, category: { kind: "choice" as const, values: ["unlock", "refund"] } };
     expect(readAnswers({ urgent: { noul: 0.2 }, category: { choice: "refund" } }, properties)).toEqual({ urgent: false, category: "refund" });
     expect(() => readAnswers({ urgent: { noul: 0.2 }, category: { choice: "pizza" } }, properties)).toThrow(/unknown value/);
     expect(() => readAnswers({ category: { choice: "refund" } }, properties)).toThrow(/didn't answer "urgent"/);
@@ -257,7 +257,7 @@ class FakeTriagePlatform implements TriagePlatform {
   readonly sessions: FakeClassifierSession[] = [];
   readonly deleted: string[] = [];
   readonly listed: string[] = [];
-  answer: (text: string) => unknown = (text) => ({ category: /refund/i.test(text) ? "refund" : "delivery", urgent: /today|tomorrow/i.test(text) });
+  answer: (text: string) => unknown = (text) => ({ category: /refund/i.test(text) ? "refund" : "unlock", urgent: /today|tomorrow/i.test(text) });
   readonly #status = new Set<(status: PlatformStatus) => void>();
   readonly #connected = new Set<() => void>();
 
@@ -313,7 +313,7 @@ describe("the classifier", () => {
     const config = platform.sessions[0]!.config;
     expect(config.sessionId!.startsWith(LLM_TRIAGE_SESSION_PREFIX)).toBe(true);
     expect(config).toMatchObject({ model: "claude-haiku-4.5", availableTools: [], systemMessage: { mode: "replace", content: LLM_TRIAGE_INSTRUCTIONS } });
-    expect(LLM_TRIAGE_INSTRUCTIONS).toContain("website-problem");
+    expect(LLM_TRIAGE_INSTRUCTIONS).toContain("shop-problem");
   });
 
   it("reuses its sessions, and replaces one after many classifications", async () => {
@@ -472,7 +472,7 @@ describe("a known issue's matching tickets", () => {
     const triagePlatform = new FakeTriagePlatform();
     // The decision model: a ticket is about the issue when its customer mentions the launch code. It's throttled on Lucas's.
     triagePlatform.answer = (text) => {
-      if (/water bottles/.test(text)) throw new Error("429 Too many requests");
+      if (/double-tapped/.test(text)) throw new Error("429 Too many requests");
       return { category: "question", urgent: false, matches: /trail15/i.test(text) };
     };
     const events: ServerEvent[] = [];
@@ -540,11 +540,11 @@ describe("a known issue's matching tickets", () => {
     expect(desk.playerTicket(ticket.ticketId).knownIssue).toMatchObject({ state: "failed" });
 
     // Answering her, the agent asks to refund what the code should have taken off: a person still decides.
-    const refund = aisha.ask({ kind: "custom-tool", toolName: "request_refund", toolCallId: "r1", args: { orderId: "CO-48224", amount: 28.35, reason: "TRAIL15 rejected" } }) as Promise<PermissionRequestResult>;
+    const refund = aisha.ask({ kind: "custom-tool", toolName: "request_refund", toolCallId: "r1", args: { orderId: "DH-20540", amount: 0.75, reason: "TRAIL15 rejected" } }) as Promise<PermissionRequestResult>;
     let decided = false;
     void refund.then(() => (decided = true));
     await settle(20);
-    expect(desk.ticket("c05")).toMatchObject({ status: "approval", approval: { id: "r1", action: "refund", amount: 28.35 } });
+    expect(desk.ticket("c05")).toMatchObject({ status: "approval", approval: { id: "r1", action: "refund", amount: 0.75 } });
     expect(decided).toBe(false);
     desk.answer("c05", "r1", false);
     expect(await refund).toMatchObject({ kind: "reject" });
@@ -569,7 +569,7 @@ describe("a known issue's matching tickets", () => {
 
     // Aisha's agent is waiting on her refund when the update goes out.
     const aisha = session("c05");
-    void aisha.ask({ kind: "custom-tool", toolName: "request_refund", toolCallId: "r1", args: { orderId: "CO-48224", amount: 28.35, reason: "TRAIL15 rejected" } });
+    void aisha.ask({ kind: "custom-tool", toolName: "request_refund", toolCallId: "r1", args: { orderId: "DH-20540", amount: 0.75, reason: "TRAIL15 rejected" } });
     await settle(20);
     expect(desk.ticket("c05").status).toBe("approval");
 

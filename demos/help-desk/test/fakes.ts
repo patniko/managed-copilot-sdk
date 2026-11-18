@@ -198,7 +198,7 @@ export function testConfig(overrides: Partial<HelpDeskConfig> = {}): HelpDeskCon
 }
 
 /**
- * A customer tells their agent about a problem with the store's website, and the agent reports it: the session's own
+ * A customer tells their agent about a problem with the shop, and the agent reports it: the session's own
  * `report_bug` tool runs, and the runtime's events for the call follow. Without `words`, only the report (a player's
  * first message already said it).
  */

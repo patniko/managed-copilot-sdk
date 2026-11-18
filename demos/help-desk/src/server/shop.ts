@@ -1,11 +1,13 @@
-// The demo store's data for one simulation. Every read and change takes the customer it acts for: tools bound to one
-// customer's session can only ever reach that customer's orders.
+// The Downhill Shop's orders for one simulation, as Contoso Outdoors' support desk sees them. Every read and change takes
+// the player it acts for: tools bound to one player's session can only ever reach that player's orders.
 import { AVATAR_COLORS, type CustomerCard } from "../shared/types.js";
-import { CUSTOMERS, ORDERS, PROMOTIONS, REFUND_WINDOW_DAYS, type CustomerSeed, type OrderSeed } from "./seed.js";
+import { CUSTOMERS, ORDERS, PROMOTIONS, REFUND_ARRIVES_IN, REFUND_WINDOW_DAYS, type CustomerSeed, type OrderSeed } from "./seed.js";
 
+const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
 
-type OrderStatus = "processing" | "in_transit" | "delivered" | "cancelled";
+/** Pending: the payment hasn't cleared, so the looks are still locked. Unlocked: paid, and in the game. */
+type OrderStatus = "pending" | "unlocked" | "cancelled";
 
 interface OrderState {
   readonly seed: OrderSeed;
@@ -14,6 +16,8 @@ interface OrderState {
   readonly total: number;
   status: OrderStatus;
   refunded: number;
+  /** When the latest refund went through (minutes before the simulation started, for a seeded one). */
+  refundedAt?: string;
 }
 
 export type ToolResult = Readonly<Record<string, unknown>>;
@@ -23,10 +27,10 @@ export type Check = { readonly ok: true; readonly amount: number } | { readonly 
 
 const cents = (value: number): number => Math.round(value * 100) / 100;
 
-/** `CO-48213`, `co-48213`, `#48213`, and `48213` all name order CO-48213. */
+/** `DH-20652`, `dh-20652`, `#20652`, and `20652` all name order DH-20652. */
 export function normalizeOrderId(value: unknown): string {
   const text = typeof value === "string" || typeof value === "number" ? String(value).trim().toUpperCase().replace(/^#/, "").replace(/\s+/g, "") : "";
-  return /^\d+$/.test(text) ? `CO-${text}` : text;
+  return /^\d+$/.test(text) ? `DH-${text}` : text;
 }
 
 function emailOf(name: string): string {
@@ -37,6 +41,8 @@ function initialsOf(name: string): string {
   const parts = name.split(/\s+/).filter(Boolean);
   return `${parts[0]?.[0] ?? ""}${parts.length > 1 ? (parts.at(-1)?.[0] ?? "") : ""}`.toUpperCase();
 }
+
+const looks = (order: OrderState): string => order.seed.lines.map((line) => (line.quantity > 1 ? `${line.product} ×${line.quantity}` : line.product)).join(", ");
 
 export class Shop {
   #startedAt: Date;
@@ -57,14 +63,17 @@ export class Shop {
       ORDERS.map((seed) => {
         const subtotal = seed.lines.reduce((sum, line) => sum + line.price * line.quantity, 0);
         const discount = cents((subtotal * (seed.promoCode ? (PROMOTIONS[seed.promoCode]?.percent ?? 0) : 0)) / 100);
+        const total = cents(subtotal - discount);
+        const refunded = seed.refundedMinutesAgo !== undefined;
         return [
           seed.id,
           {
             seed,
             discount,
-            total: cents(subtotal - discount),
-            status: seed.shipment.kind === "processing" ? "processing" : seed.shipment.kind === "transit" ? "in_transit" : "delivered",
-            refunded: 0,
+            total,
+            status: seed.payment.clears ? "pending" : "unlocked",
+            refunded: refunded ? total : 0,
+            ...(refunded ? { refundedAt: this.time(seed.refundedMinutesAgo!) } : {}),
           },
         ];
       }),
@@ -78,6 +87,11 @@ export class Shop {
   /** ISO date `days` after the simulation started (negative: before). */
   date(days: number): string {
     return new Date(this.#startedAt.getTime() + days * DAY_MS).toISOString().slice(0, 10);
+  }
+
+  /** The time `minutesAgo` minutes before the simulation started, to the minute: `2026-11-12T17:31Z`. */
+  time(minutesAgo: number): string {
+    return `${new Date(this.#startedAt.getTime() - minutesAgo * MINUTE_MS).toISOString().slice(0, 16)}Z`;
   }
 
   customer(id: string): CustomerSeed | undefined {
@@ -110,114 +124,94 @@ export class Shop {
 
   #missing(orderId: unknown): ToolResult {
     const id = normalizeOrderId(orderId);
-    return { ok: false, error: id ? `No order ${id} on this account.` : "Name an order number, such as CO-48213." };
+    return { ok: false, error: id ? `No order ${id} on this account.` : "Name an order number, such as DH-20652." };
   }
 
   #statusText(order: OrderState): string {
     switch (order.status) {
-      case "processing":
-        return "processing (not shipped yet)";
-      case "in_transit":
-        if (order.seed.shipment.kind === "transit" && order.seed.shipment.delay) return "in transit, delayed";
-        return this.#outForDelivery(order) ? "out for delivery (not delivered yet)" : "in transit";
+      case "pending":
+        return `payment pending (the looks unlock when it clears, usually in ${order.seed.payment.clears})`;
       case "cancelled":
         return "cancelled";
-      case "delivered":
-        if (order.refunded >= order.total) return "delivered, refunded";
-        return order.refunded > 0 ? "delivered, partly refunded" : "delivered";
+      case "unlocked":
+        if (order.refunded >= order.total) return "refunded (the looks are locked again)";
+        return order.refunded > 0 ? "unlocked, partly refunded" : "unlocked";
     }
-  }
-
-  /** The carrier's latest scan, today, says the package is on its way to the door. */
-  #outForDelivery(order: OrderState): boolean {
-    const shipment = order.seed.shipment;
-    const latest = shipment.kind === "transit" ? shipment.events.at(-1) : undefined;
-    return latest?.daysAgo === 0 && /^out for delivery$/i.test(latest.description);
   }
 
   /**
-   * The label the customer's My orders page shows, worked out the way the storefront's code does it
-   * (`storefront/src/order-status.js`, `statusLabel`), bug included: it matches /deliver/i in the latest scan, so a
-   * package that is out for delivery shows as Delivered. The agent compares it with the order's real status.
+   * The label the player's My purchases page shows, worked out the way the storefront's code does it
+   * (`storefront/src/purchase-status.js`, `statusLabel`), bug included: it matches /unlock/i in the payment provider's
+   * latest event, so a bank transfer still "Waiting to unlock" shows as Unlocked. The agent compares it with the order's
+   * real status.
    */
-  #myOrdersLabel(order: OrderState): string {
+  #myPurchasesLabel(order: OrderState): string {
     if (order.status === "cancelled") return "Cancelled";
-    const shipment = order.seed.shipment;
-    if (shipment.kind === "processing") return "Processing";
-    const latest = shipment.events.at(-1)?.description ?? "";
-    if (/deliver/i.test(latest)) return "Delivered";
-    if (/delay|exception|held/i.test(latest)) return "Delayed";
-    return "In transit";
+    if (order.refunded >= order.total) return "Refunded";
+    const latest = order.seed.payment.events.at(-1)?.description ?? "";
+    if (/refund/i.test(latest)) return "Refunded";
+    if (/unlock/i.test(latest)) return "Unlocked";
+    if (/pending|held|review/i.test(latest)) return "Pending";
+    return "Processing";
   }
 
-  #shipping(order: OrderState): ToolResult | undefined {
-    const shipment = order.seed.shipment;
-    if (order.status === "cancelled") return undefined;
-    switch (shipment.kind) {
-      case "processing":
-        return { shipsBy: this.date(shipment.shipsInDays) };
-      case "transit":
-        return { carrier: shipment.carrier, trackingNumber: shipment.tracking, estimatedDelivery: this.date(shipment.etaInDays), ...(shipment.delay ? { delay: shipment.delay } : {}) };
-      case "delivered":
-        return { carrier: shipment.carrier, trackingNumber: shipment.tracking, deliveredOn: this.date(-shipment.deliveredDaysAgo) };
-    }
+  #payment(order: OrderState): ToolResult {
+    const payment = order.seed.payment;
+    if (order.status === "cancelled") return { paymentMethod: payment.method, note: "Cancelled before the payment cleared: nothing was charged." };
+    if (order.status === "pending") return { paymentMethod: payment.method, unlocksWhenPaymentClears: `usually in ${payment.clears}` };
+    return { paymentMethod: payment.method, unlocked: this.time(order.seed.placedMinutesAgo) };
   }
 
   listOrders(customerId: string): ToolResult {
     const orders = [...this.#orders.values()]
       .filter((order) => order.seed.customerId === customerId)
-      .sort((a, b) => a.seed.placedDaysAgo - b.seed.placedDaysAgo)
+      .sort((a, b) => a.seed.placedMinutesAgo - b.seed.placedMinutesAgo)
       .map((order) => ({
         orderId: order.seed.id,
-        placed: this.date(-order.seed.placedDaysAgo),
-        items: order.seed.lines.map((line) => (line.quantity > 1 ? `${line.product} ×${line.quantity}` : line.product)).join(", "),
+        placed: this.time(order.seed.placedMinutesAgo),
+        looks: looks(order),
         total: order.total,
         status: this.#statusText(order),
-        shownOnMyOrdersPage: this.#myOrdersLabel(order),
+        shownOnMyPurchasesPage: this.#myPurchasesLabel(order),
       }));
-    return { today: this.date(0), orders };
+    return { now: this.time(0), orders };
   }
 
   getOrder(customerId: string, orderId: unknown): ToolResult {
     const order = this.#own(customerId, orderId);
     if (!order) return this.#missing(orderId);
-    const shipping = this.#shipping(order);
     return {
       orderId: order.seed.id,
-      placed: this.date(-order.seed.placedDaysAgo),
+      placed: this.time(order.seed.placedMinutesAgo),
       status: this.#statusText(order),
-      shownOnMyOrdersPage: this.#myOrdersLabel(order),
-      items: order.seed.lines.map((line) => ({ product: line.product, quantity: line.quantity, price: line.price })),
+      shownOnMyPurchasesPage: this.#myPurchasesLabel(order),
+      items: order.seed.lines.map((line) => ({ look: line.product, fits: line.fits, quantity: line.quantity, price: line.price })),
       ...(order.discount > 0 ? { promoCode: order.seed.promoCode, discount: order.discount } : {}),
       total: order.total,
-      ...(order.refunded > 0 ? { refunded: order.refunded } : {}),
-      ...(shipping ? { shipping } : {}),
+      ...(order.refunded > 0 ? { refunded: order.refunded, refundedAt: order.refundedAt } : {}),
+      ...this.#payment(order),
     };
   }
 
-  trackShipment(customerId: string, orderId: unknown): ToolResult {
+  /** The payment provider's events for an order, and when its looks unlock: the order's history. */
+  checkUnlock(customerId: string, orderId: unknown): ToolResult {
     const order = this.#own(customerId, orderId);
     if (!order) return this.#missing(orderId);
-    const shipment = order.seed.shipment;
-    const base = { orderId: order.seed.id, status: this.#statusText(order), shownOnMyOrdersPage: this.#myOrdersLabel(order) };
-    if (order.status === "cancelled") return { ...base, note: "Cancelled before it shipped." };
-    if (shipment.kind === "processing") return { ...base, shipsBy: this.date(shipment.shipsInDays), note: "Not shipped yet, so it has no tracking number." };
-    const events = shipment.events.map((event) => ({ date: this.date(-event.daysAgo), location: event.location, description: event.description }));
-    return { ...base, ...this.#shipping(order), events };
+    const events = order.seed.payment.events.map((event) => ({ at: this.time(event.minutesAgo), description: event.description }));
+    return { orderId: order.seed.id, status: this.#statusText(order), shownOnMyPurchasesPage: this.#myPurchasesLabel(order), ...this.#payment(order), events };
   }
 
   checkRefund(customerId: string, orderId: unknown, amount?: unknown): Check {
     const order = this.#own(customerId, orderId);
     if (!order) return { ok: false, error: (this.#missing(orderId) as { error: string }).error };
-    const shipment = order.seed.shipment;
-    if (order.status === "cancelled") return { ok: false, error: "This order was cancelled and refunded already." };
-    if (order.status === "processing") return { ok: false, error: "This order hasn't shipped yet. Cancel it instead." };
-    if (order.status === "in_transit" || shipment.kind !== "delivered") return { ok: false, error: "This order hasn't been delivered yet. It can be refunded once it arrives." };
-    if (shipment.deliveredDaysAgo > REFUND_WINDOW_DAYS) {
-      return { ok: false, error: `Delivered ${shipment.deliveredDaysAgo} days ago, on ${this.date(-shipment.deliveredDaysAgo)}. Refunds are possible within ${REFUND_WINDOW_DAYS} days of delivery.` };
+    if (order.status === "cancelled") return { ok: false, error: "This order was cancelled before its payment cleared, so nothing was charged." };
+    if (order.status === "pending") return { ok: false, error: "This order's payment hasn't cleared yet, so there's nothing to refund. Cancel it instead." };
+    const minutes = order.seed.placedMinutesAgo;
+    if (minutes > REFUND_WINDOW_DAYS * 24 * 60) {
+      return { ok: false, error: `Bought on ${this.time(minutes).slice(0, 10)}. Looks can be refunded within ${REFUND_WINDOW_DAYS} days of purchase.` };
     }
     const remaining = cents(order.total - order.refunded);
-    if (remaining <= 0) return { ok: false, error: "This order was refunded in full already." };
+    if (remaining <= 0) return { ok: false, error: `This order was refunded in full already, at ${order.refundedAt}. Refunds reach the original payment method in ${REFUND_ARRIVES_IN}.` };
     if (amount === undefined || amount === null) return { ok: true, amount: remaining };
     const requested = typeof amount === "number" ? cents(amount) : Number.NaN;
     if (!Number.isFinite(requested) || requested <= 0) return { ok: false, error: "The refund amount must be a positive number of dollars." };
@@ -225,7 +219,7 @@ export class Shop {
     return { ok: true, amount: requested };
   }
 
-  /** Refunds a delivered order (in part when `amount` is given). `effectId` makes a repeated call change nothing again. */
+  /** Refunds a paid order (in part when `amount` is given). `effectId` makes a repeated call change nothing again. */
   refund(customerId: string, orderId: unknown, amount: unknown, effectId: string): ToolResult {
     const done = this.#applied.get(effectId);
     if (done) return done;
@@ -233,7 +227,8 @@ export class Shop {
     if (!check.ok) return { ok: false, error: check.error };
     const order = this.#own(customerId, orderId)!;
     order.refunded = cents(order.refunded + check.amount);
-    const result = { ok: true, orderId: order.seed.id, refunded: check.amount, to: "the original payment method", arrivesIn: "3 to 5 business days" };
+    order.refundedAt = this.time(0);
+    const result = { ok: true, orderId: order.seed.id, refunded: check.amount, to: "the original payment method", arrivesIn: REFUND_ARRIVES_IN };
     this.#applied.set(effectId, result);
     return result;
   }
@@ -241,16 +236,12 @@ export class Shop {
   checkCancel(customerId: string, orderId: unknown): Check {
     const order = this.#own(customerId, orderId);
     if (!order) return { ok: false, error: (this.#missing(orderId) as { error: string }).error };
-    const shipment = order.seed.shipment;
     if (order.status === "cancelled") return { ok: false, error: "This order is cancelled already." };
-    if (order.status === "in_transit" && shipment.kind === "transit") {
-      return { ok: false, error: `Already shipped with ${shipment.carrier}, so it can't be cancelled. It can be refunded within ${REFUND_WINDOW_DAYS} days of delivery.` };
-    }
-    if (order.status === "delivered") return { ok: false, error: "Already delivered. Ask for a refund instead." };
-    return { ok: true, amount: cents(order.total - order.refunded) };
+    if (order.status === "unlocked") return { ok: false, error: `Already paid and unlocked, so it can't be cancelled. It can be refunded within ${REFUND_WINDOW_DAYS} days of purchase.` };
+    return { ok: true, amount: order.total };
   }
 
-  /** Cancels an order that hasn't shipped and refunds it. `effectId` makes a repeated call change nothing again. */
+  /** Cancels an order whose payment hasn't cleared: nothing is charged. `effectId` makes a repeated call change nothing again. */
   cancel(customerId: string, orderId: unknown, effectId: string): ToolResult {
     const done = this.#applied.get(effectId);
     if (done) return done;
@@ -258,19 +249,18 @@ export class Shop {
     if (!check.ok) return { ok: false, error: check.error };
     const order = this.#own(customerId, orderId)!;
     order.status = "cancelled";
-    order.refunded = order.total;
-    const result = { ok: true, orderId: order.seed.id, status: "cancelled", refunded: check.amount, to: "the original payment method" };
+    const result = { ok: true, orderId: order.seed.id, status: "cancelled", refunded: check.amount, note: "The pending payment is voided: nothing is charged." };
     this.#applied.set(effectId, result);
     return result;
   }
 
   /**
-   * A problem with the store's website that the customer reports, for the store's engineering team. The order it names,
-   * if any, must be the customer's own: another customer's order is answered exactly like one that doesn't exist.
+   * A problem with the Downhill Shop the customer reports, for the engineering team. The order it names, if any, must be
+   * the customer's own: another customer's order is answered exactly like one that doesn't exist.
    */
   reportBug(customerId: string, report: { readonly area: string; readonly orderId?: string | undefined }): ToolResult {
     const order = report.orderId === undefined ? undefined : this.#own(customerId, report.orderId);
     if (report.orderId !== undefined && !order) return this.#missing(report.orderId);
-    return { ok: true, area: report.area, ...(order ? { orderId: order.seed.id } : {}), sentTo: "the store's engineering team" };
+    return { ok: true, area: report.area, ...(order ? { orderId: order.seed.id } : {}), sentTo: "the engineering team" };
   }
 }

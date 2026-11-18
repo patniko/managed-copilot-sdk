@@ -14,8 +14,8 @@ const AVATARS = 5;
 const reporter = (report: IssueReport): string => (report.product ? playerLabel(report.name) : report.name);
 
 /**
- * The software issues: problems customers hit on the store's website and players hit in the Downhill Shop (the same
- * checkout code), grouped by what they're about.
+ * The software issues: problems simulated and live players hit in the Downhill Shop's checkout code, grouped by what
+ * they're about.
  */
 export function Issues() {
   const issues = useStore((state) => state.issues);
@@ -26,7 +26,7 @@ export function Issues() {
         <BugIcon size={16} className="shrink-0 text-fg-done" />
         <h2 className="Box-title">Software issues</h2>
         <span className="Counter">{issues.length}</span>
-        <span className="ml-auto min-w-0 truncate text-xs text-fg-muted max-md:hidden">Problems customers and players hit with the store's checkout code, reported by their agents</span>
+        <span className="ml-auto min-w-0 truncate text-xs text-fg-muted max-md:hidden">Problems players hit with the Downhill Shop's checkout code, reported by their agents</span>
       </div>
       <ul>
         {issues.map((issue) => (

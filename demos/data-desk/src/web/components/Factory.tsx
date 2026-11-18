@@ -25,7 +25,7 @@ import { Tooltip } from "./ui/Tooltip.js";
 const FIRST_PAGE = 200;
 
 const PLACEHOLDER =
-  "Build a free-shipping progress bar experiment for mobile carts under $50: variant assignment, the bar's copy and threshold logic, and the metrics to watch";
+  "Make Downhill's Auto graphics quality adaptive: step down a preset when the frame rate stays under 30 fps, step back up above 50, with tests and the metrics to watch";
 
 /** Send to Software Factory: opens the dialog, or says why it can't when Software Factory isn't connected. */
 export function FactoryButton({ onOpen, className, labelClassName = "max-xl:sr-only" }: { readonly onOpen: () => void; readonly className?: string; readonly labelClassName?: string }) {

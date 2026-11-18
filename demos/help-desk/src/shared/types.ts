@@ -22,7 +22,7 @@ export interface PlatformStatus {
 export interface DeskInfo {
   readonly environment: string;
   readonly model?: string;
-  /** A store customer's tools. */
+  /** A simulated player's tools. */
   readonly tools: readonly ToolInfo[];
   /** A Downhill player's tools. */
   readonly playerTools: readonly ToolInfo[];
@@ -48,16 +48,16 @@ export interface TriageInfo {
 }
 
 /** What a customer's message is about, as the decision model classifies it. */
-export const TICKET_CATEGORIES = ["delivery", "refund", "cancellation", "order-change", "website-problem", "question"] as const;
+export const TICKET_CATEGORIES = ["unlock", "refund", "cancellation", "shop-problem", "game-help", "question"] as const;
 export type TicketCategory = (typeof TICKET_CATEGORIES)[number];
 
 export const TICKET_CATEGORY_INFO: Readonly<Record<TicketCategory, { readonly label: string; readonly description: string }>> = {
-  delivery: { label: "Delivery", description: "Where an order is: tracking, delivery dates, or a parcel shown as delivered that didn't arrive" },
-  refund: { label: "Refunds", description: "Money back for a broken, faulty, or unwanted item" },
-  cancellation: { label: "Cancellations", description: "Cancelling an order" },
-  "order-change": { label: "Order changes", description: "Changing an order before it ships: the address, the items, or the quantities" },
-  "website-problem": { label: "Website problems", description: "The store's website misbehaves: promo codes, the cart, or order pages showing the wrong thing" },
-  question: { label: "Questions", description: "Store policies, order history, or anything else" },
+  unlock: { label: "Unlocks", description: "Where a purchase is: a payment still pending, or a look that isn't in the game yet" },
+  refund: { label: "Refunds", description: "Money back for a look bought by mistake, unwanted, or bought by someone else" },
+  cancellation: { label: "Cancellations", description: "Cancelling an order whose payment hasn't cleared" },
+  "shop-problem": { label: "Shop problems", description: "The Downhill Shop misbehaves: promo codes, the cart, or My purchases showing the wrong thing" },
+  "game-help": { label: "Game help", description: "Playing Downhill: performance, controllers, sound, or settings" },
+  question: { label: "Questions", description: "Shop policies, order history, accounts, or anything else" },
 };
 
 /**
@@ -71,7 +71,7 @@ export type TicketTriage =
   | { readonly state: "done"; readonly category: TicketCategory; readonly urgent: boolean }
   | { readonly state: "failed"; readonly message: string };
 
-/** Software Factory, which fixes the store's website when the operator sends it a software issue. */
+/** Software Factory, which fixes the Downhill Shop's checkout code when the operator sends it a software issue. */
 export interface FactoryInfo {
   /** `SOFTWARE_FACTORY_URL` is set, so issues can be sent. */
   readonly configured: boolean;
@@ -85,33 +85,30 @@ export interface ToolInfo {
   readonly approval: boolean;
 }
 
-export const TOOL_NAMES = ["list_my_orders", "get_order", "track_shipment", "request_refund", "cancel_order", "report_bug", "report_known_issue", "resolve_conversation"] as const;
+export const TOOL_NAMES = ["list_my_orders", "get_order", "check_unlock", "request_refund", "cancel_order", "report_bug", "report_known_issue", "resolve_conversation"] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
-/** A Downhill player's tools: their checkout, a refund of their Downhill Shop order, and the store's bug report. */
+/** A live Downhill player's tools: their checkout, a refund of their Downhill Shop order, and the bug report. */
 export const PLAYER_TOOL_NAMES = ["get_checkout", "request_refund", "report_bug", "resolve_conversation"] as const;
 export type PlayerToolName = (typeof PLAYER_TOOL_NAMES)[number];
 
-/**
- * The parts of the store's website an agent reports problems with (`report_bug`). The Downhill Shop runs on the same
- * checkout code, so a player's agent reports with the same areas.
- */
-export const BUG_AREAS = ["promo-codes", "cart", "order-status", "other"] as const;
+/** The parts of the Downhill Shop an agent reports problems with (`report_bug`), for simulated and live players alike. */
+export const BUG_AREAS = ["promo-codes", "cart", "purchase-status", "other"] as const;
 export type BugArea = (typeof BUG_AREAS)[number];
 
 /** Each area's short label, and the title of the software issue its reports make up. */
 export const BUG_AREA_INFO: Readonly<Record<BugArea, { readonly label: string; readonly issue: string }>> = {
   "promo-codes": { label: "Promo codes", issue: "Promo codes rejected at checkout" },
-  cart: { label: "Cart", issue: "Wrong quantities in the cart" },
-  "order-status": { label: "Order status", issue: "Wrong order status on My orders" },
-  other: { label: "Other", issue: "Other problems with the website" },
+  cart: { label: "Cart", issue: "The same look charged twice" },
+  "purchase-status": { label: "Purchase status", issue: "Purchases shown as unlocked too early" },
+  other: { label: "Other", issue: "Other problems with the shop" },
 };
 
 /** Primer display colors for customer avatars. */
 export const AVATAR_COLORS = ["blue", "green", "orange", "purple", "pink", "teal", "indigo", "yellow", "red"] as const;
 export type AvatarColor = (typeof AVATAR_COLORS)[number];
 
-/** A customer of the demo store, shown on the wall before and during a simulation. */
+/** A simulated Downhill player with a Contoso Outdoors account, shown on the wall before and during a simulation. */
 export interface CustomerCard {
   readonly id: string;
   readonly name: string;
@@ -140,7 +137,7 @@ export type TicketStatus = "opened" | "starting" | "answering" | "approval" | "w
  * - `running`: called, no result yet.
  * - `asking`: waits for the operator's approval.
  * - `done`: the tool did what was asked.
- * - `refused`: the tool said no (not this customer's order, or against store policy).
+ * - `refused`: the tool said no (not this customer's order, or against shop policy).
  * - `declined`: the operator declined it.
  * - `failed`: it errored.
  */
@@ -150,7 +147,7 @@ export interface MessageItem {
   readonly kind: "message";
   readonly id: string;
   /**
-   * `customer`: the person asking for help, a store customer or a Downhill player. `team`: a support team member's note
+   * `customer`: the person asking for help, a simulated or a live Downhill player. `team`: a support team member's note
    * to the agent (or Help Desk's, sending a known issue's update), which the customer never sees.
    */
   readonly from: "customer" | "agent" | "team";
@@ -303,8 +300,8 @@ export interface KnowledgeEntry {
 }
 
 /**
- * A problem with the store's website (or the Downhill Shop's checkout, which runs on its code) that a customer or player
- * ran into, as their agent reported it with `report_bug`.
+ * A problem with the Downhill Shop that a simulated or live player ran into, as their agent reported it with
+ * `report_bug`.
  */
 export interface BugReport {
   readonly area: BugArea;
@@ -330,7 +327,7 @@ export interface Ticket {
   readonly memory?: MemoryProposal;
   /** Calls that named another customer's order. */
   readonly blocked: number;
-  /** The problem with the store's website the agent reported (its latest report). */
+  /** The problem with the shop the agent reported (its latest report). */
   readonly bug?: BugReport;
   readonly premiumRequests?: number;
   readonly problem?: string;
@@ -340,7 +337,7 @@ export interface Ticket {
   readonly knownIssue?: TicketKnownIssue;
 }
 
-/** One report in a software issue: a store customer's (`customerId`), or a Downhill player's (`ticketId`). */
+/** One report in a software issue: a simulated player's (`customerId`), or a live Downhill player's (`ticketId`). */
 export interface IssueReport {
   /** The simulation's customer who reported it. */
   readonly customerId?: string;
@@ -373,7 +370,7 @@ export interface RoutedWorkOrder {
 }
 
 /**
- * The reports about one area of the store's checkout code: the current simulation's customers and Downhill players. One
+ * The reports about one area of the shop's checkout code: the current simulation's players and live players. One
  * issue to send to Software Factory.
  */
 export interface SoftwareIssue {
@@ -388,7 +385,7 @@ export interface SoftwareIssue {
 
 /**
  * Downhill: Contoso Outdoors' free mountain-biking browser game. Its in-game shop, the Downhill Shop, sells rider outfits
- * and bike paint, and its checkout runs on the store's own checkout code.
+ * and bike paint, and its checkout runs on Contoso Outdoors' storefront code (this demo's `storefront` folder).
  */
 export type Product = "downhill";
 export const PRODUCT_NAME = "Downhill";

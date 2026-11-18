@@ -8,7 +8,7 @@ import { ServiceCatalog } from "../src/server/services.js";
 import { testConfig } from "./fakes.js";
 
 const demoDir = testConfig().demoServicesDir;
-const source = (path: string) => readFileSync(join(demoDir, "checkout", path), "utf8");
+const source = (path: string) => readFileSync(join(demoDir, "downhill-orders", path), "utf8");
 const SOURCES = { discounts: source("src/discounts.js"), cart: source("src/cart.js"), server: source("src/server.js") };
 const SEED = { seed: 42, at: "2026-11-04T07:00:00.000Z" };
 
@@ -29,21 +29,21 @@ describe("the demo service's production", () => {
     expect(stats.errorRate).toBeGreaterThan(2);
     const failures = checkouts.filter((line) => line.includes("status=500"));
     expect(failures.length).toBe(stats.failedSinceDeploy);
-    expect(failures.every((line) => at(line) >= Date.parse(stats.deployAt) && /coupon=(SUMMER24|SPRING25)/.test(line))).toBe(true);
-    expect(log).toContain('msg="starting checkout-service" version=1.4.2');
+    expect(failures.every((line) => at(line) >= Date.parse(stats.deployAt) && /coupon=(EARLYRIDER|BETA25)/.test(line))).toBe(true);
+    expect(log).toContain('msg="starting downhill-orders" version=1.4.2');
   });
 
   it("points its stack traces at the real code", () => {
     const { log } = demoProduction(SOURCES, SEED);
     const line = SOURCES.discounts.replace(/\r\n/g, "\n").split("\n").findIndex((text) => text.includes("coupon.percent")) + 1;
-    expect(log).toContain(`at applyDiscount (file:///srv/checkout/src/discounts.js:${line}:`);
-    expect(log).toMatch(/at priceCart \(file:\/\/\/srv\/checkout\/src\/cart\.js:\d+:\d+\)/);
+    expect(log).toContain(`at applyDiscount (file:///srv/downhill-orders/src/discounts.js:${line}:`);
+    expect(log).toMatch(/at priceCart \(file:\/\/\/srv\/downhill-orders\/src\/cart\.js:\d+:\d+\)/);
   });
 
   it("sends an Alertmanager notification whose numbers come from those logs", () => {
     const { stats } = demoProduction(SOURCES, SEED);
     const [incoming] = parseAlertPayload(sampleNotification(stats, SEED, "f1"));
-    expect(incoming?.alert).toMatchObject({ source: "alertmanager", name: "CheckoutHighErrorRate", service: "checkout", severity: "SEV2", fingerprint: "f1" });
+    expect(incoming?.alert).toMatchObject({ source: "alertmanager", name: "CheckoutHighErrorRate", service: "downhill-orders", severity: "SEV2", fingerprint: "f1" });
     expect(incoming?.alert.summary).toContain(`${stats.errorRate}%`);
     expect(incoming?.alert.description).toBe(`${stats.failedLast5m} of ${stats.checkoutsLast5m} checkouts failed in the last 5 minutes.`);
   });
@@ -62,14 +62,14 @@ describe("the demo service's production", () => {
 describe("the service catalog", () => {
   it("gives the coordinator the demo service with its generated logs and deploy history", async () => {
     const catalog = new ServiceCatalog(demoDir);
-    expect(await catalog.find("checkout")).toEqual({ name: "checkout", demo: true, version: "1.4.2" });
-    const { files, stats } = await catalog.workspace("checkout", SEED);
+    expect(await catalog.find("downhill-orders")).toEqual({ name: "downhill-orders", demo: true, version: "1.4.2" });
+    const { files, stats } = await catalog.workspace("downhill-orders", SEED);
     expect([...files.keys()].sort()).toEqual(
-      expect.arrayContaining(["README.md", "deploys/HISTORY.md", "deploys/v1.4.2.diff", "logs/checkout.log", "package.json", "src/discounts.js", "test/cart.test.js"]),
+      expect.arrayContaining(["README.md", "deploys/HISTORY.md", "deploys/v1.4.2.diff", "logs/orders.log", "package.json", "src/discounts.js", "test/cart.test.js"]),
     );
     expect(stats?.failedSinceDeploy).toBeGreaterThan(0);
     expect([...files.values()].every((text) => !text.includes("\r\n"))).toBe(true);
-    expect((await catalog.originals("checkout")).has("logs/checkout.log")).toBe(false);
+    expect((await catalog.originals("downhill-orders")).has("logs/orders.log")).toBe(false);
   });
 
   it("prefers your own service folders, skips what isn't source, and knows nothing else", async () => {

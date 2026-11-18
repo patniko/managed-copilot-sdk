@@ -1,8 +1,8 @@
 {
-  "name": "checkout-service",
+  "name": "downhill-orders",
   "version": "1.4.2",
   "private": true,
-  "description": "Prices carts and takes orders for the storefront.",
+  "description": "Takes the Downhill Shop's orders: prices the cart, applies the promotion code, and hands the order to payment.",
   "type": "module",
   "scripts": {
     "start": "node src/server.js",

@@ -80,7 +80,7 @@ function SimulateButton({ onError }: { readonly onError: (message: string | unde
     }
   };
   return (
-    <Tooltip content={`Demo: sends a sample Alertmanager alert for the bundled checkout service${route === "factory" ? "; Software Factory builds the fix" : ""}`}>
+    <Tooltip content={`Demo: sends a sample Alertmanager alert for Downhill's order service, bundled as downhill-orders${route === "factory" ? "; Software Factory builds the fix" : ""}`}>
       <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void simulate()}>
         {busy ? <Spinner size={16} /> : <ZapIcon size={16} />}
         Simulate an incident

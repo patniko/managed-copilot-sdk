@@ -60,7 +60,7 @@ const firstName = (customer: CustomerCard) => customer.name.split(" ")[0] ?? cus
 /** The size the wall gives a support widget. */
 export const WIDGET = "h-[min(640px,calc(100dvh-150px))] min-h-[420px] shadow-lg";
 
-/** The store's support widget, as the customer sees it. */
+/** Contoso Outdoors' support widget, as the customer sees it. */
 function Widget({ customer, ticket }: { readonly customer: CustomerCard; readonly ticket: Ticket }) {
   const connected = useStore((state) => state.platform?.state === "connected");
   const ready = connected && ticket.sessionId !== undefined && ticket.status !== "failed";

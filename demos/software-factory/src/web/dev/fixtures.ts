@@ -1400,14 +1400,14 @@ function agentLedFixture(fixtures: Fixtures, now: number): void {
 function routed(now: number, fixtures: Fixtures): void {
   const promotions = `// Promotion codes from the newsletter and the site's banners.\nexport const PROMOTIONS = { TRAIL15: { percent: 15 }, WELCOME10: { percent: 10 } };\n\nexport function applyPromoCode(code, subtotalCents) {\n  const promotion = PROMOTIONS[code];\n  if (!promotion) return { ok: false, error: "That code isn't valid." };\n  return { ok: true, totalCents: subtotalCents - Math.round((subtotalCents * promotion.percent) / 100) };\n}\n`;
   const fixed = promotions.replace("const promotion = PROMOTIONS[code];", "const promotion = PROMOTIONS[String(code).trim().toUpperCase()];");
-  const regression = `import assert from "node:assert/strict";\nimport { test } from "node:test";\nimport { applyPromoCode } from "../src/promotions.js";\n\ntest("accepts a code pasted with a trailing space", () => {\n  assert.equal(applyPromoCode("TRAIL15 ", 10_000).ok, true);\n});\n\ntest("accepts a lowercase code", () => {\n  assert.equal(applyPromoCode("trail15", 10_000).totalCents, 8_500);\n});\n`;
-  const bugReport = `# Promo codes rejected at checkout\n\nTwo Contoso Outdoors customers reported it in one support rush.\n\n## Reports\n\n- **Aisha Khan** (CO-48224): "The code TRAIL15 from your newsletter says 'invalid code' when I paste it at checkout, so I paid full price for my jacket."\n- **Ben Carter**: "Your promo code TRAIL15 doesn't work if I type it in lowercase."\n\n## Expected\n\nCodes work however they're typed or pasted: case and surrounding spaces don't matter.\n`;
+  const regression = `import assert from "node:assert/strict";\nimport { test } from "node:test";\nimport { applyPromoCode } from "../src/promotions.js";\n\ntest("accepts a code pasted with a trailing space", () => {\n  assert.equal(applyPromoCode("TRAIL15 ", 499).ok, true);\n});\n\ntest("accepts a lowercase code", () => {\n  assert.equal(applyPromoCode("trail15", 499).totalCents, 424);\n});\n`;
+  const bugReport = `# Promo codes rejected at checkout\n\nTwo Downhill players reported it in the launch-day support rush.\n\n## Reports\n\n- **Aisha Khan** (DH-20540): "The code TRAIL15 from your newsletter says 'Invalid code.' when I paste it at checkout, so I paid full price for Neon Mona."\n- **Ben Carter**: "Your promo code TRAIL15 doesn't work if I type it in lowercase."\n\n## Expected\n\nCodes work however they're typed or pasted: case and surrounding spaces don't matter.\n`;
   const project = [
     { path: "package.json", content: `{\n  "name": "contoso-storefront",\n  "version": "2.3.0",\n  "private": true,\n  "type": "module",\n  "scripts": { "test": "node --test" }\n}\n` },
-    { path: "README.md", content: "# Contoso Outdoors storefront\n\nThe code behind the store's website: promotions, the cart, and order status.\n" },
+    { path: "README.md", content: "# contoso-storefront\n\nThe Downhill Shop's checkout code: promotion codes, the cart, and purchase status.\n" },
     { path: "src/promotions.js", content: promotions },
-    { path: "src/cart.js", content: "// Cart lines and quantities.\nexport function updateQuantity(cart, sku, quantity) {\n  const line = cart.lines.find((item) => item.sku === sku);\n  if (line) line.quantity += quantity;\n  return cart;\n}\n" },
-    { path: "test/promotions.test.js", content: `import assert from "node:assert/strict";\nimport { test } from "node:test";\nimport { applyPromoCode } from "../src/promotions.js";\n\ntest("applies TRAIL15", () => {\n  assert.equal(applyPromoCode("TRAIL15", 10_000).totalCents, 8_500);\n});\n` },
+    { path: "src/cart.js", content: "// The cart: one line per look.\nexport function addItem(cart, product) {\n  const line = cart.lines.find((item) => item.sku === product.sku);\n  if (line) line.quantity += 1;\n  else cart.lines.push({ ...product, quantity: 1 });\n  return cart;\n}\n" },
+    { path: "test/promotions.test.js", content: `import assert from "node:assert/strict";\nimport { test } from "node:test";\nimport { applyPromoCode } from "../src/promotions.js";\n\ntest("applies TRAIL15", () => {\n  assert.equal(applyPromoCode("TRAIL15", 499).totalCents, 424);\n});\n` },
   ];
   const base = now - 18 * MINUTE;
   const id = "wo_promo";
@@ -1424,7 +1424,7 @@ function routed(now: number, fixtures: Fixtures): void {
     completedAt: at(base, 8 * MINUTE),
     taskCount: 1,
     tests: releaseTests,
-    brief: "Contoso Outdoors support received **2 reports** that promotion codes are rejected at checkout: pasted with a trailing space, or typed in lowercase.\n\nFix it in the attached storefront codebase, add regression tests that reproduce the reports, and keep the existing tests passing. The customers' words are in `.factory/context/BUG_REPORT.md`.",
+    brief: "Downhill support received **2 reports** that promotion codes are rejected at checkout: pasted with a trailing space, or typed in lowercase.\n\nFix it in the attached storefront codebase, add regression tests that reproduce the reports, and keep the existing tests passing. The customers' words are in `.factory/context/BUG_REPORT.md`.",
     source: { kind: "brief" },
     origin: { app: "help-desk", name: "Help Desk", label: "Promo codes · 2 tickets", url: "http://localhost:7440/#/", key: "fixture:promo-codes" },
     inputs: {
@@ -1436,7 +1436,7 @@ function routed(now: number, fixtures: Fixtures): void {
     plan: {
       summary: "One focused fix: normalize codes before looking them up.",
       projectName: "contoso-storefront",
-      packageDescription: "The Contoso Outdoors storefront",
+      packageDescription: "The Downhill Shop's checkout code",
       bin: {},
       integration: "Run the whole suite; the existing promotion tests must still pass.",
       tasks: [
@@ -1496,30 +1496,30 @@ function routed(now: number, fixtures: Fixtures): void {
   fixtures.workOrders.push({
     id: "wo_incident",
     number: 13,
-    title: "Fix checkout: expired coupon codes crash pricing",
+    title: "Fix downhill-orders: expired codes crash pricing",
     mode: "classic",
     status: "building",
     createdAt: at(incidentBase, 0),
     updatedAt: at(now, -5 * SECOND),
     startedAt: at(incidentBase, 1 * SECOND),
     taskCount: 1,
-    brief: "Production incident INC-1004: `POST /checkout` returns 500 for carts with an expired coupon since v1.4.2. Make the smallest fix in the attached checkout service, with a regression test.",
+    brief: "Production incident INC-1004: since v1.4.2, `POST /checkout` returns 500 for carts with an expired code (`EARLYRIDER`, `BETA25`). Make the smallest fix in the attached order service, with a regression test.",
     source: { kind: "brief" },
-    origin: { app: "incident-commander", name: "Incident Commander", label: "INC-1004 · checkout", url: "http://localhost:7445/#/incidents/INC-1004", key: "INC-1004" },
-    inputs: { context: [{ path: "INCIDENT.md", size: 2_480, description: "The alert, root cause, evidence, and the bad deploy's diff" }], project: { name: "checkout", files: 7, bytes: 6_140 } },
+    origin: { app: "incident-commander", name: "Incident Commander", label: "INC-1004 · downhill-orders", url: "http://localhost:7445/#/incidents/INC-1004", key: "INC-1004" },
+    inputs: { context: [{ path: "INCIDENT.md", size: 2_480, description: "The alert, root cause, evidence, and the bad deploy's diff" }], project: { name: "downhill-orders", files: 7, bytes: 5_820 } },
     maxReviewRounds: 2,
     plan: {
-      summary: "One task: treat an expired coupon as no discount.",
-      projectName: "checkout-service",
-      packageDescription: "Prices carts and takes orders",
+      summary: "One task: treat an expired code as no discount.",
+      projectName: "downhill-orders",
+      packageDescription: "Takes the Downhill Shop's orders",
       bin: {},
       integration: "Run the whole suite.",
-      tasks: [{ id: "expired-coupons", title: "Expired coupons price at full price", description: "applyDiscount returns the subtotal for an expired coupon.", files: ["src/discounts.js", "test/expired-coupons.test.js"], acceptance: ["No 500 for SUMMER24"], dependsOn: [] }],
+      tasks: [{ id: "expired-codes", title: "Expired codes price at full price", description: "applyDiscount returns the subtotal for an expired code.", files: ["src/discounts.js", "test/expired-codes.test.js"], acceptance: ["No 500 for EARLYRIDER or BETA25"], dependsOn: [] }],
     },
     stations: [
       station({ id: "plan", kind: "plan", title: "Plan", status: "done", role: "planner", startedAt: at(incidentBase, 3 * SECOND), finishedAt: at(incidentBase, 28 * SECOND), detail: "1 task planned" }, 61),
-      station({ id: "build:expired-coupons", kind: "build", title: "Build · Expired coupons price at full price", taskId: "expired-coupons", status: "working", role: "builder", startedAt: at(incidentBase, 35 * SECOND), detail: "Running tests" }, 62),
-      station({ id: "review:expired-coupons", kind: "review", title: "Review · Expired coupons price at full price", taskId: "expired-coupons", status: "waiting", role: "reviewer" }, 63),
+      station({ id: "build:expired-codes", kind: "build", title: "Build · Expired codes price at full price", taskId: "expired-codes", status: "working", role: "builder", startedAt: at(incidentBase, 35 * SECOND), detail: "Running tests" }, 62),
+      station({ id: "review:expired-codes", kind: "review", title: "Review · Expired codes price at full price", taskId: "expired-codes", status: "waiting", role: "reviewer" }, 63),
       station({ id: "release", kind: "release", title: "Release", status: "waiting", role: "release" }, 64),
     ],
   });
@@ -1527,17 +1527,17 @@ function routed(now: number, fixtures: Fixtures): void {
   fixtures.workOrders.push({
     id: "wo_experiment",
     number: 14,
-    title: "Free-shipping progress bar experiment for mobile carts",
+    title: "Adaptive Auto graphics quality for integrated GPUs",
     mode: "agent",
     status: "planning",
     createdAt: at(now, -50 * SECOND),
     updatedAt: at(now, -2 * SECOND),
     startedAt: at(now, -49 * SECOND),
     taskCount: 0,
-    brief: "Build a free-shipping progress bar experiment for mobile carts under $50: variant assignment, the bar's copy and threshold logic, and the metrics to watch.\n\nMobile shoppers with $40–$49 carts abandon at the shipping step far more than desktop shoppers; the data and Copilot's analysis are in `.factory/context/`.",
+    brief: "Make Downhill's Auto graphics quality adaptive: step down a preset when the frame rate stays under 30 fps, step back up above 50, with tests and the metrics to watch.\n\nOn integrated graphics, Auto runs about as slowly as High and three times as many players quit in their first minute as on Low; the data and Copilot's analysis are in `.factory/context/`.",
     source: { kind: "brief" },
-    origin: { app: "data-desk", name: "Data Desk", label: "Mobile drop-off · Storefront checkout funnel", url: "http://localhost:7430/#/", key: "fixture:1" },
-    inputs: { context: [{ path: "INSIGHT.md", size: 1_830, description: "What to build, and the insight behind it" }, { path: "data/drop-off-by-cart-value.csv", size: 612, description: "Copilot's table: shipping-step drop-off by device and cart value" }] },
+    origin: { app: "data-desk", name: "Data Desk", label: "Auto on integrated GPUs · Downhill beta frame rate", url: "http://localhost:7430/#/", key: "fixture:1" },
+    inputs: { context: [{ path: "INSIGHT.md", size: 1_830, description: "What to build, and the insight behind it" }, { path: "data/frame-rate-by-quality.csv", size: 214, description: "Copilot's table: frame rate and first-minute quits by quality on integrated graphics" }] },
     maxReviewRounds: 2,
     stations: [station({ id: "plan", kind: "plan", title: "Plan", status: "working", role: "planner", startedAt: at(now, -45 * SECOND), detail: "Splitting the work order into tasks" }, 71)],
   });

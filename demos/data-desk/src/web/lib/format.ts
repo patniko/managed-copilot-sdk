@@ -79,7 +79,7 @@ export function firstSentence(markdown: string, max = 120): string | undefined {
 export function titleFrom(markdown: string, max = 120): string | undefined {
   const sentence = firstSentence(markdown, 400);
   if (!sentence || sentence.length <= 80) return sentence;
-  // "Mobile shoppers with $40–$49 carts drop out at the shipping step, where the fee appears: …" keeps its first clause.
+  // "On integrated graphics, Auto runs about as slowly as High, at 28 fps: …" keeps its first clause.
   const clause = /^(.{30,}?)(?:[,:;]\s| [–—]\s)/.exec(sentence)?.[1];
   return firstSentence(clause ?? sentence, max);
 }

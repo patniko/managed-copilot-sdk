@@ -88,7 +88,7 @@ export const FLOWS: readonly Flow[] = [
   { from: "downhill", to: "data-desk", label: "Shop sales", detail: "Data Desk reads the shop's live sales" },
   { from: "downhill", to: "incident-commander", label: "Alert + logs", detail: "The rejected launch code alerts Incident Commander, and the game streams its logs there" },
   { from: "incident-commander", to: "downhill", label: "Deploys the fix", detail: "Once you approve the fix, Incident Commander deploys it to the running shop", back: true },
-  { from: "help-desk", to: "software-factory", label: "Bug report", detail: "A storefront bug customers report becomes a work order" },
+  { from: "help-desk", to: "software-factory", label: "Bug report", detail: "A shop bug players report becomes a work order" },
   { from: "data-desk", to: "software-factory", label: "Finding", detail: "Something you find in your data becomes a work order" },
   { from: "incident-commander", to: "software-factory", label: "Fix", detail: "The incident's fix becomes a work order with a Deploy gate" },
 ];

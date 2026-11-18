@@ -74,15 +74,15 @@ describe("a service over HTTP", () => {
     mkdirSync(join(own, "downhill-shop"));
     writeFileSync(join(own, "downhill-shop", "package.json"), JSON.stringify({ version: "9.9.9" }));
     const shop = new FakeRemoteService();
-    const checkout = new FakeRemoteService("checkout");
+    const orders = new FakeRemoteService("downhill-orders");
     const catalog = new ServiceCatalog(demoDir, own, {
-      remote: [shop.service, checkout.service],
-      fetch: (input, init) => (String(input) === checkout.url ? checkout : shop).fetch(input, init),
+      remote: [shop.service, orders.service],
+      fetch: (input, init) => (String(input) === orders.url ? orders : shop).fetch(input, init),
     });
     expect(await catalog.find("downhill-shop")).toEqual({ name: "downhill-shop", demo: false, version: "9.9.9" });
     expect(shop.requests).toEqual([]);
-    expect(await catalog.find("checkout")).toEqual({ name: "checkout", demo: false, version: "1.0.0" });
-    expect(await new ServiceCatalog(demoDir).find("checkout")).toMatchObject({ demo: true });
+    expect(await catalog.find("downhill-orders")).toEqual({ name: "downhill-orders", demo: false, version: "1.0.0" });
+    expect(await new ServiceCatalog(demoDir).find("downhill-orders")).toMatchObject({ demo: true });
   });
 
   it("says why it can't be loaded, instead of giving an empty folder", async () => {

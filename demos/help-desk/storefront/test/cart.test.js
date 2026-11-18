@@ -1,56 +1,40 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { addItem, CartError, createCart, itemCount, removeItem, subtotalCents, updateQuantity } from "../src/cart.js";
+import { addItem, CartError, createCart, itemCount, removeItem, subtotalCents } from "../src/cart.js";
 
-const BOTTLE = { sku: "BTL-32", name: "Canyon Water Bottle 32 oz", priceCents: 2_400 };
-const HEADLAMP = { sku: "LMP-400", name: "Lumen 400 Headlamp", priceCents: 3_900 };
+const NEON_MONA = { sku: "mona-neon", name: "Neon Mona", priceCents: 499 };
+const LAVA_PAINT = { sku: "bike-lava", name: "Lava Paint", priceCents: 399 };
 
-test("adds products as lines and sums the subtotal", () => {
-  const cart = addItem(addItem(createCart(), BOTTLE), HEADLAMP, 2);
+test("adds looks as lines and sums the subtotal", () => {
+  const cart = addItem(addItem(createCart(), NEON_MONA), LAVA_PAINT);
   assert.deepEqual(
     cart.lines.map((line) => [line.sku, line.quantity]),
     [
-      ["BTL-32", 1],
-      ["LMP-400", 2],
+      ["mona-neon", 1],
+      ["bike-lava", 1],
     ],
   );
-  assert.equal(itemCount(cart), 3);
-  assert.equal(subtotalCents(cart), 10_200);
+  assert.equal(itemCount(cart), 2);
+  assert.equal(subtotalCents(cart), 898);
 });
 
-test("adding a product that's already in the cart adds to its line", () => {
-  const cart = addItem(addItem(createCart(), BOTTLE), BOTTLE, 2);
-  assert.equal(cart.lines.length, 1);
-  assert.equal(cart.lines[0].quantity, 3);
-});
-
-test("removes a line", () => {
-  const cart = removeItem(addItem(addItem(createCart(), BOTTLE), HEADLAMP), "BTL-32");
+test("removes a look", () => {
+  const cart = removeItem(addItem(addItem(createCart(), NEON_MONA), LAVA_PAINT), "mona-neon");
   assert.deepEqual(
     cart.lines.map((line) => line.sku),
-    ["LMP-400"],
+    ["bike-lava"],
   );
+  assert.equal(subtotalCents(cart), 399);
 });
 
-test("setting a quantity to 0 removes the line", () => {
-  const cart = updateQuantity(addItem(createCart(), BOTTLE), "BTL-32", 0);
-  assert.deepEqual(cart.lines, []);
-  assert.equal(subtotalCents(cart), 0);
-});
-
-test("accepts only the quantities the picker offers, for products in the cart", () => {
-  const cart = addItem(createCart(), BOTTLE);
-  assert.throws(() => updateQuantity(cart, "BTL-32", 11), CartError);
-  assert.throws(() => updateQuantity(cart, "BTL-32", -1), CartError);
-  assert.throws(() => updateQuantity(cart, "BTL-32", 1.5), CartError);
-  assert.throws(() => updateQuantity(cart, "LMP-400", 1), { name: "CartError", message: "LMP-400 isn't in the cart." });
-  assert.throws(() => addItem(cart, BOTTLE, 10), CartError);
+test("refuses a look without a price in whole cents", () => {
+  assert.throws(() => addItem(createCart(), { ...NEON_MONA, priceCents: 4.99 }), CartError);
+  assert.throws(() => addItem(createCart(), { ...NEON_MONA, priceCents: -1 }), { name: "CartError", message: "Invalid price for mona-neon." });
 });
 
 test("leaves the cart it was given unchanged", () => {
-  const cart = addItem(createCart(), BOTTLE);
-  addItem(cart, HEADLAMP);
-  addItem(cart, BOTTLE);
-  removeItem(cart, "BTL-32");
-  assert.deepEqual(cart.lines, [{ ...BOTTLE, quantity: 1 }]);
+  const cart = addItem(createCart(), NEON_MONA);
+  addItem(cart, LAVA_PAINT);
+  removeItem(cart, "mona-neon");
+  assert.deepEqual(cart.lines, [{ ...NEON_MONA, quantity: 1 }]);
 });

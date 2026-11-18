@@ -157,7 +157,7 @@ export const APPS: readonly AppEntry[] = [
     title: "Help Desk",
     tagline: "25 customers, 25 private sessions, one shared runtime",
     description:
-      "A support rush where every customer chats with their own agent, bound to their own orders, all on one runtime; refunds wait for you, and storefront bugs customers report go to the Software Factory.",
+      "Downhill's launch-day support rush: every player chats with their own agent, bound to their own orders, all on one runtime; refunds wait for you, and shop bugs players report go to the Software Factory.",
     tryIt: "Simulate 25 customers, then approve a refund.",
     group: "connected",
     app: "help-desk",
@@ -171,7 +171,7 @@ export const APPS: readonly AppEntry[] = [
     tagline: "Chat with a spreadsheet; it moves to a sandbox for code",
     description:
       "Questions the app's own tools can answer run on the shared runtime; a chart request moves the same session into a Python sandbox, and Copilot CLI follows it. Send what you find to the Software Factory.",
-    tryIt: "Pick Coffee shop sales, ask which store sold most, then chart it.",
+    tryIt: "Pick Downhill shop sales, ask how many promo codes were rejected in the last hour, then chart them.",
     group: "connected",
     app: "data-desk",
     port: 7430,

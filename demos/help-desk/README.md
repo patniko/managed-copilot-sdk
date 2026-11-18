@@ -1,18 +1,19 @@
 # Help Desk
 
-A support rush on one shared runtime. **Simulate 25 customers** and Help Desk starts 25 real Copilot sessions at once,
-one per customer of a demo store, Contoso Outdoors. Each session can only reach its own customer's orders through the
-store's tools, refunds and cancellations wait for you on the wall, and the counters show what it took: **25 sessions,
-1 runtime, 0 sandboxes**. When the store's website lets a customer down, their agent reports it, and one click sends the
-issue to [Software Factory](../software-factory/README.md) to fix. Real people join the same wall: a player of
-[Downhill](../downhill/README.md), the store's free browser game, who opens **Support** in the game gets a live ticket
-next to the simulated customers. The app is ordinary Node code built on the stock `@github/copilot-sdk` and
+A support rush on one shared runtime. It's launch day for [Downhill](../downhill/README.md), Contoso Outdoors'
+mountain-biking game: **Simulate 25 customers** and Help Desk starts 25 real Copilot sessions at once, one per player
+writing in about the game and its in-game shop, the Downhill Shop. Each session can only reach its own player's orders
+through the support tools, refunds and cancellations wait for you on the wall, and the counters show what it took: **25
+sessions, 1 runtime, 0 sandboxes**. When the shop's checkout code lets a player down, their agent reports it, and one
+click sends the issue to [Software Factory](../software-factory/README.md) to fix. Real people join the same wall: a
+player who opens **Support** in the game gets a live ticket next to the simulated customers. The app is ordinary Node code built on the stock `@github/copilot-sdk` and
 `@managed-copilot/sdk`.
 
-![The wall mid-rush: 25 sessions, 1 runtime, 0 sandboxes; six tiles glow yellow with a refund or cancellation to approve, and two show "Blocked: not their order"](docs/screenshots/wall.png)
+![The wall mid-rush: 25 sessions, 1 runtime, 0 sandboxes; two software issues already reported (promo codes and the cart); six tiles glow yellow with a refund or cancellation to approve, and two show "Blocked: not their order"](docs/screenshots/wall.png)
 
-*Twelve seconds into a rush: 25 customers, one session each, all on the one shared runtime. Six refunds and
-cancellations wait for the operator (yellow), and two customers asked about orders that aren't theirs (red).*
+*Ten seconds into a rush: 25 customers, one session each, all on the one shared runtime. Six refunds and
+cancellations wait for the operator (yellow), two customers asked about orders that aren't theirs (red), and agents
+have already reported two problems with the shop's checkout code.*
 
 ## What it shows
 
@@ -20,18 +21,18 @@ cancellations wait for the operator (yellow), and two customers asked about orde
   the one shared runtime process (the **shared** pattern, [patterns](../../docs/concepts/patterns.md)), so the rush
   starts in seconds and needs no machine per customer.
 - **Isolation by your tools, not by the model.** A session's tools are created for its customer and take no customer
-  ID. When Liam asks about order `CO-48177` (Sofia's), `get_order` answers exactly as it would for an order that
+  ID. When Liam asks about order `DH-20417` (Sofia's), `get_order` answers exactly as it would for an order that
   doesn't exist, and the wall marks the attempt **Blocked**. The model never saw Sofia's data, so it couldn't leak it.
 - **You stay in control of what costs money.** `request_refund` and `cancel_order` have no `skipPermission`, so the
   runtime asks the app first. Help Desk holds each request on the wall until you approve or decline it. A request the
-  store would refuse anyway (outside the 30-day window, an order that already shipped) goes straight to the tool,
-  which says why.
+  shop would refuse anyway (cancelling an order that's already unlocked, refunding one that was refunded already) goes
+  straight to the tool, which says why.
 - **The economics, counted.** Sessions and messages come from the conversations; runtimes and sandboxes from the
   platform's session records (`placement`, `sandbox`); premium requests from each session's own usage metrics. A full
   rush on Claude Haiku 4.5 costs 8.25 premium requests: 0.33 per customer.
-- **From a support ticket to a fix.** Agents report problems with the store's website with a `report_bug` tool, the
-  wall groups the reports into software issues, and **Send to Software Factory** turns one into a work order to fix
-  the website's code ([below](#software-issues-fixed-by-software-factory)).
+- **From a support ticket to a fix.** Agents report problems with the Downhill Shop with a `report_bug` tool, the wall
+  groups the reports into software issues, and **Send to Software Factory** turns one into a work order to fix the
+  shop's checkout code ([below](#software-issues-fixed-by-software-factory)).
 - **A team that learns.** Agents propose what they learn for the team knowledge base with the runtime's
   `store_memory` tool. You add each fact or not, and every later conversation starts with what was added
   ([below](#team-knowledge-agents-learn-you-decide)).
@@ -39,21 +40,21 @@ cancellations wait for the operator (yellow), and two customers asked about orde
   proposes it as a known issue. Record it, then **Answer matching tickets**: the decision model picks the open tickets
   about it, and each one's own agent replies with the update, while a person still approves anything that costs money
   ([below](#known-issues-one-note-every-matching-ticket)).
-- **Live players, next to the simulation.** Downhill's in-game shop, the Downhill Shop, sells rider outfits and bike
-  paint, and its checkout runs on the store's own checkout code. When its launch offer's code fails there, the player
+- **Live players, next to the simulation.** The Downhill Shop sells rider outfits and bike paint, and its checkout runs
+  on Contoso Outdoors' storefront code. When its launch offer's code fails there, the player
   opens **Support** and complains in their own words: Help Desk opens a live ticket on the same shared runtime, the
   game shows the chat in a frame, and the wall shows the ticket first, marked **Live**
   ([below](#live-players-from-downhill)). Their agent's report joins the same software issue as the simulated
   customers'.
 
-<img src="docs/screenshots/approval.png" alt="Sofia's conversation: her support widget on the left, and on the right where the session runs (shared runtime, tools in Help Desk, no sandbox), a refund of $39.00 waiting with Decline and Approve, the two orders the session can see, and its tool calls" width="900">
+<img src="docs/screenshots/approval.png" alt="Sofia's conversation: her support widget on the left, and on the right where the session runs (shared runtime, tools in Help Desk, no sandbox), a refund of $4.99 for DH-20417 waiting with Decline and Approve, the one order the session can see, and its tool calls" width="900">
 
 *Click a customer to see their support widget as they see it, and what happened behind it: where the session runs,
 the only orders it can see, and every tool call. Approve or decline here or on the wall.*
 
-<img src="docs/screenshots/blocked.png" alt="Liam's conversation: he asked about order CO-48177; the widget says CO-48177 isn't on his account; the tool call list shows get_order CO-48177 blocked as another customer's order; he sees only CO-48121" width="900">
+<img src="docs/screenshots/blocked.png" alt="Liam's conversation: he asked about order DH-20417; the widget says DH-20417 isn't on his account; the tool call list shows get_order DH-20417 blocked as another customer's order; he sees only DH-20388" width="900">
 
-*Liam's session asked the store for `CO-48177`. The tool refused it like a missing order, so the agent's reply
+*Liam's session asked the shop for `DH-20417`. The tool refused it like a missing order, so the agent's reply
 confirms nothing, while the operator sees that it was another customer's.*
 
 ## Run it
@@ -94,7 +95,7 @@ Help Desk opens at <http://localhost:7440>. To demo it:
 Measured on a local deployment: 25 sessions started in about 3 seconds, and every conversation finished within 35
 seconds, approvals included.
 
-![The same wall once every conversation finished: 25 sessions, 1 runtime, 0 sandboxes, 63 messages, 54 tool calls, 8.25 premium requests, 0.33 per customer](docs/screenshots/wall-done.png)
+![The same wall once every conversation finished: 25 sessions, 1 runtime, 0 sandboxes, 60 messages, 57 tool calls, 8.25 premium requests, 0.33 per customer, and three software issues: promo codes, the cart, and purchase status](docs/screenshots/wall-done.png)
 
 The [`happy-path`](src/scripts/happy-path.ts) script does a smaller pass through the HTTP API: 5 customers, one refund
 or cancellation approved and any others declined, checks that each session touched only its customer's orders and that
@@ -112,21 +113,20 @@ pnpm --filter @managed-copilot/demo-help-desk happy-path --url https://help-desk
 
 ## Software issues, fixed by Software Factory
 
-Six of the customers don't just have a question: the store's website let them down. The code `TRAIL15` from the
-newsletter is rejected when Aisha pastes it and when Ben types it in lowercase, and Mateo's `trail15` from the homepage
-banner is turned down too; Lucas changed his water bottles from 1 to 2 in his cart and paid for 3; and Hannah's and
-Arjun's **My orders** pages say Delivered while their packages are still out for delivery. Aisha is among the first 5
-customers and Lucas among the first 10; simulate 25 to meet all six. The
-website's code is in [`storefront`](storefront): a small Node codebase whose own tests pass, because they don't cover
-these cases.
+Six of the customers don't just have a question: the shop's checkout code let them down. The code `TRAIL15` from the
+newsletter is rejected when Aisha pastes it and when Ben types it in lowercase, and Mateo's `trail15` from the shop's
+banner is turned down too; Lucas double-tapped **Add to cart** on his phone and paid for Stealth Copilot twice; and
+Hannah's and Arjun's **My purchases** pages say Unlocked while their bank transfers are still pending. Aisha is among
+the first 5 customers and Lucas among the first 10; simulate 25 to meet all six. The checkout code is in
+[`storefront`](storefront): a small Node codebase whose own tests pass, because they don't cover these cases.
 
 1. **The agent reports it.** Every session also has a `report_bug` tool, bound to its customer like the others. When a
-   customer describes something the website got wrong, the agent reports it once with the area it's about
-   (`promo-codes`, `cart`, `order-status`, or `other`), tells them, and still helps with the order: it asks to refund
-   Lucas one bottle and Aisha the 15% she missed, and each refund waits for your approval like any other. The store's
-   tools also say what each order's **My orders** label reads (`shownOnMyOrdersPage`, worked out like the storefront's
-   own code), so the agent can see Hannah's and Arjun's pages disagree with the carrier. A product that arrived broken
-   or leaks isn't a software issue, and isn't reported.
+   customer describes something the shop got wrong, the agent reports it once with the area it's about
+   (`promo-codes`, `cart`, `purchase-status`, or `other`), tells them, and still helps with the order: it asks to refund
+   Lucas one Stealth Copilot and Aisha the 15% she missed, and each refund waits for your approval like any other. The
+   support tools also say what each order's **My purchases** label reads (`shownOnMyPurchasesPage`, worked out like the
+   storefront's own code), so the agent can see Hannah's and Arjun's pages disagree with their payments. A look the
+   player doesn't like, or bought by mistake, isn't a software issue, and isn't reported.
 2. **The wall groups the reports.** Their tiles show **Software issue**, and the **Software issues** panel has one row
    per area, such as *Promo codes rejected at checkout · 3 tickets*. A customer's page shows what the agent reported.
 3. **Send to Software Factory.** One click sends the issue as a work order. Its brief quotes each customer, their order,
@@ -137,12 +137,12 @@ these cases.
    **Open in Software Factory**. The work order carries its origin: Help Desk, *Promo codes · 3 tickets*, and a link
    back to the first reporting customer's conversation, so the factory's floor shows where it came from.
 
-**Players' reports join in.** The Downhill Shop's checkout calls the same `applyPromoCode`
-(`storefront/src/promotions.js`), and its launch banner applies the code in lowercase, `trail15`, which the same bug
-turns down. A player's agent reports it with area `promo-codes`, so it lands in *Promo codes rejected at checkout* with
-Aisha's, Mateo's, and Ben's (listed as *Mona · Downhill*), and the issue shows whether or not a simulation is running. The brief
-and `BUG_REPORT.md` say which reports came from the Downhill Shop: the code exactly as its checkout got it, what
-checkout said, the cart, and the order the player paid in full, if any.
+**Players' reports join in.** A live player's checkout calls the same `applyPromoCode`
+(`storefront/src/promotions.js`), and the shop's launch banner applies the code in lowercase, `trail15`, which the same
+bug turns down. A player's agent reports it with area `promo-codes`, so it lands in *Promo codes rejected at checkout*
+with Aisha's, Mateo's, and Ben's (listed as *Mona · Downhill*), and the issue shows whether or not a simulation is
+running. The brief and `BUG_REPORT.md` say which reports came from the game: the code exactly as its checkout got it,
+what checkout said, the cart, and the order the player paid in full, if any.
 
 Each issue goes to Software Factory once per scope, and a send that failed can be tried again. While a simulation
 runs, the scope is the simulation: players' reports join its issues, and the work order's origin key is
@@ -162,8 +162,8 @@ The support team keeps a knowledge base, and the agents help write it.
 
 1. **The agent proposes.** Each customer's session has the runtime's built-in `store_memory` tool, and its
    instructions list the team knowledge base so far. When a customer tells the agent something that would help with
-   other customers and the knowledge base doesn't say it yet (how a product fits, a workaround for a problem with the
-   website), it proposes one short, general fact. It's told to leave out names, email addresses, order numbers, and
+   other customers and the knowledge base doesn't say it yet (how a look or the game works, a setting or workaround that
+   fixes a problem), it proposes one short, general fact. It's told to leave out names, email addresses, order numbers, and
    amounts, and the runtime filters secrets out before asking.
 2. **You decide.** The proposal waits in the **Team knowledge** panel and on the customer's tile with **Add** and
    **×**; the customer's page shows the whole fact and where it came from. Unlike a refund, it doesn't hold up the
@@ -176,17 +176,18 @@ The support team keeps a knowledge base, and the agents help write it.
 
 ### Try it
 
-Two of the simulated customers are set up for this. Noah, among the first 5, cancels his Ridgeline Hiking Boots and
-mentions in passing that they run a full size small. Emma, among the first 10, asks which size of the same boots to
-order. Nobody asks the agent to remember anything.
+Two of the simulated customers are set up for this. Noah, among the first 5, cancels his pending Aurora Paint order and
+mentions in passing that Downhill stuttered on his laptop until he turned off the **Painterly filter** in Settings.
+Emma, among the first 10, asks for tips because Downhill is choppy on her laptop. Nobody asks the agent to remember
+anything.
 
-1. Start with an empty **Team knowledge** panel (remove any facts in it) and **Simulate 10**. Emma's agent can't
-   help with her size: it points her to the size chart. Within seconds, Noah's tile shows a proposed fact, such as
-   *Ridgeline Hiking Boots run a full size small.*
+1. Start with an empty **Team knowledge** panel (remove any facts in it) and **Simulate 10**. Emma's agent has no
+   Downhill-specific tip for her yet. Within seconds, Noah's tile shows a proposed fact, such as *Turning off the
+   Painterly filter in Settings makes Downhill run smoothly on laptops.*
 2. **Add** the fact, and approve or decline Noah's cancellation, in either order. The fact moves into the **Team
    knowledge** panel's list, linked to Noah's conversation.
-3. **Simulate 10** again. This time Emma's agent tells her straight away to order a size 9 because the boots run
-   small, and Noah's agent doesn't propose the fact again.
+3. **Simulate 10** again. This time Emma's agent tells her straight away to turn off the Painterly filter in Settings,
+   and Noah's agent doesn't propose the fact again.
 
 With **Simulate 5**, Noah proposes the fact the same way; Emma joins from **Simulate 10**. The agents choose what to
 propose, so another customer's agent can occasionally propose something too: decline what isn't worth keeping.
@@ -245,7 +246,7 @@ before you record it.
 ## Ticket classification (optional)
 
 In a rush you want to see at a glance what people are asking for before any agent has answered. With classification
-turned on, every customer message is classified as a delivery, refund, cancellation, order change, website problem, or
+turned on, every customer message is classified as an unlock, refund, cancellation, shop problem, game help, or
 question, and as urgent or not. The wall then groups tickets by category, urgent ones first with a flame. Live
 players' tickets aren't classified: they stay in their own group above the categories. A classification takes a
 fraction of a second and a few dozen tokens, so it's cheap enough to run on every message, while the customers' own
@@ -318,9 +319,9 @@ Help Desk has no Azure identity to call Foundry with.
 
 ## Live players, from Downhill
 
-[Downhill](../downhill/README.md) is the store's free mountain-biking browser game. Its in-game shop, the Downhill Shop,
-sells rider outfits and bike paint on the store's own checkout code, and its launch banner's code, `trail15`, is turned
-down at checkout. That's where a real person joins the wall:
+[Downhill](../downhill/README.md) is Contoso Outdoors' free mountain-biking browser game. Its in-game shop, the Downhill
+Shop, sells rider outfits and bike paint on Contoso Outdoors' storefront code, and its launch banner's code, `trail15`,
+is turned down at checkout. That's where a real person joins the wall:
 
 1. **The game opens a ticket.** **Support** is always at hand in Downhill: on the title screen, in the pause menu, in
    the shop, under a rejected code, and on a receipt. Opening it has Downhill's server call Help Desk, server to server:
@@ -345,7 +346,7 @@ down at checkout. That's where a real person joins the wall:
 2. **The player writes first.** Opening support asks no model anything. The chat greets the player itself (*Hi, I'm
    Contoso Outdoors support, an AI agent. What's going on?*), and their first message, in their own words (*My
    discount code isn't working*), starts the session. Its tools are bound to that one player: `get_checkout`,
-   `request_refund` (a team member approves it, like the store's refunds), `report_bug` (the store's areas), and
+   `request_refund` (a team member approves it, like the simulated customers' refunds), `report_bug` (the same areas), and
    `resolve_conversation`. When the player mentions a code, the agent reads their checkout first, and when the game
    sent none, it asks what they tried. A valid code that checkout turned down is reported once, as `promo-codes`. A
    player who bought at full price is refunded what the code should have taken off, once you approve it; one who
@@ -369,7 +370,7 @@ Help Desk's memory, so a restart forgets it too, and the game's next **Support**
 ## How it works
 
 - **One shared environment.** [`apphost.mts`](apphost.mts) declares `help-desk`: `type: "shared"` with network off,
-  because the agent's only hands are the store's tools in this app. Help Desk keeps one stock `CopilotClient` for it
+  because the agent's only hands are the shop's support tools in this app. Help Desk keeps one stock `CopilotClient` for it
   and creates every customer's session on that client.
 - **Tools bound to one customer.** Each session gets its own `defineTool` tools, created for its customer
   ([`tools.ts`](src/server/tools.ts)), and `availableTools: ["custom:*", "builtin:store_memory"]`, so besides proposing
@@ -377,7 +378,7 @@ Help Desk's memory, so a restart forgets it too, and the game's next **Support**
 
   ```ts
   defineTool("get_order", {
-    description: "Get one of the customer's orders: items, total, status, and shipping.",
+    description: "Get one of the player's orders: the looks (and who each fits), the total, the payment, and the status.",
     parameters: z.object({ orderId: z.string() }),
     skipPermission: true,
     handler: ({ orderId }) => shop.getOrder(customerId, orderId), // another customer's order: "No order … on this account."
@@ -409,7 +410,7 @@ Help Desk's memory, so a restart forgets it too, and the game's next **Support**
 - **The wall is projected from the sessions' events.** Messages (streamed), tool calls, and approvals come from the
   stock session events; a call refused for an order of another customer is marked **Blocked**. The agent marks a
   conversation **Resolved** with a `resolve_conversation` tool, and a completed `report_bug` call is the ticket's
-  report of a problem with the website.
+  report of a problem with the shop.
 - **Software issues go to Software Factory over its API.** [`factory.ts`](src/server/factory.ts) calls
   `POST /api/work-orders` server to server, with a 10-second timeout and plain-words errors. The work order's origin
   carries a key, `<simulation>:<area>` or `player-<ticket>:<area>` ([above](#software-issues-fixed-by-software-factory));
@@ -427,7 +428,7 @@ Help Desk's memory, so a restart forgets it too, and the game's next **Support**
 - **The platform holds the state.** Session IDs carry the simulation and the customer (`hd-<simulation>-<customer>`), or
   the player ticket (`hd-player-<ticket>`). After a restart, Help Desk lists the environment's sessions, picks up the
   latest simulation and every player ticket, rebuilds each conversation from `session.getEvents()`, replays the refunds
-  and cancellations its history records (into the store, or onto the player's order), and deletes leftovers of older
+  and cancellations its history records (into the simulated orders, or onto the player's order), and deletes leftovers of older
   simulations. The platform asks again for any approval still pending when a session is resumed.
 - **Open chats survive a restart.** Until Help Desk is connected and has listed the sessions, it can't tell a ticket it
   hasn't picked up yet from one that ended. So a chat page that reconnects in that window hears nothing about its ticket
@@ -463,10 +464,10 @@ environment (`http://help-desk`), which `HELP_DESK_ALLOWED_HOSTS` already allows
 | Path | Contents |
 | --- | --- |
 | `apphost.mts` | AppHost fragment: the `help-desk` shared environment, the optional `help-desk-triage` environment and its endpoint, and the app resource |
-| `src/server` | Platform connection, the store and its tools, one ticket (session) per customer and per live player (`player.ts`: the Downhill contract and the player's tools), the event projection, the team knowledge base, team notes and known issues, software issues and the Software Factory client, REST and server-sent events |
+| `src/server` | Platform connection, the simulated customers' Downhill Shop orders and their tools, one ticket (session) per customer and per live player (`player.ts`: the Downhill contract and the player's tools), the event projection, the team knowledge base, team notes and known issues, software issues and the Software Factory client, REST and server-sent events |
 | `src/scripts` | The happy-path script |
 | `src/shared` | Types shared with the UI |
 | `src/web` | The UI: the wall, and a player's chat page at `/chat/<ticket>` (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS) |
-| `storefront` | The Contoso Outdoors website's code (Node, no dependencies, `node --test`), with the bugs customers report: the project a software issue's work order asks Software Factory to fix. The Downhill Shop's checkout uses it too |
-| `test` | Unit tests: the store, the tools, the projection, simulations, player tickets, approvals, proposed memories, team notes, and known issues (answered with a fake decision model) against an in-memory platform, the knowledge base and known issues on disk, software issues against an in-memory Software Factory, the factory client, the API and the chat page's route, the storefront, and the fragment |
+| `storefront` | The Downhill Shop's checkout code (Node, no dependencies, `node --test`), which Downhill's checkout runs, with the bugs players report: the project a software issue's work order asks Software Factory to fix |
+| `test` | Unit tests: the simulated orders, the tools, the projection, simulations, player tickets, approvals, proposed memories, team notes, and known issues (answered with a fake decision model) against an in-memory platform, the knowledge base and known issues on disk, software issues against an in-memory Software Factory, the factory client, the API and the chat page's route, the storefront, and the fragment |
 | `Dockerfile` | The container `aspire deploy` publishes |

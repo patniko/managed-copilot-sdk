@@ -28,7 +28,7 @@ export interface AppliedPromo {
 export interface Storefront {
   readonly info: StorefrontInfo;
   readonly createCart: () => Cart;
-  readonly addItem: (cart: Cart, product: Product, quantity?: number) => Cart;
+  readonly addItem: (cart: Cart, product: Product) => Cart;
   readonly removeItem: (cart: Cart, sku: string) => Cart;
   readonly subtotalCents: (cart: Cart) => number;
   /** Throws a `PromoError` when the code doesn't exist or doesn't apply. */

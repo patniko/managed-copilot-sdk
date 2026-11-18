@@ -105,7 +105,7 @@ interface Entry {
   readonly tile: ReactNode;
 }
 
-/** Live players of Downhill, above the customers' groups: classification sorts the store's customers only. */
+/** Live players of Downhill, above the customers' groups: classification sorts the simulation's customers only. */
 function PlayerGroup({ players }: { readonly players: readonly PlayerTicket[] }) {
   if (players.length === 0) return null;
   return (
@@ -123,7 +123,7 @@ function PlayerGroup({ players }: { readonly players: readonly PlayerTicket[] })
   );
 }
 
-/** The simulation's tickets by their classification; the rest of the store's customers after. */
+/** The simulation's tickets by their classification; the rest of the simulation's customers after. */
 function TicketGroups({ customers, tickets }: { readonly customers: readonly CustomerCard[]; readonly tickets: Readonly<Record<string, Ticket>> }) {
   const entries: Entry[] = [];
   const rest: CustomerCard[] = [];

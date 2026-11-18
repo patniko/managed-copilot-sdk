@@ -4,7 +4,7 @@
  *
  * | Environment | Type   | Network | What it's for                                                                 |
  * | ----------- | ------ | ------- | ----------------------------------------------------------------------------- |
- * | `help-desk` | shared | off     | one support session per customer, all on the shared runtime; the agent's only hands are the store's tools in Help Desk |
+ * | `help-desk` | shared | off     | one support session per customer, all on the shared runtime; the agent's only hands are the shop's support tools in Help Desk |
  * | `help-desk-triage` | shared | off | optional (`triage`): classifies each customer message with the decision model, through Help Desk's OpenAI-compatible endpoint |
  *
  * Wire it into the root AppHost:
@@ -86,7 +86,7 @@ export function helpDesk(options: HelpDeskOptions = {}): HelpDeskFragment {
     environments: {
       [HELP_DESK_ENVIRONMENT]: {
         type: "shared",
-        description: "Help Desk: one support session per customer on the shared runtime, with the store's tools bound to that customer",
+        description: "Help Desk: one support session per customer on the shared runtime, with the shop's support tools bound to that customer",
         // The agent reads and changes orders only through the app's tools; it needs no Internet access.
         network: false,
       },

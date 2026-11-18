@@ -19,16 +19,16 @@ const ALERT: AlertInfo = {
   name: "CheckoutHighErrorRate",
   summary: "Checkout 5xx error rate is 13.4% (threshold 2%)",
   description: "19 of 142 checkouts failed in the last 5 minutes.",
-  service: "checkout",
+  service: "downhill-orders",
   severity: "SEV2",
-  labels: { alertname: "CheckoutHighErrorRate", service: "checkout", env: "production" },
+  labels: { alertname: "CheckoutHighErrorRate", service: "downhill-orders", env: "production" },
   startsAt: "2026-11-04T06:57:00.000Z",
   fingerprint: "abc123",
   links: [],
 };
 
 const demoDir = testConfig().demoServicesDir;
-const source = (path: string): string => readFileSync(join(demoDir, "checkout", path), "utf8").replace(/\r\n/g, "\n");
+const source = (path: string): string => readFileSync(join(demoDir, "downhill-orders", path), "utf8").replace(/\r\n/g, "\n");
 const ORIGINAL = source("src/discounts.js");
 const FIXED = ORIGINAL.replace("  const coupon = findCoupon(code, now);\n", "  const coupon = findCoupon(code, now);\n  if (!coupon) return subtotalCents;\n");
 const TESTS = `${source("test/discounts.test.js")}\ntest("an expired coupon gives no discount", () => {});\n`;
@@ -38,7 +38,7 @@ const ROUTE = {
   rootCause: "v1.4.2 moved the expiry check into findCoupon, which now returns undefined for expired codes, and applyDiscount reads coupon.percent without a guard.",
   failingPath: "POST /checkout → priceCart (src/cart.js) → applyDiscount (src/discounts.js:14)",
   expected: "An expired coupon gives no discount instead of a 500.",
-  files: ["src/discounts.js", "checkout/test/discounts.test.js"],
+  files: ["src/discounts.js", "downhill-orders/test/discounts.test.js"],
 };
 
 /** What the factory releases for the fix: the whole project, and what changed in it. */
@@ -51,7 +51,7 @@ function release(changes: { path: string; status: "added" | "modified" | "delete
   return {
     workOrderId: "wo_12",
     number: 12,
-    projectName: "checkout",
+    projectName: "downhill-orders",
     tests: { total: 11, passed: 11, failed: 0, skipped: 0 },
     notes: "Expired coupons give no discount again.",
     files: [
@@ -222,12 +222,12 @@ describe("route_fix_to_factory", () => {
     };
     const id = h.incident().id;
     expect(body).toMatchObject({
-      title: "Fix checkout: Checkout crashes on expired coupon codes",
+      title: "Fix downhill-orders: Checkout crashes on expired coupon codes",
       mode: "classic",
       maxReviewRounds: 2,
-      origin: { app: "incident-commander", name: "Incident Commander", label: `${id} · checkout`, url: `http://localhost:7445/#/incidents/${id}`, key: id },
+      origin: { app: "incident-commander", name: "Incident Commander", label: `${id} · downhill-orders`, url: `http://localhost:7445/#/incidents/${id}`, key: id },
     });
-    expect(body.project.name).toBe("checkout");
+    expect(body.project.name).toBe("downhill-orders");
     const paths = body.project.files.map((file) => file.path);
     expect(paths).toEqual(expect.arrayContaining(["README.md", "package.json", "src/cart.js", "src/coupons.js", "src/discounts.js", "src/server.js", "test/cart.test.js", "test/discounts.test.js"]));
     expect(paths.filter((path) => path.startsWith("logs/") || path.startsWith("deploys/"))).toEqual([]);
@@ -239,8 +239,8 @@ describe("route_fix_to_factory", () => {
       `# ${id}: ${ALERT.summary}`,
       "- Name: CheckoutHighErrorRate",
       "- Severity: SEV2",
-      "- Service: checkout (v1.4.2 in production)",
-      "- Labels: alertname=CheckoutHighErrorRate, service=checkout, env=production",
+      "- Service: downhill-orders (v1.4.2 in production)",
+      "- Labels: alertname=CheckoutHighErrorRate, service=downhill-orders, env=production",
       ROUTE.rootCause,
       "- 19 of 142 checkouts failed",
       ROUTE.failingPath,
@@ -248,7 +248,7 @@ describe("route_fix_to_factory", () => {
       "## The deploy that caused it (deploys/v1.4.2.diff)",
       "+++ b/src/discounts.js",
       "TypeError: Cannot read properties of undefined (reading 'percent')",
-      "    at applyDiscount (file:///srv/checkout/src/discounts.js:",
+      "    at applyDiscount (file:///srv/downhill-orders/src/discounts.js:",
     ]) {
       expect(context).toContain(expected);
     }
@@ -282,10 +282,10 @@ describe("route_fix_to_factory", () => {
     const id = h.incident().id;
     // The same incident ID from an older set of records: not this incident's.
     h.factory.add({ createdAt: "2020-01-01T00:00:00.000Z", origin: { app: "incident-commander", name: "Incident Commander", key: id } });
-    const recorded = h.factory.add({ title: "Fix checkout: expired coupons", origin: { app: "incident-commander", name: "Incident Commander", key: id } });
+    const recorded = h.factory.add({ title: "Fix downhill-orders: expired coupons", origin: { app: "incident-commander", name: "Incident Commander", key: id } });
     expect(await h.call("route_fix_to_factory", ROUTE)).toContain("WO-0013");
     expect(h.factory.created).toEqual([]);
-    expect(h.incident().factory).toMatchObject({ workOrderId: recorded.id, title: "Fix checkout: expired coupons" });
+    expect(h.incident().factory).toMatchObject({ workOrderId: recorded.id, title: "Fix downhill-orders: expired coupons" });
   });
 
   it("falls back to a fix worker, visibly, when Software Factory refuses or can't be reached", async () => {
@@ -295,7 +295,7 @@ describe("route_fix_to_factory", () => {
     expect(refused.resultType).toBe("failure");
     expect(refused.textResultForLlm).toContain("Software Factory couldn't take the work order: Software Factory can't reach Managed Copilot right now.");
     expect(refused.textResultForLlm).toContain('fix it with a "fix" worker, as in the standard runbook');
-    expect(refused.textResultForLlm).toContain("/workspace/checkout");
+    expect(refused.textResultForLlm).toContain("/workspace/downhill-orders");
     expect(h.incident().factory).toBeUndefined();
     expect(h.incident().timeline.at(-1)).toMatchObject({ kind: "error", text: expect.stringContaining("Couldn't route the fix to Software Factory") });
 
@@ -470,11 +470,11 @@ describe("apply_factory_fix", () => {
     h.factory.set("wo_12", { status: "completed" });
     await h.run.checkFactory();
     const result = await h.call("apply_factory_fix", {});
-    expect(result).toContain("Copied Software Factory's fix (WO-0012) into /workspace/checkout: src/discounts.js (modified), test/discounts.test.js (modified).");
+    expect(result).toContain("Copied Software Factory's fix (WO-0012) into /workspace/downhill-orders: src/discounts.js (modified), test/discounts.test.js (modified).");
     expect(result).toContain("11 tests passed");
-    expect(h.platform.files.get("hands-1:checkout/src/discounts.js")).toBe(FIXED);
-    expect(h.platform.files.get("hands-1:checkout/test/discounts.test.js")).toBe(TESTS);
-    expect(h.platform.files.has("hands-1:checkout/package.json")).toBe(false);
+    expect(h.platform.files.get("hands-1:downhill-orders/src/discounts.js")).toBe(FIXED);
+    expect(h.platform.files.get("hands-1:downhill-orders/test/discounts.test.js")).toBe(TESTS);
+    expect(h.platform.files.has("hands-1:downhill-orders/package.json")).toBe(false);
     expect(h.incident().factory?.appliedAt).toBeDefined();
     expect(texts(h.incident(), "factory")).toContain("Copied WO-0012's fix into Copilot's sandbox (2 files)");
 
@@ -512,7 +512,7 @@ describe("the deploy gate in Software Factory", () => {
   it("declares the gate, puts the deploy request on it, and answers the waiting request with the decision made there", async () => {
     const h = await harness();
     await deployRequested(h);
-    expect(h.factory.created[0]).toMatchObject({ gates: [{ kind: "deploy", target: "checkout" }] });
+    expect(h.factory.created[0]).toMatchObject({ gates: [{ kind: "deploy", target: "downhill-orders" }] });
     expect(h.incident().factory?.deployGate).toBe(true);
     const id = h.incident().id;
     expect(h.factory.gateRequests).toEqual([
@@ -520,7 +520,7 @@ describe("the deploy gate in Software Factory", () => {
         requestId: "deploy-call",
         title: `Deploy the fix for ${id}`,
         summary: DEPLOY.summary,
-        target: "checkout",
+        target: "downhill-orders",
         version: "1.4.3",
         previousVersion: "1.4.2",
         tests: "11 passed",

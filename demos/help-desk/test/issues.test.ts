@@ -5,19 +5,19 @@ import type { BugArea, BugReport, RoutedWorkOrder, ShopCheckout } from "../src/s
 const at = (minute: number) => `2026-11-03T10:${String(minute).padStart(2, "0")}:00.000Z`;
 const report = (area: BugArea, minute: number, extra: Partial<BugReport> = {}): BugReport => ({
   area,
-  title: "Out for delivery shown as Delivered",
-  whatHappened: "My orders says Delivered; the carrier says out for delivery.",
-  expected: "My orders says Out for delivery until it's delivered.",
+  title: "Waiting to unlock shown as Unlocked",
+  whatHappened: "My purchases says Unlocked; the payment is still pending.",
+  expected: "My purchases says Pending until the payment clears.",
   at: at(minute),
   ...extra,
 });
 
-/** A customer's conversation: what they wrote, the agent's report, and its reply. */
+/** A simulated player's conversation: what they wrote, the agent's report, and its reply. */
 function conversation(index: number, bug: BugReport, words: string): ReportedConversation {
   const minute = Number(bug.at.slice(14, 16));
   return {
     customerId: `c${String(index).padStart(2, "0")}`,
-    name: `Customer ${index}`,
+    name: `Player ${index}`,
     bug,
     items: [
       { kind: "message", id: `u${index}`, from: "customer", text: words, at: at(minute - 1) },
@@ -30,51 +30,51 @@ function conversation(index: number, bug: BugReport, words: string): ReportedCon
 
 describe("software issues", () => {
   it("group reports by area, in the order the areas were first reported; an area sent already stays listed", () => {
-    const routed: RoutedWorkOrder = { workOrderId: "wo_1", number: 1, title: "Fix: wrong order status on My orders", status: "completed", url: "http://factory.test/#/wo/wo_1" };
+    const routed: RoutedWorkOrder = { workOrderId: "wo_1", number: 1, title: "Fix: purchases shown as unlocked too early", status: "completed", url: "http://factory.test/#/wo/wo_1" };
     const issues = groupIssues(
       [
         { customerId: "c18", name: "Ben Carter", bug: report("promo-codes", 5) },
-        { customerId: "c08", name: "Lucas Silva", bug: report("cart", 3, { orderId: "CO-48198" }) },
+        { customerId: "c08", name: "Lucas Silva", bug: report("cart", 3, { orderId: "DH-20720" }) },
         { customerId: "c05", name: "Aisha Khan", bug: report("promo-codes", 4) },
       ],
-      new Map([["order-status", routed]]),
+      new Map([["purchase-status", routed]]),
     );
     expect(issues.map((issue) => [issue.area, issue.title, issue.reports.map((each) => each.customerId)])).toEqual([
-      ["cart", "Wrong quantities in the cart", ["c08"]],
+      ["cart", "The same look charged twice", ["c08"]],
       ["promo-codes", "Promo codes rejected at checkout", ["c05", "c18"]],
-      ["order-status", "Wrong order status on My orders", []],
+      ["purchase-status", "Purchases shown as unlocked too early", []],
     ]);
-    expect(issues[0]?.reports[0]).toEqual({ customerId: "c08", name: "Lucas Silva", whatHappened: report("cart", 3).whatHappened, orderId: "CO-48198", at: at(3) });
+    expect(issues[0]?.reports[0]).toEqual({ customerId: "c08", name: "Lucas Silva", whatHappened: report("cart", 3).whatHappened, orderId: "DH-20720", at: at(3) });
     expect(issues[2]?.routed).toEqual(routed);
     expect(issues[0]?.routed).toBeUndefined();
   });
 
-  it("quote what customers wrote up to their report, oldest first, and always end with the ask", () => {
-    const short = Array.from({ length: 20 }, (_, index) => conversation(index + 1, report("order-status", 40 - index, { orderId: `CO-4${index}`, expected: `Expectation ${index % 3}.` }), `It says delivered (${index + 1}).`));
-    const request = issueWorkOrder({ area: "order-status", scope: "r1", appUrl: "https://help-desk.example.io", reports: short, project: [{ path: "package.json", content: "{}" }] });
+  it("quote what players wrote up to their report, oldest first, and always end with the ask", () => {
+    const short = Array.from({ length: 20 }, (_, index) => conversation(index + 1, report("purchase-status", 40 - index, { orderId: `DH-${20900 + index}`, expected: `Expectation ${index % 3}.` }), `It says unlocked (${index + 1}).`));
+    const request = issueWorkOrder({ area: "purchase-status", scope: "r1", appUrl: "https://help-desk.example.io", reports: short, project: [{ path: "package.json", content: "{}" }] });
 
-    expect(request.title).toBe("Fix: wrong order status on My orders");
-    expect(request.origin).toEqual({ app: "help-desk", name: "Help Desk", label: "Order status · 20 tickets", url: "https://help-desk.example.io/#/c/c20", key: "r1:order-status" });
+    expect(request.title).toBe("Fix: purchases shown as unlocked too early");
+    expect(request.origin).toEqual({ app: "help-desk", name: "Help Desk", label: "Purchase status · 20 tickets", url: "https://help-desk.example.io/#/c/c20", key: "r1:purchase-status" });
     expect(request.project).toEqual({ name: "contoso-storefront", files: [{ path: "package.json", content: "{}" }] });
     expect(request.maxReviewRounds).toBe(2);
     expect(request.brief).toContain("received 20 reports");
-    expect(request.brief).toMatch(/^1\. \*\*Customer 20\*\*, order CO-419, wrote:\n\n {3}> It says delivered \(20\)\.$/m);
-    expect(request.brief).toMatch(/^8\. \*\*Customer 13\*\*/m);
+    expect(request.brief).toMatch(/^1\. \*\*Player 20\*\*, order DH-20919, wrote:\n\n {3}> It says unlocked \(20\)\.$/m);
+    expect(request.brief).toMatch(/^8\. \*\*Player 13\*\*/m);
     expect(request.brief).toContain("12 more reports in BUG_REPORT.md.");
     expect(request.brief).toContain("- Expectation 1.\n- Expectation 0.\n- Expectation 2.");
-    // What the customer wrote before the report, not after it.
+    // What the player wrote before the report, not after it.
     expect(request.brief).not.toContain("Thanks!");
-    expect(request.context?.[0]?.content).toContain("### 20. Out for delivery shown as Delivered");
-    expect(request.context?.[1]?.content).toContain("## Customer 1\n\nCustomer: It says delivered (1).");
+    expect(request.context?.[0]?.content).toContain("### 20. Waiting to unlock shown as Unlocked");
+    expect(request.context?.[1]?.content).toContain("## Player 1\n\nPlayer: It says unlocked (1).");
 
-    const long = "The label on My orders is wrong. ".repeat(20);
-    const lengthy = Array.from({ length: 20 }, (_, index) => conversation(index + 1, report("order-status", 40 - index, { whatHappened: long }), long.repeat(5)));
-    const big = issueWorkOrder({ area: "order-status", scope: "r1", appUrl: "https://help-desk.example.io", reports: lengthy, project: [] });
+    const long = "The label on My purchases is wrong. ".repeat(20);
+    const lengthy = Array.from({ length: 20 }, (_, index) => conversation(index + 1, report("purchase-status", 40 - index, { whatHappened: long }), long.repeat(5)));
+    const big = issueWorkOrder({ area: "purchase-status", scope: "r1", appUrl: "https://help-desk.example.io", reports: lengthy, project: [] });
     expect(big.brief.length).toBeLessThanOrEqual(8_000);
     expect(big.brief).toMatch(/\d+ more reports in BUG_REPORT\.md\./);
     expect(big.brief.endsWith("the support conversations in `.factory/context/transcripts.md`.")).toBe(true);
     for (const file of big.context ?? []) expect(file.content.length, file.path).toBeLessThanOrEqual(60_000);
-    expect(big.context?.[0]?.content).toContain("### 20. Out for delivery shown as Delivered");
+    expect(big.context?.[0]?.content).toContain("### 20. Waiting to unlock shown as Unlocked");
   });
 
   it("key work orders by simulation or by the first player ticket, so the two never collide", () => {
@@ -105,10 +105,10 @@ describe("software issues", () => {
 
     const request = issueWorkOrder({ area: "promo-codes", scope: playerScope("mhv3k2a1q9z4f2"), appUrl: "http://localhost:7440", reports: [player], project: [] });
     expect(request.origin).toEqual({ app: "help-desk", name: "Help Desk", label: "Promo codes · 1 ticket", url: "http://localhost:7440/#/p/mhv3k2a1q9z4f2", key: "player-mhv3k2a1q9z4f2:promo-codes" });
-    expect(request.brief).toMatch(/^Contoso Outdoors support received a report of the same problem, promo codes rejected at checkout, from 1 player in the Downhill Shop\./);
-    expect(request.brief).toContain("## The Downhill Shop");
+    expect(request.brief).toMatch(/^Contoso Outdoors support received a report of the same problem in the Downhill Shop, promo codes rejected at checkout, from 1 player in Downhill\./);
+    expect(request.brief).toContain("## From the game\n\n1 player opened Support in Downhill, which sent what they tried at the Downhill Shop's checkout, where `applyPromoCode` (`src/promotions.js`) checks the code.");
     expect(request.brief).toContain("## What they reported");
     expect(request.context?.[0]?.content).toContain("- Order: none (the player didn't buy)");
-    expect(request.context?.[1]?.content).toContain(`## Mona (Downhill Shop)\n\nPlayer: ${words}`);
+    expect(request.context?.[1]?.content).toContain(`## Mona (in Downhill)\n\nPlayer: ${words}`);
   });
 });

@@ -253,8 +253,8 @@ opens every one.
   </tr>
 </table>
 
-**One day at Contoso Outdoors.** Five of the demos share one storefront on launch day: **Downhill**'s shop rejects the
-launch code, **Help Desk** takes the support chat, **Data Desk** finds where checkout loses shoppers, **Incident
+**One day at Contoso Outdoors.** Five of the demos share Downhill's launch day: **Downhill**'s shop rejects the launch
+code, **Help Desk** takes the support rush, **Data Desk** finds what the open beta says about the game, **Incident
 Commander** handles a checkout crash, and the **Software Factory** turns all three into tested releases. The gallery's
 **Downhill Launch** tab lists them in order.
 
@@ -262,13 +262,16 @@ Commander** handles a checkout crash, and the **Software Factory** turns all thr
 <summary>The story, step by step</summary>
 
 1. **Downhill:** ride a run, then buy a new look in the game's shop. The launch offer's code is rejected at checkout,
-   which runs the store's own code, and **Contact support** opens a live chat.
-2. **Help Desk:** that ticket appears on the wall beside the simulated customers. Its refund waits for your approval,
-   and its report joins the customers' **Promo codes rejected at checkout**, which one click sends to the factory.
-3. **Data Desk:** the **Storefront checkout funnel** shows mobile shoppers with $40 to $49 carts dropping out at the
-   $5.99 shipping fee, and the insight goes to the factory as an experiment to build.
-4. **Incident Commander:** checkout's v1.4.2 crashes on expired coupons. Copilot triages, routes the fix through the
-   factory, and deploys when you approve it on the work order's **Deploy** gate.
+   which runs Contoso Outdoors' storefront code, and **Contact support** opens a live chat.
+2. **Help Desk:** that ticket appears on the wall beside the launch day's simulated players. Its refund waits for your
+   approval, and its report joins the players' **Promo codes rejected at checkout**, which one click sends to the
+   factory.
+3. **Data Desk:** the beta's **frame rate** shows Auto graphics quality running as slowly as High on integrated
+   graphics, and the insight goes to the factory as a fix to build. **Downhill shop sales** charts the rejected codes
+   live.
+4. **Incident Commander:** Downhill's order service, v1.4.2, crashes on expired codes such as the pre-registration
+   reward. Copilot triages, routes the fix through the factory, and deploys when you approve it on the work order's
+   **Deploy** gate.
 5. **Software Factory:** the bug, the insight, and the fix arrive as work orders, each showing where it came from, and
    go back as tested releases.
 
