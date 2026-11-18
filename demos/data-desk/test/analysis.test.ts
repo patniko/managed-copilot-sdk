@@ -9,7 +9,7 @@ import { AnalysisManager } from "../src/server/manager.js";
 import { Store } from "../src/server/store.js";
 import { event, FakePlatform, testConfig, type FakeSession } from "./fakes.js";
 
-const DATASET = "sample-coffee-sales";
+const DATASET = "sample-downhill-runs";
 const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
 
 /** Whether a promise is still pending after the event loop has had a chance to run. */
@@ -59,7 +59,7 @@ describe("an analysis", () => {
   it("starts on the shared runtime with Data Desk's tools and instructions", async () => {
     const { manager, id, session } = await started();
     const view = await manager.view(id);
-    expect(view).toMatchObject({ placement: "shared", title: "Coffee shop sales", datasetId: DATASET, busy: false, needsYou: false });
+    expect(view).toMatchObject({ placement: "shared", title: "Downhill beta runs", datasetId: DATASET, busy: false, needsYou: false });
     const config = session.config as { model?: string; tools?: { name: string; skipPermission?: boolean }[]; systemMessage?: { content: string } };
     expect(config.model).toBe("claude-sonnet-5");
     expect(config.tools?.map((tool) => [tool.name, tool.skipPermission])).toEqual([
@@ -68,7 +68,7 @@ describe("an analysis", () => {
       ["aggregate", true],
     ]);
     expect(config.systemMessage?.content).toContain("call request_sandbox first");
-    expect(config.systemMessage?.content).toContain("/workspace/data/coffee-sales.csv");
+    expect(config.systemMessage?.content).toContain("/workspace/data/downhill-beta-runs.csv");
   });
 
   it("asks the person before moving, then copies the dataset in before the agent's first command", async () => {
@@ -93,7 +93,7 @@ describe("an analysis", () => {
     expect(await pending(command)).toBe(true);
     release();
     await expect(command).resolves.toEqual({ kind: "approve-once" });
-    expect(platform.written).toEqual([{ sessionId: id, path: "data/coffee-sales.csv", bytes: expect.any(Number) }]);
+    expect(platform.written).toEqual([{ sessionId: id, path: "data/downhill-beta-runs.csv", bytes: expect.any(Number) }]);
 
     // Later commands and files don't copy it again.
     await expect(session.ask({ kind: "write", fileName: "chart.py" })).resolves.toEqual({ kind: "approve-once" });

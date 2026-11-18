@@ -175,8 +175,8 @@ with it).
 - [ ] On the factory's floor the work order starts from **From Help Desk**: the brief quotes the reports, and it brought
       `BUG_REPORT.md` and the `contoso-storefront` project. The release fixes the storefront with regression tests, and
       the Deliverable lists the files it changed.
-- [ ] Data Desk: pick **Storefront checkout funnel** and ask the suggested question. Copilot finds that mobile shoppers
-      with $40–$49 carts drop out at the shipping step.
+- [ ] Data Desk: pick **Downhill beta frame rate** and ask the suggested question. Copilot finds that on integrated
+      graphics, Auto runs about as slowly as High, and first-minute quits triple.
 - [ ] Select rows in Copilot's table and **Send to Software Factory** with what to build: the conversation shows the
       work order, and the factory's floor shows **From Data Desk** with `INSIGHT.md` and the data files.
 - [ ] Restart Help Desk (`aspire resource help-desk restart --apphost apphost.mts`): the wall still shows its issues'

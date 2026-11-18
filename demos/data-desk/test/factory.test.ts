@@ -20,29 +20,29 @@ import { event, FakeFactory, FakePlatform, PACKAGE_ROOT, testConfig } from "./fa
 const settle = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms));
 const datasets = new Datasets(join(PACKAGE_ROOT, "datasets"), mkdtempSync(join(tmpdir(), "desk-")), 1024 * 1024);
 datasets.load();
-const funnel = datasets.require("sample-checkout-funnel");
+const frameRate = datasets.require("sample-downhill-frame-rate");
 
-const ANSWER = "Mobile shoppers with **$40–$49** carts drop out at the shipping step, when the $5.99 fee appears.\n\n- 47% of them reach payment\n- 80% on desktop, 85% on mobile at $50–$74";
-const QUESTION = "Where do mobile shoppers drop out of checkout, by cart value?";
-const NOTE = "Build a free-shipping progress bar experiment for mobile carts under $50: variant assignment, the bar's copy and threshold logic, and the metrics to watch.";
+const ANSWER = "On integrated graphics, **Auto** runs about as slowly as High, at 28 fps.\n\n- Low holds 54 fps and Medium 42\n- 24% of Auto players quit in the first minute, against 8% on Low";
+const QUESTION = "On integrated graphics, how does Auto compare with the other quality settings?";
+const NOTE = "Make Downhill's Auto graphics quality adaptive: step down a preset when the frame rate stays under 30 fps, step back up above 50, with tests and the metrics to watch.";
 
-function result(id: string, title: string, rows: string[][], columns = ["device", "cart_value", "sum(reached_shipping)", "sum(reached_payment)"]): ResultView {
+function result(id: string, title: string, rows: string[][], columns = ["gpu", "quality", "avg(median_fps)", "avg(first_minute_quit_rate)"]): ResultView {
   return { id, title, columns, rows, total: rows.length, unit: "group", at: "2026-11-04T10:00:00.000Z" };
 }
 
-const byDevice = result("call-1", "Funnel by device and cart value", [
-  ["desktop", "$40–$49", "3434", "2754"],
-  ["mobile", "$40–$49", "4790", "2246"],
-  ["mobile", "$50–$74", "4851", "4118"],
+const byQuality = result("call-1", "Frame rate by quality on integrated graphics", [
+  ["integrated", "Auto", "27.75", "0.243"],
+  ["integrated", "Low", "53.7", "0.082"],
+  ["integrated", "High", "26.5", "0.243"],
 ]);
-const chart: OutputFile = { path: "drop-off.svg", version: 2, size: 120, publishedAt: "2026-11-04T10:01:00.000Z", kind: "chart" };
-const SVG = '<svg xmlns="http://www.w3.org/2000/svg"><title>Drop-off</title></svg>';
+const chart: OutputFile = { path: "frame-rate-by-quality.svg", version: 2, size: 120, publishedAt: "2026-11-04T10:01:00.000Z", kind: "chart" };
+const SVG = '<svg xmlns="http://www.w3.org/2000/svg"><title>Frame rate by quality</title></svg>';
 
-function source(overrides: Partial<HandoffSource> = {}, outputs: Record<string, string | Uint8Array> = { "drop-off.svg": SVG }): HandoffSource {
+function source(overrides: Partial<HandoffSource> = {}, outputs: Record<string, string | Uint8Array> = { "frame-rate-by-quality.svg": SVG }): HandoffSource {
   return {
-    dataset: funnel,
-    results: [byDevice],
-    origins: new Map([["call-1", { tool: "aggregate", detail: "sum(reached_shipping), sum(reached_payment) by device, cart_value" }]]),
+    dataset: frameRate,
+    results: [byQuality],
+    origins: new Map([["call-1", { tool: "aggregate", detail: "avg(median_fps), avg(first_minute_quit_rate) by gpu, quality" }]]),
     answer: { text: ANSWER, question: QUESTION },
     readOutput: async (path) => {
       const content = outputs[path];
@@ -55,7 +55,7 @@ function source(overrides: Partial<HandoffSource> = {}, outputs: Record<string, 
   };
 }
 
-const request = (include: Record<string, unknown>, extra: Record<string, unknown> = {}) => parseHandoffRequest({ title: "Free-shipping progress bar for mobile carts", note: NOTE, include, ...extra });
+const request = (include: Record<string, unknown>, extra: Record<string, unknown> = {}) => parseHandoffRequest({ title: "Adaptive Auto quality for integrated GPUs", note: NOTE, include, ...extra });
 
 describe("tables for the factory", () => {
   it("are CSV with quotes where needed, and read back the same", () => {
@@ -83,70 +83,70 @@ describe("a hand-off to Software Factory", () => {
   it("sends INSIGHT.md, the table on screen, the selected rows, the charts, and the dataset", async () => {
     const handoff = await composeHandoff(
       source(),
-      request({ view: { kind: "result", resultId: "call-1" }, selections: [{ table: { kind: "result", resultId: "call-1" }, rows: [2, 1, 2] }], outputs: ["drop-off.svg"], dataset: true, answer: true }),
+      request({ view: { kind: "result", resultId: "call-1" }, selections: [{ table: { kind: "result", resultId: "call-1" }, rows: [2, 1, 2] }], outputs: ["frame-rate-by-quality.svg"], dataset: true, answer: true }),
       new Date("2026-11-10T12:00:00Z"),
     );
     expect(handoff.files.map((file) => file.path)).toEqual([
       "INSIGHT.md",
-      "data/funnel-by-device-and-cart-value.csv",
-      "data/funnel-by-device-and-cart-value-selection.csv",
-      "artifacts/drop-off.svg",
-      "data/checkout-funnel.csv",
+      "data/frame-rate-by-quality-on-integrated-graphics.csv",
+      "data/frame-rate-by-quality-on-integrated-graphics-selection.csv",
+      "artifacts/frame-rate-by-quality.svg",
+      "data/downhill-beta-frame-rate.csv",
     ]);
     const content = (path: string) => handoff.files.find((file) => file.path === path)!.content;
-    expect(content("data/funnel-by-device-and-cart-value.csv")).toBe(toCsv(byDevice.columns, byDevice.rows));
-    expect(content("data/funnel-by-device-and-cart-value-selection.csv")).toBe(toCsv(byDevice.columns, [byDevice.rows[1]!, byDevice.rows[2]!]));
-    expect(content("artifacts/drop-off.svg")).toBe(SVG);
-    expect(content("data/checkout-funnel.csv")).toBe(funnel.bytes().toString("utf8"));
+    expect(content("data/frame-rate-by-quality-on-integrated-graphics.csv")).toBe(toCsv(byQuality.columns, byQuality.rows));
+    expect(content("data/frame-rate-by-quality-on-integrated-graphics-selection.csv")).toBe(toCsv(byQuality.columns, [byQuality.rows[1]!, byQuality.rows[2]!]));
+    expect(content("artifacts/frame-rate-by-quality.svg")).toBe(SVG);
+    expect(content("data/downhill-beta-frame-rate.csv")).toBe(frameRate.bytes().toString("utf8"));
     // The factory takes descriptions up to 200 characters.
     expect(handoff.files.every((file) => file.description && file.description.length <= 200)).toBe(true);
-    expect(handoff.files[1]!.description).toBe("Copilot's aggregate of the dataset: sum(reached_shipping), sum(reached_payment) by device, cart_value; 3 groups; on screen when sent");
+    expect(handoff.files[1]!.description).toBe("Copilot's aggregate of the dataset: avg(median_fps), avg(first_minute_quit_rate) by gpu, quality; 3 groups; on screen when sent");
 
     const insight = content("INSIGHT.md");
-    expect(insight).toContain("# Free-shipping progress bar for mobile carts\n");
-    expect(insight).toContain("Sent from Data Desk on 2026-11-10, from an analysis of **Storefront checkout funnel**: http://localhost:7430/#/a/session-1");
+    expect(insight).toContain("# Adaptive Auto quality for integrated GPUs\n");
+    expect(insight).toContain("Sent from Data Desk on 2026-11-10, from an analysis of **Downhill beta frame rate**: http://localhost:7430/#/a/session-1");
     expect(insight).toContain(`## What to build\n\n${NOTE}\n`);
-    expect(insight).toContain(`Copilot's latest answer in the analysis, to "${QUESTION}":\n\n> Mobile shoppers with **$40–$49** carts`);
-    expect(insight).toContain("> - 47% of them reach payment");
-    expect(insight).toContain("**Storefront checkout funnel**: Contoso Outdoors, 12 weeks. 180 rows in `checkout-funnel.csv`.");
-    expect(insight).toContain("| `week` | date | 2025-07-07 to 2025-09-22 |");
-    expect(insight).toContain("| `device` | text | desktop, mobile, tablet |");
+    expect(insight).toContain(`Copilot's latest answer in the analysis, to "${QUESTION}":\n\n> On integrated graphics, **Auto** runs about as slowly as High`);
+    expect(insight).toContain("> - Low holds 54 fps and Medium 42");
+    expect(insight).toContain("**Downhill beta frame rate**: Open beta, by course, GPU, and quality. 90 rows in `downhill-beta-frame-rate.csv`.");
+    expect(insight).toContain("| `median_fps` | number | 13.8 to 60 |");
+    expect(insight).toContain("| `gpu` | text | high-end, integrated, mid-range |");
     expect(insight).toContain(
-      '- `data/funnel-by-device-and-cart-value.csv`: "Funnel by device and cart value": Copilot\'s aggregate of the dataset with Data Desk\'s `aggregate` tool (sum(reached_shipping), sum(reached_payment) by device, cart_value); 3 groups. On screen in Data Desk when this was sent.',
+      '- `data/frame-rate-by-quality-on-integrated-graphics.csv`: "Frame rate by quality on integrated graphics": Copilot\'s aggregate of the dataset with Data Desk\'s `aggregate` tool (avg(median_fps), avg(first_minute_quit_rate) by gpu, quality); 3 groups. On screen in Data Desk when this was sent.',
     );
-    expect(insight).toContain('- `data/funnel-by-device-and-cart-value-selection.csv`: 2 rows the person selected in "Funnel by device and cart value".');
-    expect(insight).toContain("- `artifacts/drop-off.svg`: A chart Copilot drew with Python in its sandbox (`outputs/drop-off.svg`, version 2).");
-    expect(insight).toContain("- `data/checkout-funnel.csv`: The whole dataset, 180 rows.");
+    expect(insight).toContain('- `data/frame-rate-by-quality-on-integrated-graphics-selection.csv`: 2 rows the person selected in "Frame rate by quality on integrated graphics".');
+    expect(insight).toContain("- `artifacts/frame-rate-by-quality.svg`: A chart Copilot drew with Python in its sandbox (`outputs/frame-rate-by-quality.svg`, version 2).");
+    expect(insight).toContain("- `data/downhill-beta-frame-rate.csv`: The whole dataset, 90 rows.");
 
-    expect(handoff.brief.startsWith(`${NOTE}\n\n---\n\n**From Data Desk:** an analysis of Storefront checkout funnel (Contoso Outdoors, 12 weeks), 180 rows.`)).toBe(true);
-    expect(handoff.brief).toContain(`Copilot's insight, asked "${QUESTION}":\n\n> Mobile shoppers with **$40–$49** carts`);
+    expect(handoff.brief.startsWith(`${NOTE}\n\n---\n\n**From Data Desk:** an analysis of Downhill beta frame rate (Open beta, by course, GPU, and quality), 90 rows.`)).toBe(true);
+    expect(handoff.brief).toContain(`Copilot's insight, asked "${QUESTION}":\n\n> On integrated graphics, **Auto** runs about as slowly as High`);
     expect(handoff.brief).toContain("Read `.factory/context/INSIGHT.md` first");
-    expect(handoff.brief).toContain("`.factory/context/data/funnel-by-device-and-cart-value.csv`, `.factory/context/data/funnel-by-device-and-cart-value-selection.csv`");
+    expect(handoff.brief).toContain("`.factory/context/data/frame-rate-by-quality-on-integrated-graphics.csv`, `.factory/context/data/frame-rate-by-quality-on-integrated-graphics-selection.csv`");
     expect(handoff.brief.length).toBeGreaterThanOrEqual(20);
     expect(handoff.brief.length).toBeLessThanOrEqual(8_000);
-    expect(handoff.items).toEqual(["Funnel by device and cart value (3 groups)", "2 selected rows of Funnel by device and cart value", "drop-off.svg", "checkout-funnel.csv (180 rows)", "Copilot's answer"]);
+    expect(handoff.items).toEqual(["Frame rate by quality on integrated graphics (3 groups)", "2 selected rows of Frame rate by quality on integrated graphics", "frame-rate-by-quality.svg", "downhill-beta-frame-rate.csv (90 rows)", "Copilot's answer"]);
   });
 
   it("sends the dataset's rows the grid shows, and names each file once", async () => {
-    const first = await composeHandoff(source(), request({ view: { kind: "dataset", rows: 50 }, selections: [{ table: { kind: "dataset" }, rows: [0, 179] }] }));
-    expect(first.files.map((file) => file.path)).toEqual(["INSIGHT.md", "data/checkout-funnel-first-50-rows.csv", "data/checkout-funnel-selection.csv"]);
+    const first = await composeHandoff(source(), request({ view: { kind: "dataset", rows: 50 }, selections: [{ table: { kind: "dataset" }, rows: [0, 89] }] }));
+    expect(first.files.map((file) => file.path)).toEqual(["INSIGHT.md", "data/downhill-beta-frame-rate-first-50-rows.csv", "data/downhill-beta-frame-rate-selection.csv"]);
     expect(first.files[1]!.content.trimEnd().split("\n")).toHaveLength(51);
-    expect(first.files[2]!.content.trimEnd().split("\n").slice(1)).toEqual([funnel.table().rows[0]!.join(","), funnel.table().rows[179]!.join(",")]);
-    expect(first.items).toEqual(["The first 50 rows of checkout-funnel.csv", "2 selected rows of checkout-funnel.csv"]);
+    expect(first.files[2]!.content.trimEnd().split("\n").slice(1)).toEqual([frameRate.table().rows[0]!.join(","), frameRate.table().rows[89]!.join(",")]);
+    expect(first.items).toEqual(["The first 50 rows of downhill-beta-frame-rate.csv", "2 selected rows of downhill-beta-frame-rate.csv"]);
     // No answer included: the brief and INSIGHT.md say what to build without one.
     expect(first.files[0]!.content).toContain("Not included: what to build, above, says what matters.");
     expect(first.brief).not.toContain("Copilot's insight");
 
     // The grid showed every row: that's the dataset. Sent whole as well, the view isn't sent twice.
     const all = await composeHandoff(source(), request({ view: { kind: "dataset", rows: 200 } }));
-    expect(all.files.map((file) => file.path)).toEqual(["INSIGHT.md", "data/checkout-funnel.csv"]);
+    expect(all.files.map((file) => file.path)).toEqual(["INSIGHT.md", "data/downhill-beta-frame-rate.csv"]);
     const whole = await composeHandoff(source(), request({ view: { kind: "dataset", rows: 50 }, dataset: true }));
-    expect(whole.files.map((file) => file.path)).toEqual(["INSIGHT.md", "data/checkout-funnel.csv"]);
-    expect(whole.files[0]!.content).toContain("- `data/checkout-funnel.csv`: The whole dataset, 180 rows (Data Desk's grid showed its first 50 rows).");
+    expect(whole.files.map((file) => file.path)).toEqual(["INSIGHT.md", "data/downhill-beta-frame-rate.csv"]);
+    expect(whole.files[0]!.content).toContain("- `data/downhill-beta-frame-rate.csv`: The whole dataset, 90 rows (Data Desk's grid showed its first 50 rows).");
 
-    const twins = source({ results: [byDevice, result("call-2", "Funnel by device and cart value", [["tablet", "$40–$49", "1", "1"]])] });
+    const twins = source({ results: [byQuality, result("call-2", "Frame rate by quality on integrated graphics", [["mid-range", "Auto", "57.45", "0.078"]])] });
     const named = await composeHandoff(twins, request({ view: { kind: "result", resultId: "call-1" }, results: ["call-1", "call-2"] }));
-    expect(named.files.map((file) => file.path)).toEqual(["INSIGHT.md", "data/funnel-by-device-and-cart-value.csv", "data/funnel-by-device-and-cart-value-2.csv"]);
+    expect(named.files.map((file) => file.path)).toEqual(["INSIGHT.md", "data/frame-rate-by-quality-on-integrated-graphics.csv", "data/frame-rate-by-quality-on-integrated-graphics-2.csv"]);
   });
 
   it("keeps to the factory's limits, and says what to send less of", async () => {
@@ -202,7 +202,7 @@ describe("a hand-off to Software Factory", () => {
   });
 
   it("quotes a long insight in short in the brief, ending at a sentence", () => {
-    const long = `${"The shipping fee drives mobile shoppers away. ".repeat(60)}`;
+    const long = `${"Auto stays slow on integrated graphics. ".repeat(60)}`;
     const cut = shorten(long, 300);
     expect(cut.length).toBeLessThanOrEqual(302);
     expect(cut.endsWith(". …")).toBe(true);
@@ -277,14 +277,14 @@ describe("where a work order says it came from", () => {
   });
 
   it("names the analysis and its dataset, once when they're the same", () => {
-    expect(originLabel("Storefront checkout funnel", "Storefront checkout funnel")).toBe("Storefront checkout funnel");
-    expect(originLabel("Mobile drop-off", "Storefront checkout funnel")).toBe("Mobile drop-off · Storefront checkout funnel");
+    expect(originLabel("Downhill beta frame rate", "Downhill beta frame rate")).toBe("Downhill beta frame rate");
+    expect(originLabel("Auto on integrated GPUs", "Downhill beta frame rate")).toBe("Auto on integrated GPUs · Downhill beta frame rate");
     expect(originLabel("x".repeat(200), "Data")).toHaveLength(120);
   });
 });
 
 function routing(overrides: Partial<StoredRouting> = {}): StoredRouting {
-  return { workOrderId: "wo_12", number: 12, title: "Free-shipping progress bar", url: "http://factory.test/#/wo/wo_12", status: "queued", sentAt: "2026-11-04T10:00:30.000Z", items: ["Copilot's answer"], key: "session-1:1", ...overrides };
+  return { workOrderId: "wo_12", number: 12, title: "Adaptive Auto quality", url: "http://factory.test/#/wo/wo_12", status: "queued", sentAt: "2026-11-04T10:00:30.000Z", items: ["Copilot's answer"], key: "session-1:1", ...overrides };
 }
 
 describe("following the work orders Data Desk sent", () => {
@@ -295,7 +295,7 @@ describe("following the work orders Data Desk sent", () => {
 
   beforeEach(() => {
     store = new Store(mkdtempSync(join(tmpdir(), "desk-")));
-    store.add({ id: "session-1", datasetId: "sample-checkout-funnel", title: "Storefront checkout funnel" });
+    store.add({ id: "session-1", datasetId: "sample-downhill-frame-rate", title: "Downhill beta frame rate" });
     factory = new FakeFactory();
     changed = [];
     trackers = [];
@@ -402,17 +402,17 @@ describe("sending an analysis to Software Factory", () => {
     const store = new Store(dataDir);
     const manager = new AnalysisManager(platform, config, store, local, hub, factory, 20);
     manager.start();
-    const view = await manager.create("sample-checkout-funnel");
+    const view = await manager.create("sample-downhill-frame-rate");
     const session = platform.sessions.get(view.id)!;
     session.emit(event("user.message", { content: QUESTION }));
-    session.emit(event("tool.execution_start", { toolCallId: "call-1", toolName: "aggregate", arguments: { title: byDevice.title, groupBy: ["device", "cart_value"], metrics: [{ fn: "sum", column: "reached_shipping" }] } }));
-    session.emit(event("tool.execution_complete", { toolCallId: "call-1", success: true, result: { content: JSON.stringify({ title: byDevice.title, matched: 3, columns: byDevice.columns, rows: byDevice.rows }) } }));
+    session.emit(event("tool.execution_start", { toolCallId: "call-1", toolName: "aggregate", arguments: { title: byQuality.title, groupBy: ["gpu", "quality"], metrics: [{ fn: "avg", column: "median_fps" }] } }));
+    session.emit(event("tool.execution_complete", { toolCallId: "call-1", success: true, result: { content: JSON.stringify({ title: byQuality.title, matched: 3, columns: byQuality.columns, rows: byQuality.rows }) } }));
     session.emit(event("assistant.message", { messageId: "m1", content: ANSWER }));
     session.emit(event("session.idle", {}, { ephemeral: true }));
     return { manager, factory, store, id: view.id, close: () => manager.close() };
   }
 
-  const body = { title: "Free-shipping progress bar for mobile carts", note: NOTE, include: { view: { kind: "result", resultId: "call-1" }, answer: true } };
+  const body = { title: "Adaptive Auto quality for integrated GPUs", note: NOTE, include: { view: { kind: "result", resultId: "call-1" }, answer: true } };
 
   it("creates a work order from the analysis, records it, and follows it", async () => {
     const { manager, factory, store, id, close } = await started();
@@ -421,20 +421,20 @@ describe("sending an analysis to Software Factory", () => {
       const request = factory.created[0]!;
       expect(Object.keys(request).sort()).toEqual(["brief", "context", "maxReviewRounds", "origin", "title"]);
       expect(request).toMatchObject({
-        title: "Free-shipping progress bar for mobile carts",
+        title: "Adaptive Auto quality for integrated GPUs",
         maxReviewRounds: 2,
-        origin: { app: "data-desk", name: "Data Desk", label: "Storefront checkout funnel", url: `http://localhost:7430/#/a/${id}`, key: `${id}:1` },
+        origin: { app: "data-desk", name: "Data Desk", label: "Downhill beta frame rate", url: `http://localhost:7430/#/a/${id}`, key: `${id}:1` },
       });
-      expect(request.context.map((file) => file.path)).toEqual(["INSIGHT.md", "data/funnel-by-device-and-cart-value.csv"]);
+      expect(request.context.map((file) => file.path)).toEqual(["INSIGHT.md", "data/frame-rate-by-quality-on-integrated-graphics.csv"]);
       expect(request.brief.startsWith(NOTE)).toBe(true);
       expect(sent.routing).toEqual({
         workOrderId: "wo_12",
         number: 12,
-        title: "Free-shipping progress bar for mobile carts",
+        title: "Adaptive Auto quality for integrated GPUs",
         url: "http://factory.test/#/wo/wo_12",
         status: "queued",
         sentAt: expect.any(String),
-        items: ["Funnel by device and cart value (3 groups)", "Copilot's answer"],
+        items: ["Frame rate by quality on integrated graphics (3 groups)", "Copilot's answer"],
       });
       expect(sent.analysis.items.map((item) => item.kind)).toEqual(["user", "step", "assistant", "factory"]);
       expect(store.get(id)!.factory).toEqual([expect.objectContaining({ workOrderId: "wo_12", key: `${id}:1`, after: "m1" })]);

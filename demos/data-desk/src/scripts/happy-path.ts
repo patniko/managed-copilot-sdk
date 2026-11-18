@@ -6,15 +6,15 @@
  *   pnpm happy-path --keep                             # leave the analysis (and its sandbox) for a look in the UI
  *   pnpm happy-path --dataset live-downhill-sales      # Downhill's shop sales, fetched now (Data Desk needs DOWNHILL_URL)
  *
- * It starts an analysis of the coffee sales sample, asks a question Data Desk's tools answer on the shared runtime,
- * then asks for a chart: the agent requests a sandbox, the script approves, and the same session moves and draws it.
- * Two messages, so about two premium requests. The analysis is deleted at the end (its sandbox with it) unless --keep.
+ * It starts an analysis of the Downhill beta's runs by course, asks a question Data Desk's tools answer on the shared
+ * runtime, then asks for a chart: the agent requests a sandbox, the script approves, and the same session moves and draws
+ * it. Two messages, so about two premium requests. The analysis is deleted at the end (its sandbox with it) unless --keep.
  * Exits 0 when every check passes; 1 otherwise.
  */
 import { parseArgs } from "node:util";
 import type { AnalysisView, ApiErrorBody, ChatItem, DeskState } from "../shared/types.js";
 
-const { values } = parseArgs({ options: { url: { type: "string" }, keep: { type: "boolean", default: false }, dataset: { type: "string", default: "sample-coffee-sales" } } });
+const { values } = parseArgs({ options: { url: { type: "string" }, keep: { type: "boolean", default: false }, dataset: { type: "string", default: "sample-downhill-runs" } } });
 const offset = Number(process.env.MANAGED_COPILOT_PORT_OFFSET ?? 0);
 const base = (values.url ?? `http://localhost:${7430 + (Number.isInteger(offset) ? offset : 0)}`).replace(/\/+$/, "");
 const started = Date.now();

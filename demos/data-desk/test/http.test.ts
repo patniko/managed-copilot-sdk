@@ -52,7 +52,7 @@ describe("the API", () => {
     const { url } = await serve();
     expect(await (await fetch(`${url}/api/health`)).json()).toEqual({ status: "ok", platform: "connected" });
     const state = (await (await fetch(`${url}/api/state`)).json()) as DeskState;
-    expect(state.datasets.map((dataset) => dataset.id)).toEqual(["sample-checkout-funnel", "sample-coffee-sales", "sample-bike-rides", "sample-support-tickets"]);
+    expect(state.datasets.map((dataset) => dataset.id)).toEqual(["sample-downhill-runs", "sample-downhill-frame-rate", "sample-downhill-tickets"]);
     expect(state.remoteSamples).toEqual([]);
     expect(state.environments.map((environment) => environment.name)).toEqual(["data-desk", "data-desk-python"]);
     expect(state.attachCommand).toBe("npx managed-copilot attach {sessionId}");
@@ -63,9 +63,9 @@ describe("the API", () => {
 
   it("pages through a dataset's rows", async () => {
     const { url } = await serve();
-    const page = (await (await fetch(`${url}/api/datasets/sample-coffee-sales/rows?offset=140&limit=10`)).json()) as { offset: number; total: number; rows: string[][] };
-    expect(page).toMatchObject({ offset: 140, total: 144 });
-    expect(page.rows).toHaveLength(4);
+    const page = (await (await fetch(`${url}/api/datasets/sample-downhill-frame-rate/rows?offset=85&limit=10`)).json()) as { offset: number; total: number; rows: string[][] };
+    expect(page).toMatchObject({ offset: 85, total: 90 });
+    expect(page.rows).toHaveLength(5);
     expect((await fetch(`${url}/api/datasets/missing/rows`)).status).toBe(404);
   });
 
@@ -81,10 +81,10 @@ describe("the API", () => {
 
   it("starts an analysis, takes messages, and answers a move request", async () => {
     const { url, platform } = await serve();
-    const created = await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "sample-bike-rides" }) });
+    const created = await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "sample-downhill-tickets" }) });
     expect(created.status).toBe(201);
     const view = (await created.json()) as AnalysisView;
-    expect(view).toMatchObject({ title: "City bike rides", placement: "shared" });
+    expect(view).toMatchObject({ title: "Downhill support tickets", placement: "shared" });
     expect((await json(`${url}/api/analyses/${view.id}/messages`, { method: "POST", body: JSON.stringify({ prompt: "Hi" }) })).status).toBe(202);
     expect(platform.sessions.get(view.id)?.sent).toEqual([{ prompt: "Hi" }]);
     const move = await json(`${url}/api/analyses/${view.id}/move`, { method: "POST", body: JSON.stringify({ approve: true }) });
@@ -96,7 +96,7 @@ describe("the API", () => {
 
   it("serves published charts as images that can't run as pages", async () => {
     const { url, platform } = await serve();
-    const view = (await (await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "sample-coffee-sales" }) })).json()) as AnalysisView;
+    const view = (await (await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "sample-downhill-runs" }) })).json()) as AnalysisView;
     platform.promote(view.id, "sbx_1");
     platform.artifacts.set(view.id, [{ id: "a1", path: "chart.svg", size: 10, digest: "d", turnId: "t", version: 1, state: "published", publishedAt: "2026-11-04T10:00:00.000Z" }]);
     platform.publish({ type: "artifact.published", sessionId: view.id, data: {} });
@@ -132,7 +132,7 @@ describe("the API", () => {
   it("only attaches Copilot CLI to its own analyses", async () => {
     const { url } = await serve();
     expect((await fetch(`${url}/api/analyses/someone-else/attach`, { method: "POST" })).status).toBe(404);
-    const view = (await (await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "sample-coffee-sales" }) })).json()) as AnalysisView;
+    const view = (await (await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "sample-downhill-runs" }) })).json()) as AnalysisView;
     const attach = (await (await fetch(`${url}/api/analyses/${view.id}/attach`, { method: "POST" })).json()) as { command: string; launched: boolean };
     expect(attach).toMatchObject({ command: `npx managed-copilot attach ${view.id}`, launched: false });
   });
@@ -175,25 +175,25 @@ describe("the API", () => {
 });
 
 describe("Send to Software Factory", () => {
-  const NOTE = "Build a free-shipping progress bar experiment for mobile carts under $50, and the metrics to watch.";
+  const NOTE = "Make Downhill's Auto graphics quality adaptive on integrated graphics, and the metrics to watch.";
   const RESULT = {
-    title: "Funnel by device and cart value",
+    title: "Frame rate by quality on integrated graphics",
     matched: 2,
-    columns: ["device", "cart_value", "sum(reached_shipping)", "sum(reached_payment)"],
+    columns: ["quality", "avg(median_fps)", "avg(first_minute_quit_rate)"],
     rows: [
-      ["desktop", "$40–$49", "3434", "2754"],
-      ["mobile", "$40–$49", "4790", "2246"],
+      ["Auto", "27.75", "0.243"],
+      ["Low", "53.7", "0.082"],
     ],
   };
 
-  /** An analysis of the checkout funnel in which Copilot answered with a table. */
+  /** An analysis of the beta's frame rate in which Copilot answered with a table. */
   async function analyzed(url: string, platform: FakePlatform): Promise<string> {
-    const view = (await (await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "sample-checkout-funnel" }) })).json()) as AnalysisView;
+    const view = (await (await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "sample-downhill-frame-rate" }) })).json()) as AnalysisView;
     const session = platform.sessions.get(view.id)!;
-    session.emit(event("user.message", { content: "Where do mobile shoppers drop out of checkout, by cart value?" }));
-    session.emit(event("tool.execution_start", { toolCallId: "call-1", toolName: "aggregate", arguments: { title: RESULT.title, groupBy: ["device", "cart_value"] } }));
+    session.emit(event("user.message", { content: "On integrated graphics, how does Auto compare with the other quality settings?" }));
+    session.emit(event("tool.execution_start", { toolCallId: "call-1", toolName: "aggregate", arguments: { title: RESULT.title, groupBy: ["quality"] } }));
     session.emit(event("tool.execution_complete", { toolCallId: "call-1", success: true, result: { content: JSON.stringify(RESULT) } }));
-    session.emit(event("assistant.message", { messageId: "m1", content: "Mobile shoppers with $40–$49 carts drop out at the shipping step." }));
+    session.emit(event("assistant.message", { messageId: "m1", content: "On integrated graphics, Auto runs about as slowly as High." }));
     session.emit(event("session.idle", {}, { ephemeral: true }));
     return view.id;
   }
@@ -225,7 +225,7 @@ describe("Send to Software Factory", () => {
       url,
       id,
       {
-        title: "Free-shipping progress bar for mobile carts",
+        title: "Adaptive Auto quality for integrated GPUs",
         note: NOTE,
         include: { view: { kind: "result", resultId: "call-1" }, selections: [{ table: { kind: "result", resultId: "call-1" }, rows: [1] }], dataset: true, answer: true },
       },
@@ -238,16 +238,16 @@ describe("Send to Software Factory", () => {
 
     const body = factory.created[0]!;
     expect(body).toMatchObject({
-      title: "Free-shipping progress bar for mobile carts",
+      title: "Adaptive Auto quality for integrated GPUs",
       maxReviewRounds: 2,
-      origin: { app: "data-desk", name: "Data Desk", label: "Storefront checkout funnel", url: `${url}/#/a/${encodeURIComponent(id)}`, key: `${id}:1` },
+      origin: { app: "data-desk", name: "Data Desk", label: "Downhill beta frame rate", url: `${url}/#/a/${encodeURIComponent(id)}`, key: `${id}:1` },
     });
     expect(body).not.toHaveProperty("mode");
     expect(body).not.toHaveProperty("project");
-    expect(body.context.map((file) => file.path)).toEqual(["INSIGHT.md", "data/funnel-by-device-and-cart-value.csv", "data/funnel-by-device-and-cart-value-selection.csv", "data/checkout-funnel.csv"]);
-    expect(body.context[2]!.content).toBe("device,cart_value,sum(reached_shipping),sum(reached_payment)\nmobile,$40–$49,4790,2246\n");
+    expect(body.context.map((file) => file.path)).toEqual(["INSIGHT.md", "data/frame-rate-by-quality-on-integrated-graphics.csv", "data/frame-rate-by-quality-on-integrated-graphics-selection.csv", "data/downhill-beta-frame-rate.csv"]);
+    expect(body.context[2]!.content).toBe("quality,avg(median_fps),avg(first_minute_quit_rate)\nLow,53.7,0.082\n");
     expect(body.brief.startsWith(NOTE)).toBe(true);
-    expect(body.brief).toContain("> Mobile shoppers with $40–$49 carts drop out at the shipping step.");
+    expect(body.brief).toContain("> On integrated graphics, Auto runs about as slowly as High.");
 
     // Without an Origin header, the link uses the Host.
     await send(url, id, { title: "Again", note: NOTE });

@@ -265,8 +265,9 @@ Commander** handles a checkout crash, and the **Software Factory** turns all thr
    which runs the store's own code, and **Contact support** opens a live chat.
 2. **Help Desk:** that ticket appears on the wall beside the simulated customers. Its refund waits for your approval,
    and its report joins the customers' **Promo codes rejected at checkout**, which one click sends to the factory.
-3. **Data Desk:** the **Storefront checkout funnel** shows mobile shoppers with $40 to $49 carts dropping out at the
-   $5.99 shipping fee, and the insight goes to the factory as an experiment to build.
+3. **Data Desk:** the beta's **frame rate** shows Auto graphics quality running as slowly as High on integrated
+   graphics, and the insight goes to the factory as a fix to build. **Downhill shop sales** charts the rejected codes
+   live.
 4. **Incident Commander:** checkout's v1.4.2 crashes on expired coupons. Copilot triages, routes the fix through the
    factory, and deploys when you approve it on the work order's **Deploy** gate.
 5. **Software Factory:** the bug, the insight, and the fix arrive as work orders, each showing where it came from, and
