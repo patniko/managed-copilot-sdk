@@ -212,6 +212,7 @@ and independent code reviews, as for Azure.
 ## Not in scope
 
 - Bedrock or other AWS model routes.
-- Kubernetes (EKS) or GCP targets, though the publish split should leave room for them.
+- Kubernetes (EKS) or GCP targets, though the publish split should leave room for them. AKS has its own roadmap in
+  [deployments/kubernetes](../kubernetes/README.md), with a sandbox provider meant to work on EKS later.
 - Multi-region or multi-writer HA; AWS stays single-writer, like Azure.
 - Moving sessions or ledgers between clouds.
