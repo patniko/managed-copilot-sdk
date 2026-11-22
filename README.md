@@ -305,7 +305,7 @@ Commander** handles a checkout crash, and the **Software Factory** turns all thr
 | --- | --- |
 | `libraries/` | The SDK, Aspire integration, CLI, shared protocol, UI theme, and the demos' shared logger |
 | `services/` | The gateway, operator console, sandbox image, and egress proxy |
-| `deployments/azure` | The Azure target for `aspire deploy` (AWS is a [roadmap](deployments/aws/README.md)) |
+| `deployments/azure` | The Azure Container Apps target for `aspire deploy` ([AWS](deployments/aws/README.md) and [AKS](deployments/kubernetes/README.md) are roadmaps) |
 | `environments/` | Per-environment agents, skills, and instructions for the root AppHost |
 | `demos/`, `walkthroughs/`, `tests/snippets`, `tests/qa` | The demo apps, walkthroughs, spec snippets, and QA checks |
 | `apphost.mts` | The root AppHost that `aspire run` starts |
